@@ -70,7 +70,7 @@ Pipeline 级的手动输入变量定义：名称、类型（string/number/bool/e
 
 ### 内置变量（Built-in Variable）
 
-以 `SISY_` 为保留前缀的 8 个系统变量（构建号、pipeline/项目/任务/阶段名、commit、分支、工作区路径），与用户参数同用 `${name}` 语法引用，可在任意字符串字段中使用，Server 端下发前完成解析。
+以 `SISY_` 为保留前缀的 8 个系统变量（构建号、pipeline/项目/任务/阶段名、commit、分支、工作区路径），与用户参数同用 `${name}` 语法引用，可在任意字符串字段中使用。除工作区路径（`SISY_WORKSPACE`，Agent 端在步骤执行前替换，when 表达式禁用）外，其余均在 Server 端下发前解析完毕。
 
 ### 环境变量（Env）
 
@@ -104,9 +104,13 @@ Pipeline 定义每次保存递增的版本号；编辑历史记录操作人与�
 
 Server 端的顶层组织单元，绑定一个 git 或 svn 仓库 URL，关联 Pipeline 与触发器。
 
+### 工作区（Workspace）
+
+Agent 上单个任务的执行目录：`<工作区根>/<pipeline>/<job>/`。同 job 的再次构建与从失败任务重跑复用同一工作区；job 改名即新工作区。复用工作区上 checkout 一律增量（保留 `.git` 与被忽略文件）；清理仅 UI 手动（经通道下发指令），永不触碰缓存目录。各 Agent 的工作区彼此独立、互不同步；v1 仅目录级隔离，并发任务间无 OS 用户/权限边界。
+
 ### 缓存（Cache）
 
-Agent 端按 key 复用的目录（如 ~/.cargo、node_modules），减少重复下载与构建。
+Agent 端按 key 复用的目录（如 ~/.cargo、node_modules），位于工作区之外的独立缓存根，减少重复下载与构建。
 
 ### 用户 / 角色（User / Role）
 
@@ -118,4 +122,16 @@ Pipeline 完成时发出的消息（v1：邮件）。触发规则按 pipeline �
 
 ### 初始化引导（Setup Wizard）
 
-首次部署后 web UI 的引导流程：创建管理员、注册第一个 Agent、创建第一个项目。
+首次部署后 web UI 的引导流程：创建管理员、注册第一个 Agent、创建第一个项目。仅当用户表为空时进入；三步各自可跳过，跑过 `admin create` 等 CLI 等价命令即视为引导完成。
+
+### 发布形态（Release Form）
+
+v1 的交付物：GitHub Releases 上 6 目标 × server/agent 分开压缩包 + sha256 校验和 + 仅 Server 的官方 Docker 镜像（双架构、非 root、`/data` 卷）。受支持平台仅 Linux x86_64/aarch64 与 Windows x86_64，macOS as-is。不做安装脚本、系统包、签名。
+
+### 发布节奏（Release Cadence）
+
+Server 与 Agent 同版本号成对发布（semver，首发 1.0.0）；升级顺序 Server 先升（Agent 过新启动即拒连）；兼容窗口 N-1；升级 = 替换二进制重启 + 启动自动前向迁移（迁移前自动备份 db），不支持降级。
+
+### 数据目录（Data Directory）
+
+Server 的单一数据落点（`--data-dir`，默认 `./data`，Docker 固定 `/data`），内含 SQLite 数据库与产物存储；首次启动生成带注释的 config.toml。配置优先级：CLI flag > `SISYPHUS_` 前缀环境变量 > config.toml > 内置默认。
