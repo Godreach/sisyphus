@@ -12,6 +12,14 @@ sisyphus 的中心进程。单进程、单二进制部署，承载 web UI、REST
 
 跑在构建机上的守护进程，全矩阵支持（Linux/macOS/Windows × x86_64/aarch64）。向 Server 注册，领取任务，在宿主机上直接执行步骤（默认），或按 pipeline 配置选择容器后端。与"多平台"一词的关系：指 Agent 的运行平台，不是构建产物的交叉编译目标。
 
+### Agent 注册（Registration）
+
+Agent 首次接入的引导流程：管理员在 web UI 创建 Agent 条目并生成一次性注册码；Agent 启动时凭注册码向 Server 换取长期 per-Agent 令牌（token，Agent 侧落盘保存）。令牌可单独吊销——UI 禁用 Agent 即踢线。
+
+### 在线状态（Online / Offline）
+
+Agent 的在线与否由通道连接状态判定：连接存活即在线，超时无心跳即离线。离线的 Agent 不接新任务；其运行中任务的处置由调度决定。
+
 ### Pipeline（流水线）
 
 一次交付的编排定义，含参数、阶段与任务。v1 的 Pipeline 定义**只存 Server 端数据库**，通过 web UI 可视化编辑；repo 内没有任何配置文件。这是与 Drone/Woodpecker（repo 内 yaml）的根本区别。同一条 Pipeline 同时只跑一条构建，后来者排队。
