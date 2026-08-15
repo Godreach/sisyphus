@@ -5,15 +5,20 @@
 //! 守住「REST 接入不破 Agent 通道」。
 
 use sisyphus_proto::agent::{
-    agent_channel_client::AgentChannelClient, channel_message::Kind, ChannelMessage,
-    Handshake, Version,
+    ChannelMessage, Handshake, Version, agent_channel_client::AgentChannelClient,
+    channel_message::Kind,
 };
-use sisyphus_server::{api, grpc};
+use sisyphus_server::{api, grpc, store};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn rest_and_grpc_serve_side_by_side() {
-    // 与二进制 main 相同的装配：REST 走 api::router()，gRPC 走 grpc::service()。
+    // 与二进制 main 相同的装配：REST 走 api::router(AppState)（池经
+    // store::bootstrap），gRPC 走 grpc::service()。
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let pool = store::bootstrap(dir.path()).await.expect("bootstrap");
+    let state = api::AppState::new(pool);
+
     let rest_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind REST");
@@ -24,7 +29,7 @@ async fn rest_and_grpc_serve_side_by_side() {
     let grpc_addr = grpc_listener.local_addr().expect("gRPC addr");
 
     let rest = tokio::spawn(async move {
-        axum::serve(rest_listener, api::router())
+        axum::serve(rest_listener, api::router(state))
             .await
             .expect("REST serve")
     });

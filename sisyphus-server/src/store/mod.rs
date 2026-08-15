@@ -2,8 +2,12 @@
 //!
 //! 组合根单一入口 [`bootstrap`]：开池 → 校验待应用迁移 → 备份 db 文件
 //! （连 `-wal`/`-shm` 一起，ADR-0004 部署注记）→ 前向迁移（ADR-0010）。
-//! trait 缝（[`LogStore`](traits::LogStore) / [`ArtifactStore`](traits::ArtifactStore)）
+//! repo 层（[`projects::ProjectRepo`] / [`pipelines::PipelineRepo`]）承载元数据
+//! 读写；trait 缝（[`LogStore`](traits::LogStore) / [`ArtifactStore`](traits::ArtifactStore)）
 //! 只定形不实现，随消费批次落同一缝。
+
+pub mod pipelines;
+pub mod projects;
 
 // 缝定形、无消费者（票 #32：只定契约不交付实现，日志/产物批次落同一缝后移除）。
 #[allow(dead_code, unused_imports)]
@@ -20,9 +24,9 @@ use std::{
 };
 
 use sqlx::{
+    SqlitePool,
     migrate::Migrator,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
-    SqlitePool,
 };
 
 use crate::config::{BACKUPS_DIR, DB_FILE_NAME};
@@ -39,6 +43,16 @@ pub enum StoreError {
     Migrate(sqlx::migrate::MigrateError),
     /// 磁盘/文件 IO 错误（备份拷贝等）。
     Io(std::io::Error),
+    /// Pipeline 定义未过 sisyphus-model 校验（整组透传给 API 层 422）。
+    InvalidDefinition(Vec<sisyphus_model::validate::ValidationError>),
+    /// 唯一冲突（如项目名已存在）。
+    Unique(String),
+    /// 目标不存在（项目、pipeline 等）。
+    NotFound(String),
+    /// 事务内条件更新未命中且重试耗尽（并发写冲突）。
+    Conflict(String),
+    /// 定义 JSON 编解码失败（落库内容与 model 形态不符）。
+    DefinitionJson(serde_json::Error),
 }
 
 impl From<sqlx::Error> for StoreError {
@@ -65,6 +79,13 @@ impl std::fmt::Display for StoreError {
             StoreError::Db(e) => write!(f, "数据库错误：{e}"),
             StoreError::Migrate(e) => write!(f, "迁移错误：{e}"),
             StoreError::Io(e) => write!(f, "存储 IO 错误：{e}"),
+            StoreError::InvalidDefinition(errors) => {
+                write!(f, "Pipeline 定义校验失败（{} 处）", errors.len())
+            }
+            StoreError::Unique(what) => write!(f, "唯一冲突：{what}"),
+            StoreError::NotFound(what) => write!(f, "不存在：{what}"),
+            StoreError::Conflict(what) => write!(f, "并发写冲突：{what}"),
+            StoreError::DefinitionJson(e) => write!(f, "定义 JSON 编解码失败：{e}"),
         }
     }
 }
@@ -130,7 +151,10 @@ async fn backup_db(pool: &SqlitePool, data_dir: &Path) -> Result<PathBuf, StoreE
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| StoreError::Io(std::io::Error::other(e)))?
         .as_millis();
-    let dest = data_dir.join(BACKUPS_DIR).join(stamp.to_string()).join(DB_FILE_NAME);
+    let dest = data_dir
+        .join(BACKUPS_DIR)
+        .join(stamp.to_string())
+        .join(DB_FILE_NAME);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -140,6 +164,32 @@ async fn backup_db(pool: &SqlitePool, data_dir: &Path) -> Result<PathBuf, StoreE
         .execute(pool)
         .await?;
     Ok(dest)
+}
+
+/// 当前 Unix 毫秒时间戳（落库时间列统一用毫秒，与 Revision 语义一致）。
+pub(crate) fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("系统时钟晚于 Unix 纪元")
+        .as_millis() as i64
+}
+
+/// 是否 UNIQUE 约束冲突（SQLite 扩展码 2067；兜底看错误文本）。
+pub(crate) fn is_unique_violation(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Database(db) => {
+            db.code().as_deref() == Some("2067") || db.message().contains("UNIQUE constraint")
+        }
+        _ => false,
+    }
+}
+
+/// 是否写锁竞争类错误（BUSY / BUSY_SNAPSHOT：busy_timeout 耗尽或读快照过期）。
+pub(crate) fn is_busy(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Database(db) => matches!(db.code().as_deref(), Some("5") | Some("517")),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -185,7 +235,10 @@ mod tests {
                 .await
                 .expect("读表清单");
         for expected in ["pipelines", "projects"] {
-            assert!(tables.iter().any(|t| t == expected), "缺表 {expected}：{tables:?}");
+            assert!(
+                tables.iter().any(|t| t == expected),
+                "缺表 {expected}：{tables:?}"
+            );
         }
         pool.close().await;
 
@@ -219,12 +272,23 @@ mod tests {
 
         // 模拟旧库升级：抹掉迁移标记与业务表，使下一次 bootstrap 见到待应用迁移。
         let pool = open_raw_pool_for_test(dir.path()).await;
-        sqlx::query("DROP TABLE pipelines").execute(&pool).await.expect("drop pipelines");
-        sqlx::query("DROP TABLE projects").execute(&pool).await.expect("drop projects");
-        sqlx::query("DELETE FROM _sqlx_migrations").execute(&pool).await.expect("清迁移标记");
+        sqlx::query("DROP TABLE pipelines")
+            .execute(&pool)
+            .await
+            .expect("drop pipelines");
+        sqlx::query("DROP TABLE projects")
+            .execute(&pool)
+            .await
+            .expect("drop projects");
+        sqlx::query("DELETE FROM _sqlx_migrations")
+            .execute(&pool)
+            .await
+            .expect("清迁移标记");
         pool.close().await;
 
-        let pool = bootstrap(dir.path()).await.expect("带待应用迁移的 bootstrap 应成功");
+        let pool = bootstrap(dir.path())
+            .await
+            .expect("带待应用迁移的 bootstrap 应成功");
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
             .fetch_one(&pool)
             .await
@@ -295,6 +359,9 @@ mod tests {
             .filter(|p| p.is_dir())
             .collect();
         stamps.sort();
-        stamps.pop().map(|p| p.join(DB_FILE_NAME)).filter(|p| p.is_file())
+        stamps
+            .pop()
+            .map(|p| p.join(DB_FILE_NAME))
+            .filter(|p| p.is_file())
     }
 }

@@ -1,7 +1,8 @@
-//! REST API 组合根（ADR-0005/0010；票 B2a-T3）。
+//! REST API 组合根（ADR-0005/0010；票 B2a-T3/T4）。
 //!
-//! - 业务端点全部挂 `/api/v1/` 前缀（B2a-T4 起接入），统一 JSON 错误形态
-//!   （[`error`]）供后续端点直接复用。
+//! - 业务端点全部挂 `/api/v1/` 前缀，统一 JSON 错误形态（[`error`]）。
+//! - 存储依赖经 [`AppState`] 注入（池 → repo → handler，Spec B2a §6 组合根），
+//!   测试与二进制共用同一装配。
 //! - `GET /healthz` 不鉴权、不查库，仅表进程存活（Docker HEALTHCHECK 探活，
 //!   ADR-0010/0019）。
 //! - Swagger UI 与 OpenAPI JSON 仅开发期（debug 构建）挂载。
@@ -10,23 +11,54 @@
 pub mod docs;
 pub mod error;
 pub mod health;
+pub mod pipelines;
+pub mod projects;
 
+use axum::Router;
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
+use sqlx::SqlitePool;
 
 pub use docs::ApiDoc;
 
 use crate::api::error::ApiError;
+use crate::store::pipelines::PipelineRepo;
+use crate::store::projects::ProjectRepo;
+
+/// REST 层共享状态：repo 组合注入（池只在 [`AppState::new`] 处消费一次）。
+#[derive(Debug, Clone)]
+pub struct AppState {
+    /// 项目元数据 repo。
+    pub projects: ProjectRepo,
+    /// pipeline 定义 repo。
+    pub pipelines: PipelineRepo,
+}
+
+impl AppState {
+    /// 由连接池装配（组合根：开池+迁移在 [`crate::store::bootstrap`]）。
+    pub fn new(pool: SqlitePool) -> Self {
+        Self {
+            projects: ProjectRepo::new(pool.clone()),
+            pipelines: PipelineRepo::new(pool),
+        }
+    }
+}
 
 /// REST Router 组合根：与二进制 main 相同的装配，测试经
 /// `tower::ServiceExt::oneshot` 进程内驱动（Spec B2a：不起 socket、
 /// 不 spawn 进程）。
-pub fn router() -> Router {
-    // /api/v1/ 业务端点（B2a-T4 起挂 projects/pipelines 等）：
-    // 层内未命中统一走 JSON 404。
-    let v1 = Router::new().fallback(api_not_found);
+pub fn router(state: AppState) -> Router {
+    // /api/v1/ 业务端点：层内未命中统一走 JSON 404。
+    let v1 = Router::new()
+        .route("/projects", get(projects::list).post(projects::create))
+        .route("/projects/{name}", get(projects::get_one))
+        .route(
+            "/projects/{name}/pipelines/{pipeline}",
+            get(pipelines::get_definition).put(pipelines::put_definition),
+        )
+        .fallback(api_not_found)
+        .with_state(state);
 
     let app = Router::new()
         .route("/healthz", get(health::healthz))

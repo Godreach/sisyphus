@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 sisyphus-proto = { path = "../sisyphus-proto" }
+sisyphus-model = { path = "../sisyphus-model" }
 tokio.workspace = true
 tokio-stream = "0.1"
 tonic.workspace = true

@@ -13,6 +13,241 @@
     "version": "1.0.0"
   },
   "paths": {
+    "/api/v1/projects": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "项目清单。",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "全部项目（按名排序）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "创建项目。",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "已创建",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "项目名已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（错误清单整组透传）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "按名取项目。",
+        "operationId": "get_one",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "项目",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}/pipelines/{pipeline}": {
+      "get": {
+        "tags": [
+          "pipelines"
+        ],
+        "summary": "读 pipeline 定义。",
+        "operationId": "get_definition",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "当前定义与修订版本",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineDefinitionResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目或 pipeline 不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "pipelines"
+        ],
+        "summary": "保存 pipeline 定义（upsert：首存 revision=1，续存 +1）。",
+        "operationId": "put_definition",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PipelineDefinitionPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已保存，返回新修订版本",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveDefinitionResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "model 校验失败，错误清单整组透传",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "tags": [
@@ -37,6 +272,36 @@
   },
   "components": {
     "schemas": {
+      "CreateProjectRequest": {
+        "type": "object",
+        "description": "创建项目请求体。",
+        "required": [
+          "name",
+          "scm_type",
+          "scm_url"
+        ],
+        "properties": {
+          "default_branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "git 默认分支（可空；svn 项目不适用）。"
+          },
+          "name": {
+            "type": "string",
+            "description": "项目名（唯一）。"
+          },
+          "scm_type": {
+            "$ref": "#/components/schemas/ScmTypeDto",
+            "description": "仓库类型。"
+          },
+          "scm_url": {
+            "type": "string",
+            "description": "仓库 URL。"
+          }
+        }
+      },
       "ErrorBody": {
         "type": "object",
         "description": "统一错误响应体。",
@@ -70,6 +335,141 @@
             "description": "固定 `ok`：仅表进程存活，不代表依赖就绪。"
           }
         }
+      },
+      "PipelineDefinitionPayload": {
+        "type": "object",
+        "description": "PUT 请求体：Pipeline 定义（sisyphus-model JSON 形态）。\n\nOpenAPI 契约里是自由 object——schema 事实源在 sisyphus-model，\n不在 API 层复刻一份漂移源。"
+      },
+      "PipelineDefinitionResponse": {
+        "type": "object",
+        "description": "GET 响应：当前定义 + 修订版本语义字段。",
+        "required": [
+          "definition",
+          "revision",
+          "operator",
+          "updated_at"
+        ],
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/PipelineDefinitionPayload",
+            "description": "Pipeline 定义（model JSON 形态，与提交等价读回）。"
+          },
+          "operator": {
+            "type": "string",
+            "description": "最后保存的操作人（auth 落地前为占位标识）。"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "description": "当前修订版本号（每次保存 +1，从 1 起）。",
+            "minimum": 0
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "最后保存时间（Unix 毫秒）。"
+          }
+        }
+      },
+      "ProjectResponse": {
+        "type": "object",
+        "description": "项目视图（list / create / get 共用）。",
+        "required": [
+          "id",
+          "name",
+          "scm_type",
+          "scm_url",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "创建时间（Unix 毫秒）。"
+          },
+          "default_branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "git 默认分支（可空；svn 恒空）。"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "行 id。"
+          },
+          "name": {
+            "type": "string",
+            "description": "项目名（唯一）。"
+          },
+          "scm_type": {
+            "$ref": "#/components/schemas/ScmTypeDto",
+            "description": "仓库类型（`git` / `svn`）。"
+          },
+          "scm_url": {
+            "type": "string",
+            "description": "仓库 URL。"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "最后更新时间（Unix 毫秒）。"
+          }
+        }
+      },
+      "SaveDefinitionResponse": {
+        "type": "object",
+        "description": "PUT 响应：保存成功，返回新修订版本。",
+        "required": [
+          "revision",
+          "operator",
+          "updated_at"
+        ],
+        "properties": {
+          "operator": {
+            "type": "string",
+            "description": "操作人（auth 落地前为占位标识）。"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "description": "本次保存后的修订版本号。",
+            "minimum": 0
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "保存时间（Unix 毫秒）。"
+          }
+        }
+      },
+      "ScmTypeDto": {
+        "type": "string",
+        "description": "仓库类型（API 形态；`git` / `svn`）。",
+        "enum": [
+          "git",
+          "svn"
+        ]
+      },
+      "ValidationIssue": {
+        "type": "object",
+        "description": "校验错误条目：字段定位路径 + 人读信息（与 sisyphus-model 的\n`ValidationError` 同形态，模型侧类型不透出 API 层）。",
+        "required": [
+          "path",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "人读错误描述。"
+          },
+          "path": {
+            "type": "string",
+            "description": "字段定位路径（如 `stages[0].jobs[1].steps[0].command`）。"
+          }
+        }
       }
     }
   },
@@ -77,6 +477,14 @@
     {
       "name": "infra",
       "description": "探针与基础设施端点"
+    },
+    {
+      "name": "projects",
+      "description": "项目管理（v1：list / create / get）"
+    },
+    {
+      "name": "pipelines",
+      "description": "Pipeline 定义读写（model 校验 + revision 语义）"
     }
   ]
 }

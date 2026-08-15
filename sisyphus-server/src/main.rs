@@ -60,13 +60,15 @@ async fn main() {
     init_tracing(&config);
 
     // 存储底座（B2a-T2）：开池+PRAGMA，有待应用迁移时先备份再前向迁移。
-    let _pool = match store::bootstrap(&config.data_dir).await {
+    let pool = match store::bootstrap(&config.data_dir).await {
         Ok(pool) => pool,
         Err(e) => {
             tracing::error!("存储初始化失败：{e}");
             std::process::exit(2);
         }
     };
+    // REST 组合根（B2a-T4）：池注入 repo，端点面见 api::router。
+    let state = api::AppState::new(pool.clone());
 
     // 双端口先绑定再 serve（ADR-0005 端口合并策略推迟，各自独立监听）：
     // 任一端口被占即启动失败，不带病运行半个服务。
@@ -89,7 +91,7 @@ async fn main() {
     // 并行 serve：expect 收在各自 async 块内——任一出错即 panic 带崩整个
     // 进程，不带病运行半个服务。
     let rest = async {
-        axum::serve(rest_listener, api::router())
+        axum::serve(rest_listener, api::router(state))
             .await
             .expect("REST serve");
     };
@@ -114,10 +116,16 @@ fn init_tracing(config: &Config) {
         .unwrap_or_else(|_| EnvFilter::new(format!("{},sqlx=warn", config.log_level)));
     match config.log_format {
         LogFormat::Json => {
-            tracing_subscriber::fmt().json().with_env_filter(filter).init();
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(filter)
+                .init();
         }
         LogFormat::Pretty => {
-            tracing_subscriber::fmt().pretty().with_env_filter(filter).init();
+            tracing_subscriber::fmt()
+                .pretty()
+                .with_env_filter(filter)
+                .init();
         }
     }
 }
