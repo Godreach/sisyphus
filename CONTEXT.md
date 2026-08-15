@@ -118,7 +118,19 @@ Agent 上单个任务的执行目录：`<工作区根>/<pipeline>/<job>/`。同 
 
 ### 用户 / 角色（User / Role）
 
-简单多用户体系：注册/登录 + 项目级三档权限 viewer/runner/admin。不做组织/团队级 RBAC。
+简单多用户体系：登录 + 项目级三档角色 viewer/runner/admin（viewer 读、runner 读+触发/取消/重跑、admin 全项目管理含成员分配），不做组织/团队级 RBAC。全局管理员（is_admin）专属全局资源（项目增删、Agent 管理、用户管理、全局配置），并隐含全部项目的项目 admin 权限。账号只禁用不物理删除--历史操作人字段永久保留。注册开关默认关（config），关闭时由全局 admin 建号。
+
+### 会话（Session）
+
+登录后的服务端会话状态，存数据库：HttpOnly cookie（SameSite=Lax）携带、7 天滑动过期、Server 重启不掉线，登出/禁用即失效。配套约定：非安全方法校验同源（CSRF 防护）、登录失败进程内限流（不持久锁定）。密码以 argon2id 哈希存储，永不明文落库。
+
+### 个人访问令牌（PAT）
+
+用户为脚本/CLI 调 REST API 生成的长期凭据：`sis_` 前缀、仅创建时明文可见、库中只存哈希、可选过期、UI 可吊销；以 Bearer 头提交，权限等同 owner 本人。与 Agent 令牌（`sisa_` 前缀）是两个不混用的令牌家族。
+
+### 任务机密（Secret）
+
+pipeline 执行所需的凭据类敏感值（如 SCM 访问凭据），由项目 admin 管理，值加密存储、永不可回读，仅注入任务执行环境。细节待定（管理边界与注入机制见后续决策）。
 
 ### 通知（Notification）
 
