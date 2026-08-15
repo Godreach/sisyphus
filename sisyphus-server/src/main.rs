@@ -1,27 +1,14 @@
-//! sisyphus-server：单进程承载全部 Server 职责（ADR-0009）。
-//!
-//! B1 交付骨架二进制 + 最小握手闭环（ADR-0017）；启动路径（B2a）：
-//! 解析 CLI → 合并配置（ADR-0010）→ 初始化 tracing（ADR-0019）→
-//! 确保数据目录布局 → 开池+PRAGMA → 迁移前备份+前向迁移（ADR-0004/0010）→
-//! serve。REST Router 与存储消费随后续批次接入。
-
-mod api;
-mod auth;
-mod config;
-mod engine;
-mod events;
-mod grpc;
-mod notify;
-mod sched;
-mod scm;
-mod store;
-mod trigger;
+//! sisyphus-server bin 薄壳（ADR-0009）：模块实现在库面（`sisyphus_server`），
+//! 这里只做启动路径：解析 CLI → 合并配置（ADR-0010）→ 初始化 tracing
+//! （ADR-0019）→ 存储底座开池+迁移（B2a-T2）→ 绑定双端口 →
+//! REST（axum）与 gRPC（tonic）并行 serve。
 
 use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::config::{Config, LogFormat, Overrides};
+use sisyphus_server::config::{Config, LogFormat, Overrides};
+use sisyphus_server::{api, grpc, store};
 
 /// sisyphus Server
 #[derive(Parser, Debug)]
@@ -30,7 +17,7 @@ struct Args {
     /// 单一数据落点（默认 ./data，内含数据库、artifacts/、backups/）
     #[arg(long, default_value = "./data")]
     data_dir: PathBuf,
-    /// REST API 监听地址（CLI 覆盖层，默认 0.0.0.0:8080；Router 归 B2a-T3）
+    /// REST API 监听地址（CLI 覆盖层，默认 0.0.0.0:8080）
     #[arg(long)]
     rest_addr: Option<String>,
     /// Agent gRPC 通道监听地址（CLI 覆盖层，默认 127.0.0.1:50051）
@@ -81,20 +68,41 @@ async fn main() {
         }
     };
 
-    let service = grpc::service();
-    let addr: std::net::SocketAddr = config.grpc_addr.parse().expect("配置层已校验监听地址");
+    // 双端口先绑定再 serve（ADR-0005 端口合并策略推迟，各自独立监听）：
+    // 任一端口被占即启动失败，不带病运行半个服务。
+    let rest_addr: std::net::SocketAddr = config.rest_addr.parse().expect("配置层已校验监听地址");
+    let grpc_addr: std::net::SocketAddr = config.grpc_addr.parse().expect("配置层已校验监听地址");
+    let rest_listener = tokio::net::TcpListener::bind(rest_addr)
+        .await
+        .unwrap_or_else(|e| panic!("绑定 REST 端口 {rest_addr} 失败：{e}"));
+    let grpc_listener = tokio::net::TcpListener::bind(grpc_addr)
+        .await
+        .unwrap_or_else(|e| panic!("绑定 gRPC 端口 {grpc_addr} 失败：{e}"));
 
     tracing::info!(
-        rest_addr = %config.rest_addr,
+        rest_addr = %rest_addr,
+        grpc_addr = %grpc_addr,
         data_dir = %config.data_dir.display(),
-        "sisyphus-server 启动：agent channel on {addr}"
+        "sisyphus-server 启动：REST + agent channel 双服务"
     );
 
-    tonic::transport::Server::builder()
-        .add_service(service)
-        .serve(addr)
-        .await
-        .expect("serve");
+    // 并行 serve：expect 收在各自 async 块内——任一出错即 panic 带崩整个
+    // 进程，不带病运行半个服务。
+    let rest = async {
+        axum::serve(rest_listener, api::router())
+            .await
+            .expect("REST serve");
+    };
+    let grpc = async {
+        tonic::transport::Server::builder()
+            .add_service(grpc::service())
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
+                grpc_listener,
+            ))
+            .await
+            .expect("gRPC serve");
+    };
+    tokio::join!(rest, grpc);
 }
 
 /// tracing 基础初始化（ADR-0019）：RUST_LOG 整体胜出，否则用配置级别

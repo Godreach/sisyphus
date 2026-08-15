@@ -4,6 +4,10 @@
 //! 磁盘产物实现随产物面批次落在同一缝上。方法面以 ADR-0004/0007/0013
 //! 已定语义为限，不为臆测的需求扩面。
 
+// trait 缝保持 AFIT（async fn in trait）形态：Send/dyn 语义随首个真实实现
+// 批次（日志/产物面）裁定，不在此臆测收紧。
+#![allow(async_fn_in_trait)]
+
 use std::io;
 
 use futures::stream::BoxStream;

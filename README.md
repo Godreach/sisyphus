@@ -76,6 +76,16 @@ cargo clippy --workspace -- -D warnings        # lint
 
 服务端启动时自动前向迁移，迁移前自动把 db（连 `-wal`/`-shm`）备份到 `<data-dir>/backups/`（ADR-0010）；不支持降级。
 
+### REST 契约与 OpenAPI snapshot 守护
+
+REST 端点由 utoipa 注解生成 OpenAPI 契约（ADR-0005），开发期（debug 构建）浏览 `/swagger-ui`（仅开发期挂载为 Spec B2a 裁定；release 不暴露）。契约快照 `sisyphus-server/tests/snapshots/openapi.json` 入 git：端点/形态漂移会被 snapshot 比对测试拦下。有意变更契约后：
+
+```bash
+UPDATE_SNAPSHOTS=1 cargo test -p sisyphus-server    # 重写快照
+```
+
+连快照一起提交——snapshot diff 即本次契约变更的评审面。
+
 ## 项目状态
 
 设计阶段：领域模型与架构决策已定稿（14 篇 ADR + [CONTEXT.md](CONTEXT.md) 词汇表，见 [docs/adr/](docs/adr/)），实现尚未开始。

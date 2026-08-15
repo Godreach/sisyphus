@@ -1,0 +1,82 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "sisyphus Server API",
+    "description": "自托管 CI 平台 Server REST API。业务端点均在 /api/v1/ 前缀下；B2a 阶段暂无鉴权（auth 批次统一中间件补）。",
+    "contact": {
+      "name": "sisyphus contributors"
+    },
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    },
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": [
+          "infra"
+        ],
+        "summary": "存活探针：不鉴权、不查库（票 B2a-T3；Spec B2a 裁定本阶段只答进程存活）。\nADR-0019 定的深度为「进程 + SQLite `SELECT 1`」，该深度随存储消费与\n可观测性批次接入（T4 起池进组合根才有可查对象）。",
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "进程存活",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Healthz"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ErrorBody": {
+        "type": "object",
+        "description": "统一错误响应体。",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "机器可读错误码（大写蛇形，如 `NOT_FOUND`、`VALIDATION_FAILED`）。"
+          },
+          "detail": {
+            "description": "结构化补充（如校验错误清单）；无补充时缺省不输出。"
+          },
+          "message": {
+            "type": "string",
+            "description": "人读错误信息，可直接展示。"
+          }
+        }
+      },
+      "Healthz": {
+        "type": "object",
+        "description": "`/healthz` 响应体。",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "固定 `ok`：仅表进程存活，不代表依赖就绪。"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "infra",
+      "description": "探针与基础设施端点"
+    }
+  ]
+}
