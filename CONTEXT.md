@@ -26,7 +26,11 @@ Agent 身上的调度匹配属性，两种来源：管理员自定义标签（we
 
 ### Pipeline（流水线）
 
-一次交付的编排定义，含参数、阶段与任务。v1 的 Pipeline 定义**只存 Server 端数据库**，通过 web UI 可视化编辑；repo 内没有任何配置文件。这是与 Drone/Woodpecker（repo 内 yaml）的根本区别。同一条 Pipeline 同时只跑一条构建，后来者排队。
+一次交付的编排定义，含参数、阶段与任务。v1 的 Pipeline 定义**只存 Server 端数据库**，通过 web UI 编辑（编辑器形态见「混合式编辑器」）；repo 内没有任何配置文件。这是与 Drone/Woodpecker（repo 内 yaml）的根本区别。同一条 Pipeline 同时只跑一条构建，后来者排队。
+
+### 混合式编辑器（Hybrid Editor）
+
+sisyphus 的 pipeline 编辑器交互形态：左侧**派生式只读拓扑轨道**（阶段=列、任务=缩略 chip，布局由数据派生、不可手拖、无画布坐标）+ 右侧**结构化属性表单**（选中任务的全属性显式字段）。点击轨道导航表单。不采用全画布拖拽（v1 无 DAG，空间自由度无承接）也不用纯表单（丢失全局拓扑感）（ADR-0020）。
 
 ### 触发器（Trigger）
 
@@ -146,7 +150,7 @@ Pipeline 完成时发出的消息（v1：邮件）。触发规则按 pipeline �
 
 ### 初始化引导（Setup Wizard）
 
-首次部署后 web UI 的引导流程：创建管理员、注册第一个 Agent、创建第一个项目。仅当用户表为空时进入；三步各自可跳过，跑过 `admin create` 等 CLI 等价命令即视为引导完成。
+首次部署后 web UI 的引导流程：创建管理员、注册第一个 Agent、创建第一个项目。仅当用户表为空时进入；三步各自可跳过，跑过 `admin create` 等 CLI 等价命令即视为引导完成。web UI 信息架构（侧栏导航、概览/项目/构建/Agent/管理四组页面、构建详情面包屑）与 zh/en 双语布局见 ADR-0020。
 
 ### 发布形态（Release Form）
 
