@@ -34,12 +34,11 @@ gRPC 通道（proto = Agent/Server 唯一共享契约；Server 下发已解析�
 
 | 目录 | 说明 |
 | --- | --- |
-| `crates/sisyphus-proto` | `.proto` 生成物（tonic/prost），Agent/Server 唯一共享 crate |
-| `crates/sisyphus-model` | 流水线定义 JSON 模型、when 表达式 AST、保存校验规则（纯逻辑叶子 crate） |
-| `crates/sisyphus-server` | Server 二进制：api / engine / sched / trigger / scm / auth / store / events / notify |
-| `crates/sisyphus-agent` | Agent 二进制：channel / runner / workspace / cache，只依赖 proto |
-| `proto/` | gRPC 契约源文件（契约先行、语言中立） |
-| `web/` | Vue 3 前端 |
+| `sisyphus-proto/` | `.proto` 源文件 + 生成物（tonic/prost），Agent/Server 唯一共享 crate |
+| `sisyphus-model/` | 流水线定义 JSON 模型、when 表达式 AST、保存校验规则（纯逻辑叶子 crate） |
+| `sisyphus-server/` | Server 二进制：api / engine / sched / trigger / scm / auth / store / events / notify |
+| `sisyphus-agent/` | Agent 二进制：channel / runner / workspace / cache / upgrader，只依赖 proto |
+| `sisyphus-web/` | Vue 3 前端 |
 | `docs/adr/` | 架构决策记录（ADR） |
 
 ## 能力速览

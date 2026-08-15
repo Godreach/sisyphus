@@ -12,8 +12,8 @@
 ### Workspace 拓扑
 
 - **单一 cargo workspace**：根 `Cargo.toml` + 单 lockfile + `workspace.dependencies`/`workspace.lints` 统一版本，v1 不做 Server/Agent 分家。
-- **v1 共 4 个 crate**，目录 `crates/` 平铺（不做 apps/libs 二分），与 `web/`、`proto/`、`docs/` 平级：
-  - `sisyphus-proto` -- `.proto` 生成物（tonic/prost）。**Agent/Server 唯一共享 crate**。`.proto` 源文件放仓库根 `proto/`（契约先行、语言中立），build.rs 指向之。
+- **v1 共 4 个 crate**，目录**平铺在仓库根**（不做 apps/libs 二分，不设 `crates/` 中间层），与 `sisyphus-web`、`docs/` 平级（2026-08-15 经 ADR-0021 修订）：
+  - `sisyphus-proto` -- `.proto` 生成物（tonic/prost）。**Agent/Server 唯一共享 crate**。`.proto` 源文件放 `sisyphus-proto/proto/`（契约先行、语言中立），build.rs 指向之。
   - `sisyphus-model` -- Pipeline 定义 JSON 模型、when 表达式 AST、参数/内置变量解析、编辑器保存校验规则的纯类型与纯逻辑（serde），零重依赖叶子 crate；未来 TS 类型生成以它为锚点。
   - `sisyphus-server` -- bin，单进程承载全部 Server 职责。
   - `sisyphus-agent` -- bin，只依赖 `sisyphus-proto`，不依赖 `sisyphus-model`。
@@ -26,7 +26,7 @@
 
 - **模块不预升 crate**：自有代码量摊不满，pub 仪式与环依赖（engine↔sched 共享状态）是实代价。哪一模块长出第二个消费者（如 scm 被 agent 复用）再升。
 - **事件总线只做热通知**：SSE 收到通知后按 Last-Event-ID/offset 从 DB 读增量（ADR-0005 重放兜底），broadcast 丢消息无害；事件类型是进程管线 enum，不进 model。
-- **迁移 SQL** 放 `crates/sisyphus-server/src/store/migrations/`，`sqlx::migrate!` 编译期嵌入（单二进制自带迁移）；**`.sqlx` 离线校验文件进 git**（CI 免 DATABASE_URL 直接构建）。
+- **迁移 SQL** 放 `sisyphus-server/src/store/migrations/`，`sqlx::migrate!` 编译期嵌入（单二进制自带迁移）；**`.sqlx` 离线校验文件进 git**（CI 免 DATABASE_URL 直接构建）。
 
 ### Agent 模块（crate 内模块）
 
