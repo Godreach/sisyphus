@@ -112,6 +112,10 @@ Agent 上单个任务的执行目录：`<工作区根>/<pipeline>/<job>/`。同 
 
 任务级声明的跨构建复用目录：每条 = key 模板（支持 `${}` 插值，禁用 `SISY_WORKSPACE`）+ workspace 相对路径列表 + 可选锁文件哈希分量。存储在 `<缓存根>/<pipeline>/<key>/`（独立于工作区，per-pipeline 命名空间，pipeline 改名即重置）。restore 在 checkout 后、save 仅任务成功时，朴素拷贝、保存即不可变快照；容量上限（Agent 本地配置，默认 20 GiB）内 LRU 自动淘汰 + UI 手动删除。各 Agent 缓存彼此独立、互不同步。
 
+### 日志（Log）
+
+任务执行输出的带类型事件流：输出块（stdout/stderr 合流、带 stream 标记）与步骤生命周期事件（start 含命令回显 / end 含退出码）按到达顺序交织，per-job 单调 seq 定位（按 attempt 计）。Agent 经通道流式上报、断线缓冲补传；Server 以压缩 chunk 行入库，保留期与产物共享（默认 30 天），构建记录永久。per-job 体积上限超限截断标记、不判败。web 端单一 SSE 端点按 seq 回放+尾随，另有整份下载。
+
 ### 用户 / 角色（User / Role）
 
 简单多用户体系：注册/登录 + 项目级三档权限 viewer/runner/admin。不做组织/团队级 RBAC。
