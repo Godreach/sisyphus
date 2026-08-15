@@ -110,7 +110,7 @@ Agent 上单个任务的执行目录：`<工作区根>/<pipeline>/<job>/`。同 
 
 ### 缓存（Cache）
 
-Agent 端按 key 复用的目录（如 ~/.cargo、node_modules），位于工作区之外的独立缓存根，减少重复下载与构建。
+任务级声明的跨构建复用目录：每条 = key 模板（支持 `${}` 插值，禁用 `SISY_WORKSPACE`）+ workspace 相对路径列表 + 可选锁文件哈希分量。存储在 `<缓存根>/<pipeline>/<key>/`（独立于工作区，per-pipeline 命名空间，pipeline 改名即重置）。restore 在 checkout 后、save 仅任务成功时，朴素拷贝、保存即不可变快照；容量上限（Agent 本地配置，默认 20 GiB）内 LRU 自动淘汰 + UI 手动删除。各 Agent 缓存彼此独立、互不同步。
 
 ### 用户 / 角色（User / Role）
 
