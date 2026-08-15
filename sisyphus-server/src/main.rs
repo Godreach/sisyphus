@@ -69,6 +69,8 @@ async fn main() {
     };
     // REST 组合根（B2a-T4）：池注入 repo，端点面见 api::router。
     let state = api::AppState::new(pool.clone());
+    // 静态资源本地覆盖目录（B2a-T5）：数据目录 web/ 子目录，不存在即纯内嵌。
+    let web_override_dir = config.data_dir.join(sisyphus_server::config::WEB_DIR);
 
     // 双端口先绑定再 serve（ADR-0005 端口合并策略推迟，各自独立监听）：
     // 任一端口被占即启动失败，不带病运行半个服务。
@@ -91,7 +93,7 @@ async fn main() {
     // 并行 serve：expect 收在各自 async 块内——任一出错即 panic 带崩整个
     // 进程，不带病运行半个服务。
     let rest = async {
-        axum::serve(rest_listener, api::router(state))
+        axum::serve(rest_listener, api::router(state, web_override_dir))
             .await
             .expect("REST serve");
     };

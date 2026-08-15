@@ -22,6 +22,10 @@ pub const DB_FILE_NAME: &str = "sisyphus.db";
 pub const ARTIFACTS_DIR: &str = "artifacts";
 /// 数据目录内的迁移前备份子目录名（ADR-0010）。
 pub const BACKUPS_DIR: &str = "backups";
+/// 数据目录内的静态资源本地覆盖子目录名（数据目录布局 ADR-0010；分层
+/// 资产 ADR-0005，票 B2a-T5）：放入与内嵌产物同名的文件即压过内嵌版本；
+/// 目录不存在即无覆盖。
+pub const WEB_DIR: &str = "web";
 
 /// 日志输出格式（ADR-0019：默认 stdout JSON，可切 pretty）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

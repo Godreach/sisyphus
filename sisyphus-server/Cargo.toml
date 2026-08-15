@@ -32,6 +32,8 @@ futures.workspace = true
 axum.workspace = true
 utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
+rust-embed.workspace = true
+percent-encoding.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

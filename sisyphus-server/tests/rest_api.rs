@@ -7,25 +7,11 @@ use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
 use http_body_util::BodyExt;
 use sisyphus_model::pipeline::Pipeline;
-use sisyphus_server::api::{AppState, router};
-use sisyphus_server::store;
 use tower::ServiceExt;
 
-/// 进程内测试装配：临时数据目录 → bootstrap（池+PRAGMA+迁移）→ Router。
-/// TempDir 随结构体存活，测试结束才连同库文件一起清理。
-struct TestApp {
-    router: axum::Router,
-    _dir: tempfile::TempDir,
-}
+mod common;
 
-async fn test_app() -> TestApp {
-    let dir = tempfile::tempdir().expect("临时数据目录");
-    let pool = store::bootstrap(dir.path()).await.expect("bootstrap");
-    TestApp {
-        router: router(AppState::new(pool)),
-        _dir: dir,
-    }
-}
+use common::{TestApp, test_app};
 
 /// 进程内请求（每个用例现装组合根，互不共享状态）。
 async fn req(app: &TestApp, method: &str, path: &str, body: Option<String>) -> Response {
@@ -121,24 +107,6 @@ async fn api_unknown_path_returns_unified_json_404() {
         body["message"].as_str().is_some_and(|m| !m.is_empty()),
         "message 非空：{body}"
     );
-}
-
-#[tokio::test]
-async fn non_api_unknown_path_keeps_plain_404() {
-    // 非 /api 未命中维持普通 404（SPA fallback 归 B2a-T5，届时改语义）。
-    let app = test_app().await;
-    let resp = get(&app, "/some-frontend-path").await;
-
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    assert!(
-        !resp
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.starts_with("application/json")),
-        "普通 404 不落 JSON 错误形态"
-    );
-    assert_eq!(body_text(resp).await, "");
 }
 
 /// Swagger UI 与 OpenAPI JSON 仅开发期（debug 构建）挂载（ADR-0005）。

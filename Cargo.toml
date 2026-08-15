@@ -44,6 +44,10 @@ utoipa-swagger-ui = { version = "9", default-features = false, features = ["axum
 # 进程内集成测试：oneshot 驱动 Router + 读响应体
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# 静态资源内嵌（ADR-0005：release 编译期嵌入 / debug 运行时读盘）
+rust-embed = "8"
+# URL 路径百分号解码（静态资源路径清洗用）
+percent-encoding = "2"
 
 [workspace.lints.rust]
 # unsafe 降为 warn：vendored protoc 的 build.rs 需 set_var（1.97 起为 unsafe），

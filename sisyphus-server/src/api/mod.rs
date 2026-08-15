@@ -6,7 +6,8 @@
 //! - `GET /healthz` 不鉴权、不查库，仅表进程存活（Docker HEALTHCHECK 探活，
 //!   ADR-0010/0019）。
 //! - Swagger UI 与 OpenAPI JSON 仅开发期（debug 构建）挂载。
-//! - 非 `/api` 未命中路径维持普通 404；SPA fallback 归 B2a-T5。
+//! - 非 `/api` 未命中路径走静态资源解析（web 模块：本地覆盖目录 → 内嵌
+//!   sisyphus-web 产物 → SPA fallback 回 index.html，B2a-T5）。
 
 pub mod docs;
 pub mod error;
@@ -14,8 +15,13 @@ pub mod health;
 pub mod pipelines;
 pub mod projects;
 
+mod web;
+
+use std::path::PathBuf;
+
 use axum::Router;
-use axum::http::{StatusCode, Uri};
+use axum::extract::State;
+use axum::http::Uri;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use sqlx::SqlitePool;
@@ -47,8 +53,9 @@ impl AppState {
 
 /// REST Router 组合根：与二进制 main 相同的装配，测试经
 /// `tower::ServiceExt::oneshot` 进程内驱动（Spec B2a：不起 socket、
-/// 不 spawn 进程）。
-pub fn router(state: AppState) -> Router {
+/// 不 spawn 进程）。`web_override_dir` 是静态资源本地覆盖目录
+/// （数据目录 `web/` 子目录，B2a-T5），不存在即纯内嵌。
+pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
     // /api/v1/ 业务端点：层内未命中统一走 JSON 404。
     let v1 = Router::new()
         .route("/projects", get(projects::list).post(projects::create))
@@ -63,7 +70,8 @@ pub fn router(state: AppState) -> Router {
     let app = Router::new()
         .route("/healthz", get(health::healthz))
         .nest("/api/v1", v1)
-        .fallback(fallback);
+        .fallback(fallback)
+        .with_state(web_override_dir);
 
     // 开发期文档路由（Spec B2a §3：Swagger UI 挂载仅开发期；ADR-0005 只定
     // 「挂进路由」，debug 构建暴露、release 不暴露）。
@@ -79,13 +87,14 @@ pub fn router(state: AppState) -> Router {
     app
 }
 
-/// 根层未命中兜底：`/api` 前缀回统一 JSON 404（客户端可稳定解析错误形态）；
-/// 其余维持普通 404（SPA fallback 归 B2a-T5）。
-async fn fallback(uri: Uri) -> Response {
+/// 根层未命中兜底：`/api` 前缀回统一 JSON 404（客户端可稳定解析错误形态，
+/// 不落 SPA fallback）；其余走静态资源解析（B2a-T5：覆盖目录 → 内嵌 →
+/// index.html fallback）。
+async fn fallback(State(web_override_dir): State<PathBuf>, uri: Uri) -> Response {
     if uri.path().starts_with("/api") {
         api_not_found().await
     } else {
-        StatusCode::NOT_FOUND.into_response()
+        web::serve(&web_override_dir, uri.path())
     }
 }
 

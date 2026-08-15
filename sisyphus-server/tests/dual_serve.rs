@@ -13,11 +13,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn rest_and_grpc_serve_side_by_side() {
-    // 与二进制 main 相同的装配：REST 走 api::router(AppState)（池经
-    // store::bootstrap），gRPC 走 grpc::service()。
+    // 与二进制 main 相同的装配：REST 走 api::router(AppState, web 覆盖目录)
+    // （池经 store::bootstrap），gRPC 走 grpc::service()。
     let dir = tempfile::tempdir().expect("临时数据目录");
     let pool = store::bootstrap(dir.path()).await.expect("bootstrap");
     let state = api::AppState::new(pool);
+    let web_override_dir = dir.path().join(sisyphus_server::config::WEB_DIR);
 
     let rest_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -29,7 +30,7 @@ async fn rest_and_grpc_serve_side_by_side() {
     let grpc_addr = grpc_listener.local_addr().expect("gRPC addr");
 
     let rest = tokio::spawn(async move {
-        axum::serve(rest_listener, api::router(state))
+        axum::serve(rest_listener, api::router(state, web_override_dir))
             .await
             .expect("REST serve")
     });
