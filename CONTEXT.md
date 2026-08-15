@@ -98,7 +98,7 @@ Pipeline 定义每次保存递增的版本号；编辑历史记录操作人与�
 
 ### 执行环境（Execution Environment）
 
-一个任务运行的地方：**宿主机直跑**（默认，零依赖）或**容器**（每任务可选，v1 以 Docker 为主）。
+一个任务运行的地方：**宿主机直跑**（默认，零依赖）或**容器**（每任务可选）。容器后端 shell 出系统 docker CLI（与 checkout shell 出 git/svn 同模型），每步骤一个一次性容器（`--rm`）、挂载同一 job 工作区到固定路径 `/sisyphus/workspace`、入口固定 `/bin/sh -c`；任务开始时显式 pull 一次（always），私有 registry 用宿主机既有登录态。容器任务配置仅 image 一个字段；v1 只承诺 Linux 宿主，macOS/Windows 上 Docker Desktop 类 Linux 引擎 as-is，Windows 原生容器不做。
 
 ### 项目（Project / 仓库）
 
