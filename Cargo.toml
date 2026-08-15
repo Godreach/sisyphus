@@ -29,6 +29,9 @@ clap = { version = "4", features = ["derive"] }
 # async runtime helpers
 futures = "0.3"
 tracing = "0.1"
+# server 配置与日志（ADR-0010/0019）
+toml = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [workspace.lints.rust]
 # unsafe 降为 warn：vendored protoc 的 build.rs 需 set_var（1.97 起为 unsafe），
