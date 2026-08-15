@@ -15,7 +15,7 @@
 - **v1 共 4 个 crate**，目录**平铺在仓库根**（不做 apps/libs 二分，不设 `crates/` 中间层），与 `sisyphus-web`、`docs/` 平级（2026-08-15 经 ADR-0021 修订）：
   - `sisyphus-proto` -- `.proto` 生成物（tonic/prost）。**Agent/Server 唯一共享 crate**。`.proto` 源文件放 `sisyphus-proto/proto/`（契约先行、语言中立），build.rs 指向之。
   - `sisyphus-model` -- Pipeline 定义 JSON 模型、when 表达式 AST、参数/内置变量解析、编辑器保存校验规则的纯类型与纯逻辑（serde），零重依赖叶子 crate；未来 TS 类型生成以它为锚点。
-  - `sisyphus-server` -- bin，单进程承载全部 Server 职责。
+  - `sisyphus-server` -- 单进程承载全部 Server 职责。2026-08-16 起 **lib+bin**（票 #33）：bin 只留启动路径，模块实现在 lib 面——`tests/` 集成测试与二进制共用同一 Router/组合根装配（Spec B2a 测试缝：进程内 oneshot，不起 socket）。模块边界不变：pub 面即 crate 本身，模块间仍走 crate 内可见性。
   - `sisyphus-agent` -- bin，只依赖 `sisyphus-proto`，不依赖 `sisyphus-model`。
 - **proto 生成物不进 git**：`sisyphus-proto` build.rs 用 tonic-build/prost-build（vendored protoc，无系统依赖）现场生成。
 - **不立 `xtask`**：OpenAPI snapshot、i18n 对账、TS 生成等工具需求真实出现时再建。

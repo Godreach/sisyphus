@@ -88,7 +88,7 @@ UPDATE_SNAPSHOTS=1 cargo test -p sisyphus-server    # 重写快照
 
 ## 项目状态
 
-设计阶段：领域模型与架构决策已定稿（14 篇 ADR + [CONTEXT.md](CONTEXT.md) 词汇表，见 [docs/adr/](docs/adr/)），实现尚未开始。
+实现进行中：B1 骨架（workspace 四 crate、proto 契约、model 保存校验、Agent 握手闭环、CI）与 Spec B2a 存储与 API 底座（配置合并、SQLite 池+迁移+备份、REST/gRPC 双服务、pipeline 定义读写闭环、内嵌静态资源）已落地。设计基线：21 篇 ADR + [CONTEXT.md](CONTEXT.md) 词汇表（见 [docs/adr/](docs/adr/)）。
 
 ## License
 
