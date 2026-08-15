@@ -163,3 +163,11 @@ Agent 的升级分发机制：管理员把 agent 发行包上传到 Server（仅
 ### 数据目录（Data Directory）
 
 Server 的单一数据落点（`--data-dir`，默认 `./data`，Docker 固定 `/data`），内含 SQLite 数据库与产物存储；首次启动生成带注释的 config.toml。配置优先级：CLI flag > `SISYPHUS_` 前缀环境变量 > config.toml > 内置默认。
+
+### 指标（Metrics）
+
+Server 运行状态的量化度量，一次埋点双路消费：内部快照喂 web 概览页（仅当前值 + 事实型警示态，如「有 Agent 离线」「任务无匹配 Agent」，零阈值配置、无历史曲线），`/metrics` 端点输出 Prometheus 文本（同端口，默认 PAT 鉴权、config 可关）。v1 不做独立告警通道--人看警示态，机器读 /metrics。
+
+### 磁盘占用上报（Disk Usage Report）
+
+Agent 随心跳上报的构建机磁盘占用：卷级剩余/总量与缓存占用（记账值）每次常带；工作区占用由 Agent 后台低频遍历（默认 10 分钟）采样、心跳附带最近值。UI Agent 详情页展示，不做阈值告警。
