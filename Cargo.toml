@@ -32,6 +32,8 @@ tracing = "0.1"
 # server 配置与日志（ADR-0010/0019）
 toml = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# server 存储：SQLite WAL + sqlx（bundled 静态链接，ADR-0004）
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate"] }
 
 [workspace.lints.rust]
 # unsafe 降为 warn：vendored protoc 的 build.rs 需 set_var（1.97 起为 unsafe），

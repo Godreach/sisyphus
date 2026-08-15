@@ -16,6 +16,8 @@ pub const DEFAULT_LOG_FORMAT: &str = "json";
 
 /// 数据目录内的配置文件名。
 pub const CONFIG_FILE_NAME: &str = "config.toml";
+/// 数据目录内的 SQLite 数据库文件名（ADR-0010）。
+pub const DB_FILE_NAME: &str = "sisyphus.db";
 /// 数据目录内的产物存储子目录名（ADR-0004）。
 pub const ARTIFACTS_DIR: &str = "artifacts";
 /// 数据目录内的迁移前备份子目录名（ADR-0010）。

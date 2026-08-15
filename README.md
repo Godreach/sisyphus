@@ -58,6 +58,24 @@ gRPC 通道（proto = Agent/Server 唯一共享契约；Server 下发已解析�
 - Server 与 Agent 同版本号成对发布；升级顺序 Server 先升，兼容窗口 N-1。
 - 单一 `--data-dir`（内含 SQLite 与产物存储），首次启动生成带注释的 `config.toml`；启动自动前向迁移，迁移前自动备份 db。
 
+## 开发
+
+```bash
+cargo build --workspace                        # 构建（vendored protoc，无需系统 protoc）
+cargo test --workspace                         # 测试
+cargo clippy --workspace -- -D warnings        # lint
+```
+
+### 数据库迁移工作流
+
+迁移 SQL 位于 `sisyphus-server/src/store/migrations/`，经 `sqlx::migrate!` 编译期嵌入——单二进制自带迁移（ADR-0009）。新增迁移后：
+
+1. 在 `migrations/` 加 `NNNN_描述.sql`，版本号递增、只加不破（proto 同款演进纪律）。
+2. 若本次改动含编译期校验查询（`sqlx::query!` 宏），本地跑 `cargo sqlx prepare --workspace`（需 [sqlx-cli](https://github.com/launchbadge/sqlx/tree/main/sqlx-cli)，`DATABASE_URL` 指向已应用迁移的开发库），生成 `.sqlx/` 离线校验文件。
+3. 连 `.sqlx/` 一起提交——CI 构建免 `DATABASE_URL`。
+
+服务端启动时自动前向迁移，迁移前自动把 db（连 `-wal`/`-shm`）备份到 `<data-dir>/backups/`（ADR-0010）；不支持降级。
+
 ## 项目状态
 
 设计阶段：领域模型与架构决策已定稿（14 篇 ADR + [CONTEXT.md](CONTEXT.md) 词汇表，见 [docs/adr/](docs/adr/)），实现尚未开始。

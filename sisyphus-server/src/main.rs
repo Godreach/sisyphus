@@ -1,8 +1,9 @@
 //! sisyphus-server：单进程承载全部 Server 职责（ADR-0009）。
 //!
-//! B1 交付骨架二进制 + 最小握手闭环（ADR-0017）；B2a-T1 起启动路径为：
+//! B1 交付骨架二进制 + 最小握手闭环（ADR-0017）；启动路径（B2a）：
 //! 解析 CLI → 合并配置（ADR-0010）→ 初始化 tracing（ADR-0019）→
-//! 确保 data-dir 布局 → serve。REST Router 与存储随后续批次接入。
+//! 确保数据目录布局 → 开池+PRAGMA → 迁移前备份+前向迁移（ADR-0004/0010）→
+//! serve。REST Router 与存储消费随后续批次接入。
 
 mod api;
 mod auth;
@@ -70,6 +71,15 @@ async fn main() {
         }
     };
     init_tracing(&config);
+
+    // 存储底座（B2a-T2）：开池+PRAGMA，有待应用迁移时先备份再前向迁移。
+    let _pool = match store::bootstrap(&config.data_dir).await {
+        Ok(pool) => pool,
+        Err(e) => {
+            tracing::error!("存储初始化失败：{e}");
+            std::process::exit(2);
+        }
+    };
 
     let service = grpc::service();
     let addr: std::net::SocketAddr = config.grpc_addr.parse().expect("配置层已校验监听地址");
