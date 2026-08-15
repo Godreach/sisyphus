@@ -1,0 +1,24 @@
+[package]
+name = "sisyphus-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "sisyphus Agent 二进制：构建机守护进程，只依赖 sisyphus-proto（ADR-0009）"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "sisyphus-agent"
+path = "src/main.rs"
+
+[dependencies]
+sisyphus-proto = { path = "../sisyphus-proto" }
+tokio.workspace = true
+tokio-stream = "0.1"
+tonic.workspace = true
+tracing.workspace = true
+clap.workspace = true

@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "sisyphus-proto",
+    "sisyphus-model",
+    "sisyphus-server",
+    "sisyphus-agent",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+authors = ["sisyphus contributors"]
+repository = "https://github.com/Godreach/sisyphus"
+
+[workspace.dependencies]
+# serde family — shared by model / server / agent
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# tokio runtime
+tokio = { version = "1", features = ["full"] }
+# proto (Agent/Server 唯一共享契约)
+tonic = { version = "0.14", features = ["transport"] }
+prost = "0.14"
+# cli
+clap = { version = "4", features = ["derive"] }
+# async runtime helpers
+futures = "0.3"
+tracing = "0.1"
+
+[workspace.lints.rust]
+# unsafe 降为 warn：vendored protoc 的 build.rs 需 set_var（1.97 起为 unsafe），
+# forbid 会阻塞这一标准构建模式；warn 仍能暴露任何 unsafe 供评审。
+unsafe_code = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"

@@ -1,0 +1,6 @@
+# Rust 构建产物（含 proto 生成物——生成到 OUT_DIR，不进 git，ADR-0009）
+/target/
+**/*.rs.bk
+
+# 本地数据目录
+/data/

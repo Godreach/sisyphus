@@ -1,0 +1,24 @@
+[package]
+name = "sisyphus-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "sisyphus Server 二进制：单进程承载 web UI、REST API、编排调度与 Agent 通道"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "sisyphus-server"
+path = "src/main.rs"
+
+[dependencies]
+sisyphus-proto = { path = "../sisyphus-proto" }
+tokio.workspace = true
+tokio-stream = "0.1"
+tonic.workspace = true
+tracing.workspace = true
+clap.workspace = true

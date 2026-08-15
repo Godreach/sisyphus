@@ -1,0 +1,358 @@
+// sisyphus Agent/Server 共享契约（ADR-0007 + 下游 ADR-0008/0011/0012/0013/0015/0017/0019）。
+//
+// 契约先行、语言中立：本文件即 Agent/Server 之间的唯一共享契约。演进规则：
+// 仅加字段、unknown field 忽略，N-1 兼容窗口（ADR-0007）。
+//
+// 单一 gRPC 双向流 service（`AgentChannel`），一条连接多路复用全部消息：
+// 握手、心跳、任务下发/回执/状态、日志流、取消、在途任务上报、
+// 工作区/缓存查询与指令、升级指令/状态、磁盘占用上报。
+
+syntax = "proto3";
+
+package sisyphus.v1;
+
+// ============================================================
+// 基础语义
+// ============================================================
+
+// 语义版本号（ADR-0010/0017：Server/Agent 同版本成对发布，N-1 兼容窗口）。
+message Version {
+  uint32 major = 1;
+  uint32 minor = 2;
+  uint32 patch = 3;
+}
+
+// 双向流中的上行/下行消息，每帧一个变体。
+message ChannelMessage {
+  oneof kind {
+    // --- 下行（Server -> Agent）---
+    JobSpec job_spec = 1;        // 任务下发（ADR-0008）
+    CancelBuild cancel = 2;      // 取消指令（build 级，ADR-0008）
+    UpgradeCommand upgrade = 3;  // 升级指令（ADR-0017）
+    WorkspaceCommand workspace_cmd = 4;  // 工作区列表/清理指令（ADR-0011）
+    CacheCommand cache_cmd = 5;  // 缓存列表/删除指令（ADR-0012）
+
+    // --- 上行（Agent -> Server）---
+    Handshake handshake = 10;         // 握手（首帧，ADR-0017）
+    Heartbeat heartbeat = 11;         // 心跳（ADR-0007/0019）
+    JobAck job_ack = 12;              // 任务回执（ADR-0008）
+    JobStatus job_status = 13;        // 状态上报（ADR-0008）
+    LogBatch log_batch = 14;          // 日志流（ADR-0013）
+    JobReported job_reported = 15;    // 在途任务上报（ADR-0008/0011）
+    UpgradeStatus upgrade_status = 16; // 升级状态上报（ADR-0017）
+    WorkspaceList workspace_list = 17; // 工作区列表响应（ADR-0011）
+    CacheList cache_list = 18;         // 缓存列表响应（ADR-0012）
+  }
+}
+
+// ============================================================
+// 注册 / 握手 / 心跳
+// ============================================================
+
+// 握手：流建立后双方互见版本（ADR-0017）。
+// Agent 过新（> Server）：Server 拒连并明确报错；
+// Agent 过旧（< N-1）：Server 任务面拒连、升级面保留。
+message Handshake {
+  Version agent_version = 1;
+  string agent_name = 2;   // 主机名，仅标识
+}
+
+message Heartbeat {
+  // 随心跳携带的构建机磁盘占用（ADR-0019）。
+  DiskUsage disk = 1;
+}
+
+message DiskUsage {
+  // 卷级剩余/总量（字节），多卷逐项。
+  repeated VolumeUsage volumes = 1;
+  // 缓存占用（记账值，ADR-0012 registry）。
+  int64 cache_bytes = 2;
+  // 工作区占用最近采样（ADR-0019）。
+  int64 workspace_bytes = 3;
+}
+
+message VolumeUsage {
+  string mount_point = 1;
+  int64 total_bytes = 2;
+  int64 free_bytes = 3;
+}
+
+// ============================================================
+// 任务规格（ResolvedJobSpec，ADR-0009）
+// ============================================================
+
+// Server 向 Agent 下发的已解析任务规格：变量已替换（7 个 Server 解析 +
+// SISY_WORKSPACE 占位符 Agent 侧替换）、env 已合并、三级 when 已求值、
+// 只含待跑节点。Agent 拿到即执行，对 Pipeline 定义一无所知（ADR-0009）。
+message JobSpec {
+  string job_id = 1;            // 任务唯一标识
+  string pipeline_name = 2;     // 仅标识/工作区路径
+  string job_name = 3;          // 仅标识/工作区路径
+  int64 build_number = 4;       // per-pipeline 自增构建号（ADR-0006）
+  int32 attempt = 5;            // 重跑 attempt（从失败任务重跑 attempt+1）
+  int64 log_limit_bytes = 6;    // per-job 日志上限（ADR-0013，0 = 默认 50MB）
+  repeated JobStep steps = 7;   // 待执行步骤（已求值）
+  map<string, string> env = 8;  // 已合并 env（ADR-0006：注入进程环境）
+  ExecutionEnv exec_env = 9;    // 执行环境（host / container）
+  int64 timeout_minutes = 10;   // job 级超时（分钟，0 = 无限，ADR-0008）
+  repeated ArtifactUpload uploads = 11;   // 产物上传声明（完成后上传）
+  repeated ArtifactDownload downloads = 12; // 产物下载依赖（开始前拉取）
+  repeated CacheSpec caches = 13;         // 缓存声明（ADR-0012）
+  repeated string secrets = 14;           // 机密值清单（ADR-0015，已解密值随 env）
+  // checkout SCM 凭据（ADR-0015/0016：仅经 ASKPASS 递送，不上命令行）
+  optional SCMCredential scm_credential = 15;
+  // Agent 标签要求（AND 全集匹配，ADR-0008；调度时已匹配，随规格下发作回显/审计）
+  repeated string labels = 16;
+  // 失败语义（ADR-0006）：自动重试次数与 allow_failure 豁免。
+  int32 retry_count = 17;
+  bool allow_failure = 18;
+}
+
+// 执行环境（ADR-0002/0018）：宿主机直跑（默认）或容器。
+message ExecutionEnv {
+  oneof kind {
+    HostEnv host = 1;
+    ContainerEnv container = 2;
+  }
+}
+
+message HostEnv {}
+
+// 容器后端：仅 image 字段（ADR-0018），每步骤一个一次性容器。
+message ContainerEnv {
+  string image = 1;
+}
+
+message JobStep {
+  string name = 1;
+  int32 seq = 2;            // 步骤序号（同任务内单调）
+  oneof kind {
+    ShellStep shell = 3;
+    CheckoutStep checkout = 4;
+  }
+}
+
+// shell 步骤：解释器默认语义 Unix->sh、Windows->pwsh 无则 cmd（ADR-0006）。
+message ShellStep {
+  string command = 1;
+}
+
+// checkout scm 步骤：检出项目绑定仓库到工作区根并钉到确切提交（ADR-0016）。
+// 增量语义（ADR-0011）：fetch + checkout + clean -fd，保 .git 与忽略文件。
+message CheckoutStep {
+  VcsType vcs = 1;
+  string repo_url = 2;
+  // git: 分支 + commit sha；svn: revision 号。
+  string ref = 3;
+  string commit = 4;
+  bool submodules = 5;  // git 子模块开关，默认开（ADR-0016）
+}
+
+enum VcsType {
+  VCS_GIT = 0;
+  VCS_SVN = 1;
+}
+
+message ArtifactUpload {
+  string name = 1;
+  string path = 2;  // workspace 相对路径（声明式，完成后上传）
+}
+
+message ArtifactDownload {
+  string job_id = 1;
+  string name = 2;
+  string path = 3;
+}
+
+// 缓存声明（ADR-0012）：key 模板 + workspace 相对路径 + 可选 files 哈希分量。
+message CacheSpec {
+  string key = 1;
+  repeated string paths = 2;
+  repeated string files = 3;  // 仅精确路径；按声明顺序拼接内容 sha256 前 12 位
+}
+
+// SCM 凭据（ADR-0015）：username + password/token，永不上命令行/URL。
+message SCMCredential {
+  string username = 1;
+  string password = 2;
+}
+
+// ============================================================
+// 回执 / 状态 / 在途任务
+// ============================================================
+
+message JobAck {
+  string job_id = 1;
+  bool accepted = 2;
+  string error = 3;
+}
+
+// 任务状态（ADR-0008）：running / unknown 中间态 + 终态。
+enum JobPhase {
+  JOB_UNSPECIFIED = 0;
+  JOB_RUNNING = 1;
+  JOB_UNKNOWN = 2;   // Agent 离线期间（Server 侧），ADR-0008
+  JOB_SUCCEEDED = 3;
+  JOB_FAILED = 4;
+  JOB_CANCELLED = 5;
+  JOB_TIMEOUT = 6;
+  JOB_ABORTED = 7;   // Agent 重启丢任务上报 aborted（ADR-0008）
+}
+
+message JobStatus {
+  string job_id = 1;
+  JobPhase phase = 2;
+  // 终态附带：退出码、失败任务名、耗时。
+  optional int32 exit_code = 3;
+  string detail = 4;
+}
+
+// 在途任务上报：Agent 重连后上报仍在运行的任务（ADR-0008/0011）。
+message JobReported {
+  repeated string job_ids = 1;
+}
+
+// ============================================================
+// 取消（build 级，ADR-0008）
+// ============================================================
+
+message CancelBuild {
+  string build_id = 1;
+  // Agent 离线时指令挂起、重连补发（ADR-0008）。
+  string job_id = 2;
+}
+
+// ============================================================
+// 日志流（ADR-0013）
+// ============================================================
+
+// 每 job 一 stream，按到达顺序交织输出块与步骤生命周期事件。
+// seq 按 attempt 计、per-job 单调（ADR-0013）。
+message LogBatch {
+  string job_id = 1;
+  int32 attempt = 2;
+  uint64 start_seq = 3;   // 本批起始 seq
+  repeated LogEvent events = 4;
+}
+
+message LogEvent {
+  uint64 seq = 1;
+  oneof kind {
+    OutputChunk output = 2;
+    StepEvent step = 3;
+    Truncated truncated = 4;  // 超限截断标记（不判败，ADR-0013）
+  }
+}
+
+message OutputChunk {
+  Stream stream = 1;    // stdout/stderr 合流、带 stream 标记
+  bytes data = 2;       // 原样（含 ANSI 色码，前端剥离）
+}
+
+enum Stream {
+  STREAM_STDOUT = 0;
+  STREAM_STDERR = 1;
+}
+
+// 步骤生命周期事件（ADR-0013：start 含命令回显 / end 含退出码与耗时）。
+message StepEvent {
+  int32 seq = 1;              // 步骤序号
+  int64 step_started_at_ms = 2;
+  int64 step_ended_at_ms = 3;
+  optional int32 exit_code = 4;  // None = start，Some = end
+  string command = 5;         // 命令回显（step start 事件携带）
+}
+
+// 日志截断标记（ADR-0013：超限丢弃、插入标记事件、不判败）。
+message Truncated {
+  uint64 dropped_bytes = 1;
+}
+
+// ============================================================
+// 工作区 / 缓存管理（ADR-0011/0012）
+// ============================================================
+
+message WorkspaceCommand {
+  oneof kind {
+    WorkspaceListRequest list = 1;
+    WorkspaceCleanRequest clean = 2;
+  }
+}
+
+message WorkspaceListRequest {}
+
+message WorkspaceCleanRequest {
+  string pipeline = 1;   // 留空 = 全清
+  string job = 2;        // 留空 = 清该 pipeline 全部
+}
+
+message WorkspaceList {
+  repeated WorkspaceEntry entries = 1;
+}
+
+message WorkspaceEntry {
+  string pipeline = 1;
+  string job = 2;
+  string path = 3;
+  int64 last_used_at_ms = 4;
+}
+
+message CacheCommand {
+  oneof kind {
+    CacheListRequest list = 1;
+    CacheDeleteRequest delete = 2;
+  }
+}
+
+message CacheListRequest {}
+
+message CacheDeleteRequest {
+  string key = 1;  // 留空 = 全清
+}
+
+message CacheList {
+  repeated CacheEntry entries = 1;
+}
+
+message CacheEntry {
+  string key = 1;
+  string pipeline = 2;
+  int64 size_bytes = 3;
+  int64 last_used_at_ms = 4;
+}
+
+// ============================================================
+// 升级（ADR-0017）
+// ============================================================
+
+message UpgradeCommand {
+  // 发行包文件名/标识；Agent 下载校验后原子换入、spawn 新进程重启。
+  string package_name = 1;
+  string sha256 = 2;
+  string download_url = 3;
+}
+
+// 升级阶段（ADR-0017：排空/下载/换入/启动失败退回）。
+enum UpgradePhase {
+  UPGRADE_UNSPECIFIED = 0;
+  UPGRADE_DRAINING = 1;      // 排空：停接新任务、等运行中任务终态
+  UPGRADE_DOWNLOADING = 2;
+  UPGRADE_SWAPPING = 3;      // 原子换入 + spawn
+  UPGRADE_RESTARTING = 4;
+  UPGRADE_FALLBACK = 5;      // 连续 3 次启动失败退回 .old
+}
+
+message UpgradeStatus {
+  UpgradePhase phase = 1;
+  string error = 2;
+}
+
+// ============================================================
+// 服务定义
+// ============================================================
+
+// Agent 主动外连的双向流（ADR-0007）：任务控制、心跳、日志、状态、
+// 取消全走此通道多路复用。产物上传走独立 HTTP 端点（不进本通道）。
+service AgentChannel {
+  rpc Connect(stream ChannelMessage) returns (stream ChannelMessage);
+}

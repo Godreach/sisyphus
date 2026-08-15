@@ -1,0 +1,20 @@
+[package]
+name = "sisyphus-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pipeline 定义 JSON 模型、when 表达式 AST、变量解析与保存校验（纯逻辑叶子 crate）"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror = "2"
+
+[dev-dependencies]
+serde_json.workspace = true
