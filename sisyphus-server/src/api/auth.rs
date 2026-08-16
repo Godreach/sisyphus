@@ -117,6 +117,19 @@ pub async fn setup(
 
     let hash = hash_password(&req.password).await;
     let user = state.users.create(req.username.trim(), &hash, true).await?;
+    // 审计（票 B2b-T7，ADR-0015）：首个全局 admin 的建立也是安全事件——
+    // 回放面从这里起账。detail 记目标用户名（与全局 admin 建号同形态，
+    // 审计回放对 user_created 有稳定 schema）。
+    state
+        .audit
+        .insert(
+            now_ms(),
+            &user.username,
+            crate::store::audit::AuditEvent::UserCreated,
+            None,
+            Some(&serde_json::json!({ "username": user.username }).to_string()),
+        )
+        .await?;
     Ok((
         StatusCode::CREATED,
         Json(MeResponse {
@@ -163,6 +176,18 @@ pub async fn register(
 
     let hash = hash_password(&req.password).await;
     let user = state.users.create(req.username.trim(), &hash, false).await?;
+    // 审计（票 B2b-T7）：自注册建号与全局 admin 建号同为 user_created
+    // （detail 同形态：记目标用户名）。
+    state
+        .audit
+        .insert(
+            now_ms(),
+            &user.username,
+            crate::store::audit::AuditEvent::UserCreated,
+            None,
+            Some(&serde_json::json!({ "username": user.username }).to_string()),
+        )
+        .await?;
     Ok((
         StatusCode::CREATED,
         Json(MeResponse {
@@ -202,6 +227,9 @@ pub async fn login(
     // 中即 429——正确密码也不放行（暴破拖慢是本面的唯一目标）。
     let now = now_ms();
     if let Some(retry_after_ms) = state.login_limiter.check_login(&ip, &username, now) {
+        // 审计（票 B2b-T7）：限流触达也是失败认证——暴破被拖慢的轨迹要能
+        // 从审计面看到（登录失败事件，actor 为被尝试的用户名）。
+        record_login_failure(&state, &username, now).await?;
         return Ok(rate_limited(retry_after_ms));
     }
 
@@ -214,6 +242,7 @@ pub async fn login(
             state
                 .login_limiter
                 .record_login_failure(&ip, &username, now);
+            record_login_failure(&state, &username, now).await?;
             return Err(ApiError::unauthorized());
         }
     };
@@ -221,9 +250,11 @@ pub async fn login(
         state
             .login_limiter
             .record_login_failure(&ip, &username, now);
+        record_login_failure(&state, &username, now).await?;
         return Err(ApiError::unauthorized());
     }
     state.login_limiter.record_login_success(&ip, &username);
+    record_login_success(&state, &username, now).await?;
 
     // 建会话：撞主键（概率上不可达）换 id 重试。
     let mut session_id = None;
@@ -279,6 +310,18 @@ pub async fn logout(
     if let AuthChannel::Session { id_hash } = &auth.channel {
         state.sessions.delete(id_hash).await?;
         clear_session_cookie(&mut resp);
+        // 审计（票 B2b-T7）：只记真正结束了会话的登出（cookie 通道）；
+        // Bearer 通道无事可做，不制造空事件。
+        state
+            .audit
+            .insert(
+                now_ms(),
+                &auth.username,
+                crate::store::audit::AuditEvent::Logout,
+                None,
+                None,
+            )
+            .await?;
     }
     Ok(resp)
 }
@@ -540,6 +583,25 @@ fn insert_set_cookie(resp: &mut Response, cookie: &str) {
     let value =
         axum::http::HeaderValue::from_str(cookie).expect("cookie 只含 base64url 与 ASCII 属性");
     resp.headers_mut().insert(header::SET_COOKIE, value);
+}
+
+/// 登录成功审计事件（login handler 记账；时间取业务写入同一取值）。
+async fn record_login_success(state: &AppState, username: &str, now: i64) -> Result<(), ApiError> {
+    state
+        .audit
+        .insert(now, username, crate::store::audit::AuditEvent::LoginSuccess, None, None)
+        .await?;
+    Ok(())
+}
+
+/// 登录失败审计事件（失败即记账；用户不存在与密码错误同记，detail 无目标
+/// 区分——与 401 响应形态一致）。
+async fn record_login_failure(state: &AppState, username: &str, now: i64) -> Result<(), ApiError> {
+    state
+        .audit
+        .insert(now, username, crate::store::audit::AuditEvent::LoginFailure, None, None)
+        .await?;
+    Ok(())
 }
 
 /// 用户枚举诱饵哈希（惰性生成一次，经 spawn_blocking 不占执行器线程；

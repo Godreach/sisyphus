@@ -155,6 +155,18 @@ pub async fn create(
                 .filter(|b| !b.is_empty()),
         })
         .await?;
+    // 审计（票 B2b-T7，ADR-0015）：项目建——项目域事件记项目名（审计
+    // 保留名不保留引用，项目行随未来批次删除也不悬空）。
+    state
+        .audit
+        .insert(
+            crate::store::now_ms(),
+            &auth.username,
+            crate::store::audit::AuditEvent::ProjectCreated,
+            Some(&project.name),
+            None,
+        )
+        .await?;
     Ok((StatusCode::CREATED, Json(project.into())))
 }
 

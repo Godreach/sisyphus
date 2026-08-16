@@ -3,6 +3,7 @@
 
 use utoipa::OpenApi;
 
+use super::audit;
 use super::auth;
 use super::error::{ErrorBody, ValidationIssue};
 use super::health;
@@ -52,6 +53,7 @@ use super::users;
         users::patch,
         users::reset_password,
         users::directory,
+        audit::list,
     ),
     components(schemas(
         health::Healthz,
@@ -79,6 +81,7 @@ use super::users;
         users::PatchUserRequest,
         users::ResetPasswordRequest,
         users::DirectoryEntryResponse,
+        audit::AuditEntryResponse,
     )),
     tags(
         (name = "infra", description = "探针与基础设施端点"),
@@ -87,6 +90,7 @@ use super::users;
         (name = "secrets", description = "项目机密（票 B2b-T6：值只写不读——建/覆写、仅名清单、删；viewer/runner 连名不可见，项目 admin 档）"),
         (name = "pipelines", description = "Pipeline 定义读写（model 校验 + revision 语义）"),
         (name = "users", description = "用户管理（全局 admin：建/列/禁用/重置，票 B2b-T4）与用户目录（项目 admin 的最小只读清单，票 B2b-T5）"),
+        (name = "audit", description = "审计回放（票 B2b-T7：安全事件只增记账，仅全局 admin 可查询——按时间/用户/项目/事件类型过滤 + 分页）"),
     )
 )]
 pub struct ApiDoc;

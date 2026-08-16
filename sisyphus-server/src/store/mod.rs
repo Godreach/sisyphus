@@ -6,6 +6,7 @@
 //! 读写；trait 缝（[`LogStore`](traits::LogStore) / [`ArtifactStore`](traits::ArtifactStore)）
 //! 只定形不实现，随消费批次落同一缝。
 
+pub mod audit;
 pub mod members;
 pub mod pipelines;
 pub mod projects;
@@ -247,6 +248,7 @@ mod tests {
             "personal_access_tokens",
             "project_members",
             "secrets",
+            "audit_log",
         ] {
             assert!(
                 tables.iter().any(|t| t == expected),
@@ -293,6 +295,7 @@ mod tests {
             "DROP TABLE personal_access_tokens",
             "DROP TABLE project_members",
             "DROP TABLE secrets",
+            "DROP TABLE audit_log",
         ] {
             sqlx::raw_sql(stmt)
                 .execute(&pool)

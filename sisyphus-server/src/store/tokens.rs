@@ -107,6 +107,24 @@ impl PatRepo {
         Ok(result.rows_affected() > 0)
     }
 
+    /// 按 id + 属主取一行（票 B2b-T7：吊销前取令牌名落审计 detail）。
+    /// 他人 id 一律 `None`（与吊销的「不暴露存在性」同一纪律）。
+    pub async fn get_by_user(
+        &self,
+        user_id: i64,
+        id: i64,
+    ) -> Result<Option<PatRow>, StoreError> {
+        let row = sqlx::query_as::<_, (i64, i64, String, String, Option<i64>, i64)>(
+            "SELECT id, user_id, name, token_hash, expires_at, created_at
+             FROM personal_access_tokens WHERE id = ? AND user_id = ?",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(PatRow::from_row))
+    }
+
     /// 认证路径：按哈希取有效行（过期与吊销同表为 `None`——与「行存在
     /// 与否」不可区分，一律 401）。
     pub async fn find_valid_by_hash(
@@ -288,44 +306,68 @@ mod tests {
     #[tokio::test]
     async fn delete_revokes_immediately_and_is_owner_scoped() {
         let (_dir, pool, user_id) = fixture().await;
-        let repo = PatRepo::new(pool);
-        let now = 1_000_000_i64;
-
+        let repo = PatRepo::new(pool.clone());
         let (_, hash) = mint();
         let row = repo
-            .insert(user_id, "doomed", &hash, None, now)
+            .insert(user_id, "ci-deploy", &hash, None, 0)
             .await
             .expect("写入");
-        assert!(
-            repo.find_valid_by_hash(&hash, now)
-                .await
-                .expect("查")
-                .is_some(),
-            "吊销前应有效"
-        );
 
-        // 他人（user_id + 1）不可吊销：命中 0 行，原行仍在。
+        // 他人 id（双条件）：不命中——吊销不可越权，原行仍在。
         assert!(
-            !repo.delete(user_id + 1, row.id).await.expect("他人吊销"),
-            "属主外的 delete 不应命中"
+            !repo.delete(user_id + 999, row.id).await.expect("异主删"),
+            "他人 id 应不命中"
         );
         assert!(
-            repo.find_valid_by_hash(&hash, now)
+            repo.find_valid_by_hash(&hash, 0)
                 .await
                 .expect("查")
                 .is_some(),
             "他人吊销后原 token 应仍有效"
         );
-
-        // 属主吊销：删行，下一查即 None（立即失效）；再删同 id 返回 false。
-        assert!(repo.delete(user_id, row.id).await.expect("属主吊销"));
+        // 属主删：命中且行消失（下一查即 None，立即失效）；再删同 id
+        // 返回 false（幂等不存在）。
         assert!(
-            repo.find_valid_by_hash(&hash, now)
+            repo.delete(user_id, row.id).await.expect("属主删"),
+            "属主吊销应命中"
+        );
+        assert!(
+            repo.find_valid_by_hash(&hash, 0)
                 .await
                 .expect("查")
                 .is_none(),
-            "吊销后应立即失效"
+            "吊销后认证应失败"
         );
         assert!(!repo.delete(user_id, row.id).await.expect("重复吊销"));
+    }
+
+    /// 票 B2b-T7：吊销前按 id + 属主取行（令牌名落审计 detail）；他人 id
+    /// 一律 None（不暴露存在性，与吊销同纪律）。
+    #[tokio::test]
+    async fn get_by_user_returns_own_row_and_hides_others() {
+        let (_dir, pool, user_id) = fixture().await;
+        let repo = PatRepo::new(pool.clone());
+        let (_, hash) = mint();
+        let row = repo
+            .insert(user_id, "ci-deploy", &hash, None, 0)
+            .await
+            .expect("写入");
+
+        let got = repo
+            .get_by_user(user_id, row.id)
+            .await
+            .expect("查")
+            .expect("属主应命中");
+        assert_eq!(got.name, "ci-deploy");
+        assert_eq!(got.token_hash, hash);
+
+        assert!(
+            repo.get_by_user(user_id, row.id + 999).await.expect("查").is_none(),
+            "未知 id 应 None"
+        );
+        assert!(
+            repo.get_by_user(user_id + 999, row.id).await.expect("查").is_none(),
+            "他人 id 应 None（不暴露存在性）"
+        );
     }
 }

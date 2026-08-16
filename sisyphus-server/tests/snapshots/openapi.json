@@ -13,6 +13,162 @@
     "version": "1.0.0"
   },
   "paths": {
+    "/api/v1/audit": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "审计回放（全局 admin）：按时间 / 用户 / 项目 / 事件类型过滤 + 分页，\n时间倒序（新事件在前）。",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "时间下限（含；Unix 毫秒）。",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "description": "时间上限（含；Unix 毫秒）。",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "user",
+            "in": "query",
+            "description": "操作人（用户名，精确匹配）。",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "description": "项目名（精确匹配）。",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "event",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "login_success",
+                "login_failure",
+                "logout",
+                "user_created",
+                "user_disabled",
+                "user_enabled",
+                "password_reset",
+                "pat_created",
+                "pat_revoked",
+                "project_created",
+                "member_roles_changed",
+                "secret_created",
+                "secret_overwritten",
+                "secret_deleted"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "单页条数（1..=200，默认 50）。",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "跳过条数（默认 0）。",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "审计条目（时间倒序；detail 为 JSON 对象，机密事件只记名）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AuditEntryResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非全局管理员（审计仅全局 admin 可读）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "过滤/分页参数非法（未知事件类型、limit 越界等）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/auth/login": {
       "post": {
         "tags": [
@@ -1431,6 +1587,46 @@
   },
   "components": {
     "schemas": {
+      "AuditEntryResponse": {
+        "type": "object",
+        "description": "审计条目（detail 为 JSON 对象——机密事件只含名，永不出现值形态）。",
+        "required": [
+          "id",
+          "ts",
+          "actor",
+          "event"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "description": "操作人（用户名）。"
+          },
+          "detail": {
+            "description": "结构化补充（可空：机密名 / 目标用户 / 成员角色清单等）。"
+          },
+          "event": {
+            "type": "string",
+            "description": "事件类型（[`AuditEvent`] 契约值）。"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "行 id。"
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "项目名（可空：非项目域事件）。"
+          },
+          "ts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "事件时间（Unix 毫秒）。"
+          }
+        }
+      },
       "ChangePasswordRequest": {
         "type": "object",
         "description": "自助改密请求体（票 B2b-T4）。",
@@ -1990,6 +2186,10 @@
     {
       "name": "users",
       "description": "用户管理（全局 admin：建/列/禁用/重置，票 B2b-T4）与用户目录（项目 admin 的最小只读清单，票 B2b-T5）"
+    },
+    {
+      "name": "audit",
+      "description": "审计回放（票 B2b-T7：安全事件只增记账，仅全局 admin 可查询——按时间/用户/项目/事件类型过滤 + 分页）"
     }
   ]
 }

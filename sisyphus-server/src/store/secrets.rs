@@ -90,6 +90,19 @@ impl SecretRepo {
         Ok(names)
     }
 
+    /// 机密名是否存在（票 B2b-T7：建/覆写前区分审计事件类型——同名已存
+    /// 即覆写）。只查存在性，不读值（值只写不读纪律不破）。
+    pub async fn exists(&self, project_id: i64, name: &str) -> Result<bool, StoreError> {
+        let hit: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM secrets WHERE project_id = ? AND name = ? LIMIT 1",
+        )
+        .bind(project_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(hit.is_some())
+    }
+
     /// 删除机密（名消失，AC：DELETE 后名不在清单）。以项目 + 名双条件
     /// 命中才删；不存在返回 `false`（调用侧 404，不暴露存在性）。
     pub async fn delete(&self, project_id: i64, name: &str) -> Result<bool, StoreError> {

@@ -21,6 +21,7 @@
 //! - 非 `/api` 未命中路径走静态资源解析（web 模块：本地覆盖目录 → 内嵌
 //!   sisyphus-web 产物 → SPA fallback 回 index.html，B2a-T5）。
 
+pub mod audit;
 pub mod auth;
 pub mod csrf;
 pub mod docs;
@@ -51,6 +52,7 @@ pub use docs::ApiDoc;
 use crate::api::error::ApiError;
 use crate::auth::LoginRateLimiter;
 use crate::secrets::MasterKey;
+use crate::store::audit::AuditRepo;
 use crate::store::members::MemberRepo;
 use crate::store::pipelines::PipelineRepo;
 use crate::store::projects::ProjectRepo;
@@ -76,6 +78,9 @@ pub struct AppState {
     pub members: MemberRepo,
     /// 项目机密 repo（票 B2b-T6：建/覆写/列名/删，值只写不读）。
     pub secrets: SecretRepo,
+    /// 审计日志 repo（票 B2b-T7，ADR-0015：只增 + 过滤回放，全局 admin
+    /// 查询端点消费；各端点安全事件接线处写入）。
+    pub audit: AuditRepo,
     /// 主密钥（票 B2b-T6，ADR-0015）：首启由启动路径经
     /// [`crate::secrets::ensure_master_key`] 生成/读回后注入，机密写入路径
     /// 加密用。
@@ -102,6 +107,7 @@ impl AppState {
             pats: PatRepo::new(pool.clone()),
             members: MemberRepo::new(pool.clone()),
             secrets: SecretRepo::new(pool.clone()),
+            audit: AuditRepo::new(pool.clone()),
             master_key,
             login_limiter: LoginRateLimiter::new(),
             registration_enabled,
@@ -152,6 +158,7 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
             "/projects/{name}/pipelines/{pipeline}",
             get(pipelines::get_definition).put(pipelines::put_definition),
         )
+        .route("/audit", get(audit::list))
         // 层序（route_layer 后加者在外、先跑）：认证（401）在外层把关
         // 「谁在说话」（cookie 会话 / Bearer PAT 双通道，票 B2b-T3）；
         // CSRF（403）在其内层，只拦「已过认证且以 cookie 认证」的非安全

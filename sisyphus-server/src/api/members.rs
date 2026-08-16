@@ -166,5 +166,23 @@ pub async fn replace(
         .replace_all(access.project.id, &resolved)
         .await?;
     let rows = state.members.list_by_project(access.project.id).await?;
+    // 审计（票 B2b-T7，ADR-0015）：成员角色变更（整组分配）——detail 记
+    // 落定清单（用户名 + 角色），回放可还原「谁在何时被配成什么」。
+    let detail = serde_json::json!({
+        "members": rows.iter().map(|row| {
+            serde_json::json!({ "username": row.username, "role": RoleDto::from(row.role) })
+        }).collect::<Vec<_>>()
+    })
+    .to_string();
+    state
+        .audit
+        .insert(
+            crate::store::now_ms(),
+            &access.operator,
+            crate::store::audit::AuditEvent::MemberRolesChanged,
+            Some(&access.project.name),
+            Some(&detail),
+        )
+        .await?;
     Ok(Json(rows.into_iter().map(Into::into).collect()))
 }

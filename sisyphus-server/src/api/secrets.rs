@@ -75,13 +75,34 @@ pub async fn put_secret(
     validate_secret_name(&secret)?;
     let req: PutSecretRequest = parse_body(&body)?;
 
+    // 建/覆写判定：同名已存即覆写（审计事件类型不同；值永无读路径，
+    // 只查存在性）。
+    let existed = state.secrets.exists(access.project.id, &secret).await?;
+    let now = now_ms();
+
     // 加密只在写入路径调用一次：明文经此即不留存于任何模块。
     let blob = crate::secrets::encrypt(&state.master_key, req.value.as_bytes()).map_err(
         |e| ApiError::internal("secret encrypt", &e),
     )?;
     state
         .secrets
-        .upsert(access.project.id, &secret, &blob, &access.operator, now_ms())
+        .upsert(access.project.id, &secret, &blob, &access.operator, now)
+        .await?;
+    // 审计（票 B2b-T7，ADR-0015）：机密建/覆写——detail 只记名 + 操作人
+    // + 时间，永不记值（值形态在本模块审计路径不存在）。
+    state
+        .audit
+        .insert(
+            now,
+            &access.operator,
+            if existed {
+                crate::store::audit::AuditEvent::SecretOverwritten
+            } else {
+                crate::store::audit::AuditEvent::SecretCreated
+            },
+            Some(&access.project.name),
+            Some(&serde_json::json!({ "secret": secret }).to_string()),
+        )
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -135,11 +156,21 @@ pub async fn delete_secret(
     Path((_project_name, secret)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     validate_secret_name(&secret)?;
-    if state.secrets.delete(access.project.id, &secret).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::resource_not_found(format!("机密不存在：{secret}")))
+    if !state.secrets.delete(access.project.id, &secret).await? {
+        return Err(ApiError::resource_not_found(format!("机密不存在：{secret}")));
     }
+    // 审计（票 B2b-T7）：机密删除——detail 只记名，永不记值。
+    state
+        .audit
+        .insert(
+            now_ms(),
+            &access.operator,
+            crate::store::audit::AuditEvent::SecretDeleted,
+            Some(&access.project.name),
+            Some(&serde_json::json!({ "secret": secret }).to_string()),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// 机密名校验：非空、env 键合法字符集（字母数字 + `_`）。非法即 422，

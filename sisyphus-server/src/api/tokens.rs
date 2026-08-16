@@ -110,6 +110,18 @@ pub async fn create(
             .await
         {
             Ok(row) => {
+                // 审计（票 B2b-T7，ADR-0015）：PAT 建立——detail 记令牌名
+                // （永不记值：值只在本响应出现一次）。
+                state
+                    .audit
+                    .insert(
+                        now,
+                        &auth.username,
+                        crate::store::audit::AuditEvent::PatCreated,
+                        None,
+                        Some(&serde_json::json!({ "name": row.name }).to_string()),
+                    )
+                    .await?;
                 return Ok((
                     StatusCode::CREATED,
                     Json(CreatedTokenResponse {
@@ -171,11 +183,26 @@ pub async fn revoke(
     let id = id
         .parse::<i64>()
         .map_err(|_| ApiError::resource_not_found("令牌不存在"))?;
-    if state.pats.delete(auth.user_id, id).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::resource_not_found("令牌不存在"))
-    }
+    // 吊销前取行（令牌名落审计 detail）：先查后删——他人 id 在查的阶段
+    // 即 404（不暴露存在性，与删后 404 同形）。
+    let pat = state
+        .pats
+        .get_by_user(auth.user_id, id)
+        .await?
+        .ok_or_else(|| ApiError::resource_not_found("令牌不存在"))?;
+    state.pats.delete(auth.user_id, id).await?;
+    // 审计（票 B2b-T7）：PAT 吊销——detail 记令牌名（值永不落审计）。
+    state
+        .audit
+        .insert(
+            crate::store::now_ms(),
+            &auth.username,
+            crate::store::audit::AuditEvent::PatRevoked,
+            None,
+            Some(&serde_json::json!({ "name": pat.name }).to_string()),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// 创建输入校验：名非空；过期时间（若有）须晚于当前时间（生出即死的

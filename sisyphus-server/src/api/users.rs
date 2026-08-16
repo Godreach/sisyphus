@@ -121,7 +121,7 @@ pub async fn list(
 )]
 pub async fn create(
     State(state): State<AppState>,
-    RequireGlobalAdmin(_auth): RequireGlobalAdmin,
+    RequireGlobalAdmin(auth): RequireGlobalAdmin,
     body: Bytes,
 ) -> Result<(StatusCode, Json<UserResponse>), ApiError> {
     let req: CreateUserRequest = parse_body(&body)?;
@@ -134,6 +134,18 @@ pub async fn create(
             req.username.trim(),
             &hash,
             req.is_admin.unwrap_or(false),
+        )
+        .await?;
+    // 审计（票 B2b-T7，ADR-0015）：用户建立——actor 为认证操作人实名，
+    // detail 记目标用户名（历史字段永不悬空）。
+    state
+        .audit
+        .insert(
+            crate::store::now_ms(),
+            &auth.username,
+            crate::store::audit::AuditEvent::UserCreated,
+            None,
+            Some(&serde_json::json!({ "username": user.username }).to_string()),
         )
         .await?;
     Ok((StatusCode::CREATED, Json(user.into())))
@@ -158,7 +170,7 @@ pub async fn create(
 )]
 pub async fn patch(
     State(state): State<AppState>,
-    RequireGlobalAdmin(_auth): RequireGlobalAdmin,
+    RequireGlobalAdmin(auth): RequireGlobalAdmin,
     Path(name): Path<String>,
     body: Bytes,
 ) -> Result<Json<UserResponse>, ApiError> {
@@ -173,6 +185,22 @@ pub async fn patch(
         .set_disabled(user.id, req.disabled)
         .await?
         .ok_or_else(|| ApiError::resource_not_found(format!("用户 {name} 不存在")))?;
+    // 审计（票 B2b-T7）：禁用/启用同记（detail 记目标用户名与动作）——
+    // 禁用是「即时踢线」的安全动作，启用是撤销动作。
+    state
+        .audit
+        .insert(
+            crate::store::now_ms(),
+            &auth.username,
+            if req.disabled {
+                crate::store::audit::AuditEvent::UserDisabled
+            } else {
+                crate::store::audit::AuditEvent::UserEnabled
+            },
+            None,
+            Some(&serde_json::json!({ "username": user.username }).to_string()),
+        )
+        .await?;
     Ok(Json(updated.into()))
 }
 
@@ -194,7 +222,7 @@ pub async fn patch(
 )]
 pub async fn reset_password(
     State(state): State<AppState>,
-    RequireGlobalAdmin(_auth): RequireGlobalAdmin,
+    RequireGlobalAdmin(auth): RequireGlobalAdmin,
     Path(name): Path<String>,
     body: Bytes,
 ) -> Result<StatusCode, ApiError> {
@@ -208,6 +236,17 @@ pub async fn reset_password(
         .ok_or_else(|| ApiError::resource_not_found(format!("用户 {name} 不存在")))?;
     let hash = hash_password(&req.new_password).await;
     state.users.set_password(user.id, &hash).await?;
+    // 审计（票 B2b-T7）：管理员代办重置密码（detail 记目标用户名）。
+    state
+        .audit
+        .insert(
+            crate::store::now_ms(),
+            &auth.username,
+            crate::store::audit::AuditEvent::PasswordReset,
+            None,
+            Some(&serde_json::json!({ "username": user.username }).to_string()),
+        )
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
