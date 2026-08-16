@@ -7,6 +7,7 @@
 //! 覆写保留 created_at、更新 updated_by/updated_at）。updated_by 为操作人
 //! 实名（与 pipeline operator 同纪律，票 B2b-T5）。
 
+use sqlx::Row;
 use sqlx::SqlitePool;
 
 use super::StoreError;
@@ -101,6 +102,41 @@ impl SecretRepo {
         .fetch_optional(&self.pool)
         .await?;
         Ok(hit.is_some())
+    }
+
+    /// 按名批量取密文（engine 下发路径专用读，ADR-0015：解密仅用于「未来
+    /// 下发批次（engine/Agent）」——这是该批次的前置实现，REST 面仍无读值
+    /// 端点，值只写不读纪律不破）。返回命中的 (名 → 密文)；不存在的名不在
+    /// 结果里，由 engine 记缺失并走 fail-fast（票 #46 AC）。
+    pub async fn ciphertexts(
+        &self,
+        project_id: i64,
+        names: &[&str],
+    ) -> Result<std::collections::HashMap<String, Vec<u8>>, StoreError> {
+        let mut out = std::collections::HashMap::new();
+        if names.is_empty() {
+            return Ok(out);
+        }
+        let placeholders = std::iter::repeat_n("?", names.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT name, ciphertext FROM secrets WHERE project_id = ? AND name IN ({placeholders})"
+        );
+        // 动态 SQL 面经人工审计：动态成分只有按 names.len() 生成的 `?`
+        // 占位符，全部值经 bind 参数注入——无用户可控文本进 SQL 文本，
+        // 包 AssertSqlSafe 即 sqlx 0.9 的审计标记通道（与 raw_sql 纪律一致）。
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(project_id);
+        for name in names {
+            q = q.bind(name);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        for row in rows {
+            let name: String = row.try_get("name")?;
+            let ciphertext: Vec<u8> = row.try_get("ciphertext")?;
+            out.insert(name, ciphertext);
+        }
+        Ok(out)
     }
 
     /// 删除机密（名消失，AC：DELETE 后名不在清单）。以项目 + 名双条件
@@ -266,6 +302,54 @@ mod tests {
         // 同名机密跨项目独立（(project, name) 唯一是复合键）。
         assert_eq!(repo.list_names(project_id).await.expect("demo 清单"), vec!["SHARED_NAME"]);
         assert_eq!(repo.list_names(other.id).await.expect("other 清单"), vec!["SHARED_NAME"]);
+    }
+
+    /// 票 #46：engine 下发路径的批量密文读——命中子集返回、缺名不在结果、
+    /// 密文形态与 upsert 落库等价（可解密还原）。
+    #[tokio::test]
+    async fn ciphertexts_batch_fetch_returns_hits_only() {
+        let (_dir, pool, project_id) = fixture().await;
+        let repo = SecretRepo::new(pool.clone());
+        let key = test_key();
+        repo.upsert(
+            project_id,
+            "DEPLOY_KEY",
+            &encrypt(&key, b"deploy-value").expect("加密"),
+            "alice",
+            0,
+        )
+        .await
+        .expect("DEPLOY_KEY");
+        repo.upsert(
+            project_id,
+            "SMTP_PASS",
+            &encrypt(&key, b"smtp-value").expect("加密"),
+            "alice",
+            0,
+        )
+        .await
+        .expect("SMTP_PASS");
+
+        let hits = repo
+            .ciphertexts(project_id, &["DEPLOY_KEY", "MISSING", "SMTP_PASS"])
+            .await
+            .expect("批量读");
+        assert_eq!(hits.len(), 2, "缺名不在结果");
+        assert_eq!(
+            decrypt(&key, &hits["DEPLOY_KEY"]).expect("解密"),
+            b"deploy-value"
+        );
+        assert_eq!(
+            decrypt(&key, &hits["SMTP_PASS"]).expect("解密"),
+            b"smtp-value"
+        );
+
+        // 空名清单：空结果。
+        assert!(repo
+            .ciphertexts(project_id, &[])
+            .await
+            .expect("空清单")
+            .is_empty());
     }
 
     #[tokio::test]

@@ -276,6 +276,44 @@ impl BuildRepo {
         Ok(result.rows_affected() > 0)
     }
 
+    /// FIFO 放行（ADR-0006：同 pipeline 同时只跑一条，后来者排队）：
+    /// 单条 UPDATE 内「无运行中构建且存在排队者」→ 提升号最小的排队者
+    /// 进 running（记 started_at、清终态时间戳）。原子裁决：并发调度循环
+    /// 各自调用，恰一个赢家（写事务串行 + NOT EXISTS 读已提交态），其余
+    /// 返回 `None`。engine 的 drive 与 sched 循环共用此缝。
+    pub async fn promote_oldest_if_idle(
+        &self,
+        project_id: i64,
+        pipeline_name: &str,
+        now: i64,
+    ) -> Result<Option<BuildRow>, StoreError> {
+        let row = sqlx::query_as::<_, BuildTuple>(
+            "UPDATE builds
+             SET status = 'running', started_at = COALESCE(started_at, ?),
+                 finished_at = NULL, cancelled_at = NULL, updated_at = ?
+             WHERE id = (
+                 SELECT id FROM builds
+                 WHERE project_id = ? AND pipeline_name = ? AND status = 'queued'
+                 ORDER BY number LIMIT 1
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM builds
+                 WHERE project_id = ? AND pipeline_name = ? AND status = 'running'
+             )
+             RETURNING id, project_id, pipeline_name, number, status, trigger, trigger_detail,
+                       attempt, snapshot, started_at, finished_at, cancelled_at, updated_at",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(project_id)
+        .bind(pipeline_name)
+        .bind(project_id)
+        .bind(pipeline_name)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(BuildRow::from_tuple).transpose()
+    }
+
     /// 同 pipeline 正在运行的构建（FIFO 判「同时只跑一条」；没有返回 `None`）。
     pub async fn running_build(
         &self,
@@ -738,6 +776,75 @@ mod tests {
         assert_eq!(head.id, second.id, "FIFO：第二条接续");
     }
 
+    /// 票 #46：FIFO 放行原子裁决——无运行中构建时提升号最小排队者并记
+    /// started_at；已有运行中构建时不动（返回 None）；运行中构建终态后
+    /// 下一排队者接力（串行队列不堵死）。
+    #[tokio::test]
+    async fn promote_oldest_if_idle_promotes_fifo_and_is_idle_gated() {
+        let (_dir, pool, project_id) = fixture().await;
+        let repo = BuildRepo::new(pool.clone());
+        let first = repo
+            .start(start_build(project_id, TriggerSource::Manual))
+            .await
+            .expect("第一条");
+        let second = repo
+            .start(start_build(project_id, TriggerSource::Manual))
+            .await
+            .expect("第二条");
+        let third = repo
+            .start(start_build(project_id, TriggerSource::Manual))
+            .await
+            .expect("第三条");
+
+        // 无运行中：提升最老排队者（first），记 started_at、终态时间戳为空。
+        let promoted = repo
+            .promote_oldest_if_idle(project_id, "release", 1_000)
+            .await
+            .expect("放行")
+            .expect("应有提升者");
+        assert_eq!(promoted.id, first.id, "FIFO：号最小者先跑");
+        assert_eq!(promoted.status, BuildStatus::Running);
+        assert_eq!(promoted.started_at, Some(1_000));
+        assert_eq!(promoted.finished_at, None);
+
+        // 已有运行中：不动（second 仍 queued，返回 None）。
+        assert!(
+            repo.promote_oldest_if_idle(project_id, "release", 2_000)
+                .await
+                .expect("再放行")
+                .is_none(),
+            "运行中不得再放行"
+        );
+        assert_eq!(
+            repo.get(second.id).await.expect("查").expect("应存在").status,
+            BuildStatus::Queued
+        );
+
+        // 运行中终态后：下一排队者接力（FIFO 串行队列）。
+        repo.transition(first.id, BuildStatus::Succeeded, 3_000)
+            .await
+            .expect("first 完成");
+        let next = repo
+            .promote_oldest_if_idle(project_id, "release", 4_000)
+            .await
+            .expect("接力")
+            .expect("应有提升者");
+        assert_eq!(next.id, second.id, "FIFO：second 接续");
+        assert_eq!(next.started_at, Some(4_000));
+        assert!(
+            repo.promote_oldest_if_idle(project_id, "release", 5_000)
+                .await
+                .expect("再放行")
+                .is_none(),
+            "second 运行中，third 继续排队"
+        );
+        assert_eq!(
+            repo.get(third.id).await.expect("查").expect("应存在").status,
+            BuildStatus::Queued,
+            "third 仍在排队"
+        );
+    }
+
     #[tokio::test]
     async fn transitions_set_timestamps_and_terminal_is_absorbing() {
         let (_dir, pool, project_id) = fixture().await;
@@ -909,7 +1016,7 @@ mod tests {
             })
             .await
             .expect("j0b");
-        let j1 = jobs
+        let _j1 = jobs
             .insert(crate::store::jobs::NewJob {
                 build_id: row.id,
                 stage_index: 1,

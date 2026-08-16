@@ -10,9 +10,14 @@
 pub mod api;
 pub mod auth;
 pub mod config;
-mod engine;
+// 缝定形、lib 面无消费者（票 #46：engine/events/notify 本批实现 + 内联单测，
+// REST/sched/grpc 批次消费后移除 allow——与 traits 缝同纪律）。
+#[allow(dead_code, unused_imports)]
+pub(crate) mod engine;
+#[allow(dead_code, unused_imports)]
 mod events;
 pub mod grpc;
+#[allow(dead_code, unused_imports)]
 mod notify;
 mod sched;
 mod scm;

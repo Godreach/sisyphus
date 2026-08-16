@@ -163,6 +163,19 @@ impl ProjectRepo {
         .await?;
         row.map(Project::from_row).transpose()
     }
+
+    /// 按行 id 取项目；不存在返回 `None`（engine 组装 SCM 上下文按
+    /// builds.project_id 寻径）。
+    pub async fn get_by_id(&self, id: i64) -> Result<Option<Project>, StoreError> {
+        let row = sqlx::query_as::<_, (i64, String, String, String, Option<String>, i64, i64)>(
+            "SELECT id, name, scm_type, scm_url, default_branch, created_at, updated_at
+             FROM projects WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(Project::from_row).transpose()
+    }
 }
 
 impl Project {

@@ -77,6 +77,13 @@ impl JobStatus {
         !matches!(self, Self::Queued | Self::Running | Self::Unknown)
     }
 
+    /// 是否失败类终态（fail-fast 的触发面：failed/timeout/aborted；
+    /// allow_failure 豁免由调用侧按行裁决）。engine 终态裁决与自动重试
+    /// 面共用此谓词。
+    pub fn is_failure(self) -> bool {
+        matches!(self, Self::Failed | Self::Timeout | Self::Aborted)
+    }
+
     /// 是否占用 Agent 槽位（在途任务：下发 ack 到任务终态，ADR-0008）。
     pub fn occupies_slot(self) -> bool {
         matches!(self, Self::Running | Self::Unknown)
@@ -231,7 +238,7 @@ impl JobRepo {
             .get(id)
             .await?
             .ok_or_else(|| StoreError::NotFound("任务不存在".into()))?;
-        if !matches!(row.status, JobStatus::Failed | JobStatus::Timeout | JobStatus::Aborted) {
+        if !row.status.is_failure() {
             return Ok(None);
         }
         let next = self
@@ -250,6 +257,17 @@ impl JobRepo {
             })
             .await?;
         Ok(Some(next))
+    }
+
+    /// 为任务补写 spec 快照（engine 组装完成后落库，审计「当时下发什么」）。
+    /// 任务必须仍 queued（已终态不再补写）；返回 false 表示行不存在或已终态。
+    pub async fn set_spec(&self, id: i64, spec_json: &str) -> Result<bool, StoreError> {
+        let result = sqlx::query("UPDATE jobs SET spec_json = ? WHERE id = ? AND status = 'queued'")
+            .bind(spec_json)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// 某 Agent 当前在途任务数（running/unknown 占槽，ADR-0008）。
