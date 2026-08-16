@@ -29,6 +29,10 @@ struct Args {
     /// 日志格式 json/pretty（CLI 覆盖层，默认 json）
     #[arg(long)]
     log_format: Option<String>,
+    /// 用户自注册开关（CLI 覆盖层，默认 false：register 403，账号由全局
+    /// 管理员建立）
+    #[arg(long)]
+    registration_enabled: Option<bool>,
 }
 
 impl From<&Args> for Overrides {
@@ -38,6 +42,7 @@ impl From<&Args> for Overrides {
             grpc_addr: args.grpc_addr.clone(),
             log_level: args.log_level.clone(),
             log_format: args.log_format.clone(),
+            registration_enabled: args.registration_enabled.map(|b| b.to_string()),
         }
     }
 }
@@ -67,8 +72,9 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    // REST 组合根（B2a-T4）：池注入 repo，端点面见 api::router。
-    let state = api::AppState::new(pool.clone());
+    // REST 组合根（B2a-T4）：池注入 repo，端点面见 api::router；注册开关
+    // 随配置注入（票 B2b-T4）。
+    let state = api::AppState::new(pool.clone(), config.registration_enabled);
     // 静态资源本地覆盖目录（B2a-T5）：数据目录 web/ 子目录，不存在即纯内嵌。
     let web_override_dir = config.data_dir.join(sisyphus_server::config::WEB_DIR);
 

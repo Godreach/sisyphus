@@ -1,17 +1,20 @@
-//! REST API 组合根（ADR-0005/0010；票 B2a-T3/T4、B2b-T1/T2/T3/T5）。
+//! REST API 组合根（ADR-0005/0010；票 B2a-T3/T4、B2b-T1/T2/T3/T4/T5）。
 //!
 //! - 业务端点全部挂 `/api/v1/` 前缀，统一 JSON 错误形态（[`error`]）。
 //! - `/api/v1` 受保护段全局面挂两层中间件：认证（[`auth::require_auth`]，
 //!   401，票 B2b-T1/T3：cookie 会话与 Bearer PAT 双通道）在外层先跑；
 //!   CSRF 防护（[`csrf::csrf_protect`]，403，票 B2b-T2）在其内层——只拦
 //!   「已认证且以 cookie 认证」的非安全方法请求（Bearer 天然免疫）。
-//!   授权（404/403）不做全局中间件：角色是「项目 × 用户」函数，由各端点
-//!   声明 [`policy`] 的 extractor 裁决（票 B2b-T5；矩阵本体在 [`crate::auth`]）。
-//!   放行清单仅 login、setup（healthz 与静态资源面不在 `/api/v1` 下，
-//!   天然不拦）。未匹配路由不走中间件，维持 JSON 404 兜底。
+//!   授权（403/404）不做全局中间件：角色是「项目 × 用户」函数，由各端点
+//!   声明 [`policy`] 的 extractor 裁决（项目域票 B2b-T5；全局 admin 域票
+//!   B2b-T4；矩阵本体在 [`crate::auth`]）。放行清单仅 login、register
+//!   （开关限定，票 B2b-T4）、setup（healthz 与静态资源面不在 `/api/v1`
+//!   下，天然不拦）。未匹配路由不走中间件，维持 JSON 404 兜底。
 //! - 存储依赖经 [`AppState`] 注入（池 → repo → handler，Spec B2a §6 组合根），
 //!   测试与二进制共用同一装配；登录限流器为进程内状态，随 [`AppState`]
-//!   存活（重启即清，票 B2b-T2）。
+//!   存活（重启即清，票 B2b-T2）；注册开关（config `[auth]
+//!   registration_enabled`，默认关）随 [`AppState`] 注入 register 端点
+//!   （票 B2b-T4）。
 //! - `GET /healthz` 不鉴权、不查库，仅表进程存活（Docker HEALTHCHECK 探活，
 //!   ADR-0010/0019）。
 //! - Swagger UI 与 OpenAPI JSON 仅开发期（debug 构建）挂载。
@@ -39,7 +42,7 @@ use axum::extract::State;
 use axum::http::Uri;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post, put};
 use sqlx::SqlitePool;
 
 pub use docs::ApiDoc;
@@ -71,11 +74,16 @@ pub struct AppState {
     /// 登录限流器（进程内状态：per-IP / per-username 双键，重启即清，
     /// 票 B2b-T2）。
     pub login_limiter: LoginRateLimiter,
+    /// 用户自注册开关（config `[auth] registration_enabled`，默认关；
+    /// register 端点的门，票 B2b-T4）。
+    pub registration_enabled: bool,
 }
 
 impl AppState {
     /// 由连接池装配（组合根：开池+迁移在 [`crate::store::bootstrap`]）。
-    pub fn new(pool: SqlitePool) -> Self {
+    /// `registration_enabled` 来自合并后的启动配置（CLI > env > toml >
+    /// 默认，ADR-0010）。
+    pub fn new(pool: SqlitePool, registration_enabled: bool) -> Self {
         Self {
             projects: ProjectRepo::new(pool.clone()),
             pipelines: PipelineRepo::new(pool.clone()),
@@ -84,6 +92,7 @@ impl AppState {
             pats: PatRepo::new(pool.clone()),
             members: MemberRepo::new(pool),
             login_limiter: LoginRateLimiter::new(),
+            registration_enabled,
         }
     }
 }
@@ -93,20 +102,26 @@ impl AppState {
 /// 不 spawn 进程）。`web_override_dir` 是静态资源本地覆盖目录
 /// （数据目录 `web/` 子目录，B2a-T5），不存在即纯内嵌。
 pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
-    // /api/v1/ 业务端点。放行清单即路由结构：login/setup 挂公开段（不设
-    // 认证中间件；setup 的空库限定由 handler 裁决），其余全部过认证中间件
-    // （401 全局面）。层内未命中统一走 JSON 404（route_layer 不罩 fallback，
-    // 未匹配路由维持 404 形态不因认证状态改变）。
+    // /api/v1/ 业务端点。放行清单即路由结构：login/register/setup 挂公开
+    // 段（不设认证中间件；register 的开关限定与 setup 的空库限定由 handler
+    // 裁决），其余全部过认证中间件（401 全局面）。层内未命中统一走 JSON
+    // 404（route_layer 不罩 fallback，未匹配路由维持 404 形态不因认证状态
+    // 改变）。
     let v1_public = Router::new()
         .route("/auth/setup", post(auth::setup))
-        .route("/auth/login", post(auth::login));
+        .route("/auth/login", post(auth::login))
+        .route("/auth/register", post(auth::register));
 
     let v1_protected = Router::new()
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
+        .route("/auth/password", post(auth::change_password))
         .route("/auth/tokens", get(tokens::list).post(tokens::create))
         .route("/auth/tokens/{id}", delete(tokens::revoke))
+        .route("/users", get(users::list).post(users::create))
         .route("/users/directory", get(users::directory))
+        .route("/users/{name}", patch(users::patch))
+        .route("/users/{name}/password", put(users::reset_password))
         .route("/projects", get(projects::list).post(projects::create))
         .route("/projects/{name}", get(projects::get_one))
         .route(

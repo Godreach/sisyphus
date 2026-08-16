@@ -131,6 +131,121 @@
         }
       }
     },
+    "/api/v1/auth/password": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "自助改密（票 B2b-T4，ADR-0014）：需验当前密码，验错 403 拒绝——不经\n管理员即可轮换自己的凭据。只换哈希：既有会话与 PAT 不受牵连（各自有\n独立失效途径：登出 / 吊销），管理员代办重置在 [`super::users::reset_password`]。",
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "已改密：新密码下次登录生效，既有会话/PAT 不受牵连"
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "当前密码不正确",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（新密码最小 8 位）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/register": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "自注册（票 B2b-T4，ADR-0014）：注册开关（config `[auth]\nregistration_enabled`，默认关）打开时自建**非管理员**账号；关闭时一律\n403（内网由全局 admin 建号）。空库时同样 403——首个账号必须经 setup\nwizard 成为全局 admin，否则自注册出普通用户后 setup 永久 404、实例\n再无管理员入口。成功响应不带会话（与 setup 同形：登录是独立一步）。",
+        "operationId": "register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "非管理员账号已创建（不带会话，登录是独立一步）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "注册开关未开启，或用户表为空（先走 setup wizard）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "用户名已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（用户名非空/字符集、密码最小 8 位）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/auth/setup": {
       "post": {
         "tags": [
@@ -170,7 +285,7 @@
             }
           },
           "422": {
-            "description": "输入校验失败（用户名非空、密码最小 8 位）",
+            "description": "输入校验失败（用户名非空/字符集、密码最小 8 位）",
             "content": {
               "application/json": {
                 "schema": {
@@ -767,6 +882,119 @@
         }
       }
     },
+    "/api/v1/users": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "全量用户列表（全局 admin；按用户名排序，含已禁用，无密码哈希）。",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "全部用户（含已禁用，按用户名排序）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非全局管理员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "建号（全局 admin；注册开关无关——内网默认建号通道）。",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "已创建",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非全局管理员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "用户名已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（用户名非空/字符集、密码最小 8 位）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/users/directory": {
       "get": {
         "tags": [
@@ -811,6 +1039,163 @@
         }
       }
     },
+    "/api/v1/users/{name}": {
+      "patch": {
+        "tags": [
+          "users"
+        ],
+        "summary": "禁用 / 启用（全局 admin）。禁用同事务级联删除该用户全部 session 与\nPAT——旧 cookie 与旧令牌下一请求即 401；用户行永不删除，历史操作人\n字段不动。启用后以原密码重新登录。",
+        "operationId": "patch",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "用户名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchUserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已更新，返回落定后的用户行",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非全局管理员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "用户不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体形态不符（缺 disabled 字段）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/users/{name}/password": {
+      "put": {
+        "tags": [
+          "users"
+        ],
+        "summary": "代办重置密码（全局 admin）：覆写目标用户密码哈希，旧密码即刻失效。\n不清凭据面（既有 session/PAT 各有独立吊销途径）。",
+        "operationId": "reset_password",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "用户名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetPasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "已重置：旧密码失效，新密码可登录"
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非全局管理员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "用户不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（新密码最小 8 位）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "tags": [
@@ -835,6 +1220,24 @@
   },
   "components": {
     "schemas": {
+      "ChangePasswordRequest": {
+        "type": "object",
+        "description": "自助改密请求体（票 B2b-T4）。",
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string",
+            "description": "当前密码（核验通过才允许改）。"
+          },
+          "new_password": {
+            "type": "string",
+            "description": "新密码（最小长度 8，无复杂度规则）。"
+          }
+        }
+      },
       "CreateProjectRequest": {
         "type": "object",
         "description": "创建项目请求体。",
@@ -883,6 +1286,31 @@
           "name": {
             "type": "string",
             "description": "令牌名（管理用，如 `ci-deploy`；非空，trim 后生效）。"
+          }
+        }
+      },
+      "CreateUserRequest": {
+        "type": "object",
+        "description": "建号请求体（全局 admin）。",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "is_admin": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "是否全局管理员（默认 false——建号默认普通用户，admin 是显式选择）。"
+          },
+          "password": {
+            "type": "string",
+            "description": "密码（最小长度 8，无复杂度规则）。"
+          },
+          "username": {
+            "type": "string",
+            "description": "用户名（1-64 位字母数字或 `_ . -`，trim 后生效）。"
           }
         }
       },
@@ -1055,6 +1483,19 @@
           }
         }
       },
+      "PatchUserRequest": {
+        "type": "object",
+        "description": "禁用/启用请求体（全局 admin）。",
+        "required": [
+          "disabled"
+        ],
+        "properties": {
+          "disabled": {
+            "type": "boolean",
+            "description": "目标状态：true = 禁用（同秒删其全部 session 与 PAT），false = 启用。"
+          }
+        }
+      },
       "PipelineDefinitionPayload": {
         "type": "object",
         "description": "PUT 请求体：Pipeline 定义（sisyphus-model JSON 形态）。\n\nOpenAPI 契约里是自由 object——schema 事实源在 sisyphus-model，\n不在 API 层复刻一份漂移源。"
@@ -1138,6 +1579,19 @@
           }
         }
       },
+      "ResetPasswordRequest": {
+        "type": "object",
+        "description": "代办重置密码请求体（全局 admin，无需当前密码——ADR-0014：v1 无邮件\n自助重置，管理员代办即找回通道）。",
+        "required": [
+          "new_password"
+        ],
+        "properties": {
+          "new_password": {
+            "type": "string",
+            "description": "新密码（最小长度 8，无复杂度规则）。"
+          }
+        }
+      },
       "RoleDto": {
         "type": "string",
         "description": "角色的 API 形态（`viewer` / `runner` / `admin`；域类型 [`Role`] 落库文本\n同形，转换零成本）。",
@@ -1214,6 +1668,47 @@
           }
         }
       },
+      "UserResponse": {
+        "type": "object",
+        "description": "用户管理视图（密码哈希永不出现；含 disabled——禁用行仍可见可管理）。",
+        "required": [
+          "id",
+          "username",
+          "is_admin",
+          "disabled",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "创建时间（Unix 毫秒）。"
+          },
+          "disabled": {
+            "type": "boolean",
+            "description": "禁用标志（禁用即踢线：session 与 PAT 同秒全删）。"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "用户 id。"
+          },
+          "is_admin": {
+            "type": "boolean",
+            "description": "全局管理员。"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "最后更新时间（Unix 毫秒）。"
+          },
+          "username": {
+            "type": "string",
+            "description": "用户名（唯一）。"
+          }
+        }
+      },
       "ValidationIssue": {
         "type": "object",
         "description": "校验错误条目：字段定位路径 + 人读信息（与 sisyphus-model 的\n`ValidationError` 同形态，模型侧类型不透出 API 层）。",
@@ -1241,7 +1736,7 @@
     },
     {
       "name": "auth",
-      "description": "认证与会话（setup wizard / login / logout / me）与 PAT（Bearer 通道，票 B2b-T3）"
+      "description": "认证与会话（setup wizard / register / login / logout / me / 自助改密）与 PAT（Bearer 通道，票 B2b-T3）"
     },
     {
       "name": "projects",
@@ -1253,7 +1748,7 @@
     },
     {
       "name": "users",
-      "description": "用户目录（项目 admin 的最小只读清单，票 B2b-T5）"
+      "description": "用户管理（全局 admin：建/列/禁用/重置，票 B2b-T4）与用户目录（项目 admin 的最小只读清单，票 B2b-T5）"
     }
   ]
 }

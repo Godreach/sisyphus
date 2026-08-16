@@ -45,22 +45,35 @@ pub struct TestApp {
     _dir: Option<tempfile::TempDir>,
 }
 
-/// 装配测试应用（全新临时数据目录）：真实 store + 临时库，不起 socket、
-/// 不 spawn 进程。
+/// 装配测试应用（全新临时数据目录，注册开关关——config 默认形态，票
+/// B2b-T4）：真实 store + 临时库，不起 socket、不 spawn 进程。
 pub async fn test_app() -> TestApp {
+    test_app_with(false).await
+}
+
+/// 同 [`test_app`]，但显式给定注册开关（register 用例开启面的装配）。
+pub async fn test_app_with(registration_enabled: bool) -> TestApp {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let mut app = test_app_at(dir.path()).await;
+    let mut app = test_app_at_with(dir.path(), registration_enabled).await;
     app._dir = Some(dir);
     app
 }
 
 /// 在既有数据目录上装配（Server 重启缝：同一目录第二次 bootstrap + 新
-/// Router；TempDir 归调用侧持有）。
+/// Router；TempDir 归调用侧持有；注册开关关，与 config 默认一致）。
 pub async fn test_app_at(data_dir: &Path) -> TestApp {
+    test_app_at_with(data_dir, false).await
+}
+
+/// [`test_app_at`] 的开关参数形态（与 [`test_app_with`] 对应）。
+pub async fn test_app_at_with(data_dir: &Path, registration_enabled: bool) -> TestApp {
     let pool = store::bootstrap(data_dir).await.expect("bootstrap");
     let web = data_dir.join(WEB_DIR);
     TestApp {
-        router: router(AppState::new(pool.clone()), web.clone()),
+        router: router(
+            AppState::new(pool.clone(), registration_enabled),
+            web.clone(),
+        ),
         pool,
         web,
         _dir: None,

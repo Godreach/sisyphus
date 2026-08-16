@@ -1,7 +1,7 @@
-//! 授权 extractor（票 B2b-T5，ADR-0014）：项目域端点只声明档位、不实现
-//! 判定——权限矩阵本体在 [`crate::auth`]（policy 单点集中），本模块只做
-//! 「从路径解析项目 → 查成员角色 → 全局 admin 视作项目 admin → 判档位」
-//! 的通用装配。
+//! 授权 extractor（票 B2b-T5/T4，ADR-0014）：项目域端点只声明档位、全局
+//! 资源端点声明全局 admin——不实现判定。权限矩阵本体在 [`crate::auth`]
+//! （policy 单点集中），本模块只做「从路径解析项目 → 查成员角色 → 全局
+//! admin 视作项目 admin → 判档位」的通用装配。
 //!
 //! 判定序列与错误形态（矩阵之外仅有的策略语义）：
 //!
@@ -44,6 +44,29 @@ pub struct RequireViewer(pub ProjectAccess);
 /// 声明项目 admin 档位（[`Permission::Manage`]）：定义保存、成员管理、
 /// 机密管理、项目设置。
 pub struct RequireAdmin(pub ProjectAccess);
+
+/// 声明全局 admin 档（票 B2b-T4，ADR-0014）：全局资源专属动作（用户管理、
+/// 建号、代办重置密码）的端点声明。认证中间件先行把关（401），这里只判
+/// [`AuthContext::is_admin`]：不足 403——用户管理面对全部已登录用户可见
+/// 存在，无「不可见」语义（与项目域的 404 双源同形不同题）。
+pub struct RequireGlobalAdmin(pub AuthContext);
+
+impl FromRequestParts<AppState> for RequireGlobalAdmin {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let axum::Extension(auth) = axum::Extension::<AuthContext>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| ApiError::unauthorized())?;
+        if !auth.is_admin {
+            return Err(ApiError::forbidden("该操作仅全局管理员可用"));
+        }
+        Ok(RequireGlobalAdmin(auth))
+    }
+}
 
 impl FromRequestParts<AppState> for RequireViewer {
     type Rejection = ApiError;

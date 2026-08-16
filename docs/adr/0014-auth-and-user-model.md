@@ -32,7 +32,7 @@
 
 - 两层：认证（cookie/Bearer -> 用户，失败 401）做全局 middleware；授权（403）做每端点声明的自定义 extractor（从路径解析 project -> 查角色 -> 判档位）。
 - 权限矩阵本体集中在一个 policy 模块，extractor 引用之；端点只声明（如 `Require(ProjectAdmin)`）不实现。
-- 未认证可达面仅：login、setup wizard（仅用户表为空时）、健康检查。
+- 未认证可达面仅：login、setup wizard（仅用户表为空时）、register（开关限定，B2b-T4 增补）、健康检查。
 
 **三档权限矩阵**
 

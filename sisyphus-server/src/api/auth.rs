@@ -1,7 +1,7 @@
-//! 认证端点与中间件（票 B2b-T1/T2/T3，ADR-0014）：setup wizard / login /
-//! logout / me、挂在 `/api/v1` 受保护段全局面的认证中间件（cookie 会话 +
-//! Bearer PAT 双通道，T3），以及 login 上的进程内限流（per-IP +
-//! per-username）。
+//! 认证端点与中间件（票 B2b-T1/T2/T3/T4，ADR-0014）：setup wizard /
+//! register / login / logout / me / 自助改密，挂在 `/api/v1` 受保护段全局面
+//! 的认证中间件（cookie 会话 + Bearer PAT 双通道，T3），以及 login 上的
+//! 进程内限流（per-IP + per-username）。
 //!
 //! - 认证（401）是全局 middleware，两通道同权重放：cookie 里的 session id
 //!   → SHA-256 查行 → 未过期 → 用户未禁用，通过即顺延 7 天（滑动过期）；
@@ -10,12 +10,13 @@
 //!   （优先于 cookie，与 CSRF 中间件的「Bearer 免疫」同一模型）；失败/
 //!   缺失一律 401 统一 JSON 形态。通过即把 [`AuthContext`]（含认证通道）
 //!   注入请求扩展。
-//! - 放行面即路由结构（[`super::router`]）：login 与 setup 挂公开段不经此
-//!   中间件（healthz 与静态资源面不在 `/api/v1` 下，天然不拦）；setup 的
-//!   「空库限定」由 handler 裁决——用户表非空一律 404，不暴露实例状态。
+//! - 放行面即路由结构（[`super::router`]）：login、register 与 setup 挂公开
+//!   段不经此中间件（healthz 与静态资源面不在 `/api/v1` 下，天然不拦）；
+//!   setup 的「空库限定」与 register 的「开关限定」由 handler 裁决。
 //! - cookie：HttpOnly + SameSite=Lax + Path=/，v1 不设 Secure（跨公网走 TLS
 //!   的立场随部署文档，ADR-0014）。CSRF 面在 [`super::csrf`]（B2b-T2）；
-//!   授权（403 extractor）随后续批次。PAT 管理端点在 [`super::tokens`]。
+//!   授权（403 extractor）在 [`super::policy`]。PAT 管理端点在
+//!   [`super::tokens`]；用户管理（全局 admin）在 [`super::users`]（T4）。
 
 use axum::Json;
 use axum::body::Bytes;
@@ -99,7 +100,7 @@ pub struct MeResponse {
     responses(
         (status = 201, description = "首个全局管理员已创建", body = MeResponse),
         (status = 404, description = "用户表非空：端点不可用（不暴露状态）", body = ErrorBody),
-        (status = 422, description = "输入校验失败（用户名非空、密码最小 8 位）", body = ErrorBody),
+        (status = 422, description = "输入校验失败（用户名非空/字符集、密码最小 8 位）", body = ErrorBody),
     )
 )]
 pub async fn setup(
@@ -112,10 +113,56 @@ pub async fn setup(
         return Err(ApiError::not_found());
     }
     let req: CredentialsRequest = parse_body(&body)?;
-    validate_credentials(&req)?;
+    validate_new_account(&req.username, &req.password)?;
 
     let hash = hash_password(&req.password).await;
     let user = state.users.create(req.username.trim(), &hash, true).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(MeResponse {
+            username: user.username,
+            is_admin: user.is_admin,
+        }),
+    ))
+}
+
+/// 自注册（票 B2b-T4，ADR-0014）：注册开关（config `[auth]
+/// registration_enabled`，默认关）打开时自建**非管理员**账号；关闭时一律
+/// 403（内网由全局 admin 建号）。空库时同样 403——首个账号必须经 setup
+/// wizard 成为全局 admin，否则自注册出普通用户后 setup 永久 404、实例
+/// 再无管理员入口。成功响应不带会话（与 setup 同形：登录是独立一步）。
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/register",
+    tag = "auth",
+    request_body = CredentialsRequest,
+    responses(
+        (status = 201, description = "非管理员账号已创建（不带会话，登录是独立一步）", body = MeResponse),
+        (status = 403, description = "注册开关未开启，或用户表为空（先走 setup wizard）", body = ErrorBody),
+        (status = 409, description = "用户名已存在", body = ErrorBody),
+        (status = 422, description = "输入校验失败（用户名非空/字符集、密码最小 8 位）", body = ErrorBody),
+    )
+)]
+pub async fn register(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<MeResponse>), ApiError> {
+    // 开关判定先行（关时对任何输入一律 403，不借校验错误泄露开关状态）。
+    if !state.registration_enabled {
+        return Err(ApiError::forbidden(
+            "注册开关未开启：账号由全局管理员创建",
+        ));
+    }
+    if state.users.count().await? == 0 {
+        return Err(ApiError::forbidden(
+            "注册不可用：请先完成初始化引导（创建全局管理员）",
+        ));
+    }
+    let req: CredentialsRequest = parse_body(&body)?;
+    validate_new_account(&req.username, &req.password)?;
+
+    let hash = hash_password(&req.password).await;
+    let user = state.users.create(req.username.trim(), &hash, false).await?;
     Ok((
         StatusCode::CREATED,
         Json(MeResponse {
@@ -253,6 +300,53 @@ pub async fn me(axum::Extension(auth): axum::Extension<AuthContext>) -> Json<MeR
     })
 }
 
+/// 自助改密请求体（票 B2b-T4）。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ChangePasswordRequest {
+    /// 当前密码（核验通过才允许改）。
+    pub current_password: String,
+    /// 新密码（最小长度 8，无复杂度规则）。
+    pub new_password: String,
+}
+
+/// 自助改密（票 B2b-T4，ADR-0014）：需验当前密码，验错 403 拒绝——不经
+/// 管理员即可轮换自己的凭据。只换哈希：既有会话与 PAT 不受牵连（各自有
+/// 独立失效途径：登出 / 吊销），管理员代办重置在 [`super::users::reset_password`]。
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/password",
+    tag = "auth",
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 204, description = "已改密：新密码下次登录生效，既有会话/PAT 不受牵连"),
+        (status = 401, description = "未认证", body = ErrorBody),
+        (status = 403, description = "当前密码不正确", body = ErrorBody),
+        (status = 422, description = "输入校验失败（新密码最小 8 位）", body = ErrorBody),
+    )
+)]
+pub async fn change_password(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthContext>,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    let req: ChangePasswordRequest = parse_body(&body)?;
+    validate_new_password("new_password", &req.new_password)?;
+
+    // 认证中间件刚核过用户行，这里按 id 再取一次（拿哈希做核验）；行缺失
+    // 兜 401 与中间件同形。
+    let user = state
+        .users
+        .get_by_id(auth.user_id)
+        .await?
+        .ok_or_else(ApiError::unauthorized)?;
+    if !verify_password(&req.current_password, &user.password_hash).await {
+        return Err(ApiError::forbidden("当前密码不正确"));
+    }
+    let hash = hash_password(&req.new_password).await;
+    state.users.set_password(auth.user_id, &hash).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// 认证中间件（挂在 `/api/v1` 受保护段全局面）：Bearer PAT 或 cookie
 /// 会话 → 用户，通过注入 [`AuthContext`]；失败/缺失 401 统一形态。放行面
 /// 由路由结构决定（login/setup 在公开段，不经过本中间件）。
@@ -354,26 +448,54 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .filter(|credentials| !credentials.is_empty())
 }
 
-/// setup/login 的输入校验（密码最小长度 8，无复杂度规则，ADR-0014）。
-fn validate_credentials(req: &CredentialsRequest) -> Result<(), ApiError> {
+/// 建号面的输入校验（setup / register / 全局 admin 建号共用）：用户名
+/// 非空 + 字符集/长度，密码最小长度 8（无复杂度规则，ADR-0014）。
+pub(super) fn validate_new_account(username: &str, password: &str) -> Result<(), ApiError> {
     let mut issues = Vec::new();
-    if req.username.trim().is_empty() {
-        issues.push(ValidationIssue {
-            path: "username".into(),
-            message: "用户名不能为空".into(),
-        });
+    if let Some(issue) = username_issue(username) {
+        issues.push(issue);
     }
-    if req.password.chars().count() < MIN_PASSWORD_LEN {
-        issues.push(ValidationIssue {
-            path: "password".into(),
-            message: format!("密码最小长度 {MIN_PASSWORD_LEN}（无复杂度规则）"),
-        });
+    if let Some(issue) = password_issue("password", password) {
+        issues.push(issue);
     }
     if issues.is_empty() {
         Ok(())
     } else {
         Err(ApiError::validation("凭据输入校验失败", issues))
     }
+}
+
+/// 单个新密码的校验（自助改密 / 代办重置：只验要写入的那个密码，字段
+/// 路径由调用侧给——两处请求体字段名不同）。
+pub(super) fn validate_new_password(path: &str, password: &str) -> Result<(), ApiError> {
+    match password_issue(path, password) {
+        Some(issue) => Err(ApiError::validation("密码输入校验失败", vec![issue])),
+        None => Ok(()),
+    }
+}
+
+/// 用户名问题项：trim 后非空、1..=64 字符、限字母数字与 `_ . -`——用户名
+/// 会进 URL 路径（`/users/{name}`）与登录名，放行 `/`、空格等会让建出来
+/// 的号无法寻址。空名与非法字符集合并为一条 issue（同一修正动作）。
+fn username_issue(username: &str) -> Option<ValidationIssue> {
+    let trimmed = username.trim();
+    let charset_ok = !trimmed.is_empty()
+        && trimmed.chars().count() <= 64
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    (!charset_ok).then(|| ValidationIssue {
+        path: "username".into(),
+        message: "用户名须为 1-64 位字母、数字或 _ . -（trim 后生效）".into(),
+    })
+}
+
+/// 密码问题项：最小长度 8，无复杂度规则（ADR-0014）。
+fn password_issue(path: &str, password: &str) -> Option<ValidationIssue> {
+    (password.chars().count() < MIN_PASSWORD_LEN).then(|| ValidationIssue {
+        path: path.into(),
+        message: format!("密码最小长度 {MIN_PASSWORD_LEN}（无复杂度规则）"),
+    })
 }
 
 /// 从 Cookie 头取指定名的值（值域为 base64url，`split_once('=')` 即安全；
@@ -484,16 +606,41 @@ mod tests {
     }
 
     #[test]
-    fn validate_credentials_enforces_min_length_only() {
-        let creds = |u: &str, p: &str| CredentialsRequest {
-            username: u.into(),
-            password: p.into(),
-        };
-        assert!(validate_credentials(&creds("root", "12345678")).is_ok());
+    fn validate_new_account_enforces_username_charset_and_min_password() {
+        assert!(validate_new_account("root", "12345678").is_ok());
+        assert!(validate_new_account("  alice.dev-2  ", "12345678").is_ok(), "trim 后合法");
         // 长口令无复杂度要求：纯数字也过。
-        assert!(validate_credentials(&creds("root", "12345678901234567890")).is_ok());
+        assert!(validate_new_account("root", "12345678901234567890").is_ok());
+        // 64 字符上限边界。
+        assert!(validate_new_account(&"a".repeat(64), "12345678").is_ok());
 
-        let err = validate_credentials(&creds("  ", "short")).unwrap_err();
+        // 空名 / 空白名 / 非法字符（会破坏 /users/{name} 寻址）/ 超长：
+        // 422 且定位 username。
+        for bad in ["", "   ", "张三", "a/b", "a b", &"a".repeat(65)] {
+            let err = validate_new_account(bad, "12345678").unwrap_err();
+            assert_eq!(err.status_code(), StatusCode::UNPROCESSABLE_ENTITY, "{bad:?}");
+            assert_eq!(
+                username_issue(bad).expect("同输入应产生 issue").path,
+                "username",
+                "{bad:?} 应定位 username"
+            );
+        }
+
+        // 短密码：422（无复杂度规则，只钉长度）。
+        let err = validate_new_account("root", "short").unwrap_err();
         assert_eq!(err.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            password_issue("password", "short").expect("短密码应产生 issue").path,
+            "password"
+        );
+
+        // 单密码校验的路径参数（改密请求体字段名不同）。
+        assert!(validate_new_password("new_password", "12345678").is_ok());
+        assert_eq!(
+            validate_new_password("new_password", "short")
+                .unwrap_err()
+                .status_code(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 }

@@ -13,6 +13,8 @@ pub const DEFAULT_GRPC_ADDR: &str = "127.0.0.1:50051";
 pub const DEFAULT_LOG_LEVEL: &str = "info";
 /// 日志格式默认值：stdout JSON（ADR-0019）。
 pub const DEFAULT_LOG_FORMAT: &str = "json";
+/// 用户自注册开关默认值（ADR-0014：默认关，内网由全局 admin 建号）。
+pub const DEFAULT_REGISTRATION_ENABLED: bool = false;
 
 /// 数据目录内的配置文件名。
 pub const CONFIG_FILE_NAME: &str = "config.toml";
@@ -49,6 +51,8 @@ pub struct Config {
     pub log_level: String,
     /// 日志输出格式。
     pub log_format: LogFormat,
+    /// 用户自注册开关（register 端点的门；默认关，票 B2b-T4）。
+    pub registration_enabled: bool,
 }
 
 /// 同一形态的覆盖层：CLI flag 与 `SISYPHUS_` 环境变量都归约为它。
@@ -62,6 +66,8 @@ pub struct Overrides {
     pub log_level: Option<String>,
     /// 日志格式覆盖。
     pub log_format: Option<String>,
+    /// 注册开关覆盖（文本形态与各层统一，布尔语义在 merge 缝收口）。
+    pub registration_enabled: Option<String>,
 }
 
 /// config.toml 文件层。
@@ -74,6 +80,9 @@ pub struct FileConfig {
     /// `[log]` 段。
     #[serde(default)]
     pub log: LogFile,
+    /// `[auth]` 段。
+    #[serde(default)]
+    pub auth: AuthFile,
 }
 
 /// `[server]` 段。
@@ -96,6 +105,14 @@ pub struct LogFile {
     pub format: Option<String>,
 }
 
+/// `[auth]` 段（票 B2b-T4 起有了认证相关文件配置）。
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthFile {
+    /// 用户自注册开关（默认关：register 403，内网由全局 admin 建号）。
+    pub registration_enabled: Option<bool>,
+}
+
 /// 配置加载/合并错误。
 #[derive(Debug)]
 pub enum ConfigError {
@@ -105,6 +122,8 @@ pub enum ConfigError {
     InvalidAddr(String),
     /// 日志级别/格式取值非法。
     InvalidLogValue(String),
+    /// 布尔开关取值非法（期望 true/false）。
+    InvalidBool(String),
     /// 数据目录或配置文件 IO 失败。
     Io(std::io::Error),
 }
@@ -115,6 +134,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidToml(e) => write!(f, "config.toml 非法：{e}"),
             ConfigError::InvalidAddr(a) => write!(f, "监听地址非法：{a}"),
             ConfigError::InvalidLogValue(v) => write!(f, "日志取值非法：{v}"),
+            ConfigError::InvalidBool(v) => {
+                write!(f, "布尔取值非法：{v}（期望 true/false）")
+            }
             ConfigError::Io(e) => write!(f, "配置 IO 失败：{e}"),
         }
     }
@@ -144,6 +166,11 @@ grpc_addr = "127.0.0.1:50051"
 level = "info"
 # 日志格式：json（默认，收集器友好）/ pretty（裸机人读）
 format = "json"
+
+[auth]
+# 用户自注册开关（默认 false = 关闭：POST /auth/register 一律 403，账号由全局管理员建立；
+# true 时用户可自注册非管理员账号。修改后重启生效）
+registration_enabled = false
 "#
 }
 
@@ -192,6 +219,7 @@ impl Overrides {
             grpc_addr: get("SISYPHUS_GRPC_ADDR"),
             log_level: get("SISYPHUS_LOG_LEVEL"),
             log_format: get("SISYPHUS_LOG_FORMAT"),
+            registration_enabled: get("SISYPHUS_REGISTRATION_ENABLED"),
         }
     }
 }
@@ -219,6 +247,17 @@ pub fn merge(
         pick(&cli.log_format, &env.log_format, file.log.format.as_deref())
             .unwrap_or_else(|| DEFAULT_LOG_FORMAT.to_string());
 
+    // 注册开关：CLI/env 覆盖层是文本（布尔语义在此收口），文件层是原生
+    // toml 布尔，内置默认关（ADR-0014：内网由全局 admin 建号）。
+    let registration_enabled =
+        match pick(&cli.registration_enabled, &env.registration_enabled, None) {
+            Some(value) => parse_bool(&value)?,
+            None => file
+                .auth
+                .registration_enabled
+                .unwrap_or(DEFAULT_REGISTRATION_ENABLED),
+        };
+
     let log_format = match log_format.as_str() {
         "json" => LogFormat::Json,
         "pretty" => LogFormat::Pretty,
@@ -240,7 +279,19 @@ pub fn merge(
         grpc_addr,
         log_level,
         log_format,
+        registration_enabled,
     })
+}
+
+/// 覆盖层文本的布尔解析（注册开关等）：true/false 大小写不敏感，另收
+/// 1/0、yes/no、on/off 常见拼写；其余取值报错（不静默当 false——开关类
+/// 配置拼错必须启动失败）。
+fn parse_bool(value: &str) -> Result<bool, ConfigError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(ConfigError::InvalidBool(other.to_string())),
+    }
 }
 
 #[cfg(test)]
@@ -262,17 +313,20 @@ mod tests {
         assert_eq!(cfg.grpc_addr, DEFAULT_GRPC_ADDR);
         assert_eq!(cfg.log_level, DEFAULT_LOG_LEVEL);
         assert_eq!(cfg.log_format, LogFormat::Json);
+        assert!(!cfg.registration_enabled, "注册开关默认关（ADR-0014）");
     }
 
     #[test]
     fn cli_beats_env_beats_file_beats_default() {
         let cli = Overrides {
             grpc_addr: Some("127.0.0.1:60001".into()),
+            registration_enabled: Some("false".into()),
             ..Overrides::default()
         };
         let env = Overrides {
             grpc_addr: Some("127.0.0.1:60002".into()),
             rest_addr: Some("127.0.0.1:60003".into()),
+            registration_enabled: Some("true".into()),
             ..Overrides::default()
         };
         let file = FileConfig {
@@ -283,6 +337,9 @@ mod tests {
             log: LogFile {
                 level: Some("debug".into()),
                 format: Some("pretty".into()),
+            },
+            auth: AuthFile {
+                registration_enabled: Some(true),
             },
         };
 
@@ -296,6 +353,57 @@ mod tests {
         // 文件压过内置默认。
         assert_eq!(cfg.log_level, "debug");
         assert_eq!(cfg.log_format, LogFormat::Pretty);
+        // CLI 的 false 压过 env 与文件的 true（关得掉，不只是开得开）。
+        assert!(!cfg.registration_enabled);
+    }
+
+    #[test]
+    fn registration_switch_merges_across_layers_and_parses_bool_spellings() {
+        let file_on = FileConfig {
+            auth: AuthFile {
+                registration_enabled: Some(true),
+            },
+            ..FileConfig::default()
+        };
+        let cfg = merge(PathBuf::from("/tmp/data"), &Overrides::default(), &Overrides::default(), &file_on)
+            .expect("文件层开启应生效");
+        assert!(cfg.registration_enabled, "文件层压过内置默认关");
+
+        // env 层常见拼写全收（CLI/env 是文本，布尔语义在 merge 收口）。
+        for (text, expected) in [
+            ("true", true),
+            ("TRUE", true),
+            ("1", true),
+            ("yes", true),
+            ("on", true),
+            ("false", false),
+            ("0", false),
+            ("no", false),
+            ("off", false),
+        ] {
+            let env = Overrides {
+                registration_enabled: Some(text.into()),
+                ..Overrides::default()
+            };
+            let cfg = merge(
+                PathBuf::from("/tmp/data"),
+                &Overrides::default(),
+                &env,
+                &file_on,
+            )
+            .unwrap_or_else(|e| panic!("{text} 应解析成功：{e}"));
+            assert_eq!(cfg.registration_enabled, expected, "env 层 {text}");
+        }
+
+        // 拼错的开关值：启动失败（不静默当 false）。
+        let env = Overrides {
+            registration_enabled: Some("tru".into()),
+            ..Overrides::default()
+        };
+        assert!(matches!(
+            merge(PathBuf::from("/tmp/data"), &Overrides::default(), &env, &file_on),
+            Err(ConfigError::InvalidBool(_))
+        ));
     }
 
     #[test]
@@ -309,6 +417,7 @@ mod tests {
         assert_eq!(cfg.grpc_addr, DEFAULT_GRPC_ADDR);
         assert_eq!(cfg.log_level, DEFAULT_LOG_LEVEL);
         assert_eq!(cfg.log_format, LogFormat::Json);
+        assert!(!cfg.registration_enabled, "样例值与内置默认一致");
 
         // 带注释：样例要能当作文档读。
         assert!(sample_toml().lines().any(|l| l.trim_start().starts_with('#')));
