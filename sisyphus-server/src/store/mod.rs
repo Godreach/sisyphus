@@ -2,17 +2,23 @@
 //!
 //! 组合根单一入口 [`bootstrap`]：开池 → 校验待应用迁移 → 备份 db 文件
 //! （连 `-wal`/`-shm` 一起，ADR-0004 部署注记）→ 前向迁移（ADR-0010）。
-//! repo 层（[`projects::ProjectRepo`] / [`pipelines::PipelineRepo`]）承载元数据
-//! 读写；trait 缝（[`LogStore`](traits::LogStore) / [`ArtifactStore`](traits::ArtifactStore)）
+//! repo 层（[`projects::ProjectRepo`] / [`pipelines::PipelineRepo`] /
+//! [`builds::BuildRepo`] / [`jobs::JobRepo`] / [`agents::AgentRepo`] /
+//! [`triggers::TriggerRepo`]）承载元数据与调度状态读写；trait 缝
+//! （[`LogStore`](traits::LogStore) / [`ArtifactStore`](traits::ArtifactStore)）
 //! 只定形不实现，随消费批次落同一缝。
 
+pub mod agents;
 pub mod audit;
+pub mod builds;
+pub mod jobs;
 pub mod members;
 pub mod pipelines;
 pub mod projects;
 pub mod secrets;
 pub mod sessions;
 pub mod tokens;
+pub mod triggers;
 pub mod users;
 
 // 缝定形、无消费者（票 #32：只定契约不交付实现，日志/产物批次落同一缝后移除）。
@@ -249,6 +255,10 @@ mod tests {
             "project_members",
             "secrets",
             "audit_log",
+            "agents",
+            "builds",
+            "jobs",
+            "triggers",
         ] {
             assert!(
                 tables.iter().any(|t| t == expected),
@@ -296,6 +306,10 @@ mod tests {
             "DROP TABLE project_members",
             "DROP TABLE secrets",
             "DROP TABLE audit_log",
+            "DROP TABLE agents",
+            "DROP TABLE builds",
+            "DROP TABLE jobs",
+            "DROP TABLE triggers",
         ] {
             sqlx::raw_sql(stmt)
                 .execute(&pool)

@@ -89,7 +89,7 @@ UPDATE_SNAPSHOTS=1 cargo test -p sisyphus-server    # 重写快照
 
 ## 项目状态
 
-实现进行中：B1 骨架（workspace 四 crate、proto 契约、model 保存校验、Agent 握手闭环、CI）与 Spec B2a 存储与 API 底座（配置合并、SQLite 池+迁移+备份、REST/gRPC 双服务、pipeline 定义读写闭环、内嵌静态资源）、Spec B2b 已全量落地——认证与用户体系（setup wizard、登录会话、登录限流、CSRF、PAT、三档角色、用户管理与注册开关）、项目机密服务端面（主密钥文件 + XChaCha20 加密落库 + 机密 CRUD：值只写不读）与审计日志（安全事件只增记账 + 全局 admin 查询端点：按时间/用户/项目/事件类型过滤 + 分页，含 Spec B2b tracer bullet 全链路集成测试）。`/api/v1` 全面要求认证，未认证仅 login/setup/register 与静态资源可达。设计基线：21 篇 ADR + [CONTEXT.md](CONTEXT.md) 词汇表（见 [docs/adr/](docs/adr/)）。
+实现进行中：B1 骨架（workspace 四 crate、proto 契约、model 保存校验、Agent 握手闭环、CI）与 Spec B2a 存储与 API 底座（配置合并、SQLite 池+迁移+备份、REST/gRPC 双服务、pipeline 定义读写闭环、内嵌静态资源）、Spec B2b 已全量落地——认证与用户体系（setup wizard、登录会话、登录限流、CSRF、PAT、三档角色、用户管理与注册开关）、项目机密服务端面（主密钥文件 + XChaCha20 加密落库 + 机密 CRUD：值只写不读）与审计日志（安全事件只增记账 + 全局 admin 查询端点：按时间/用户/项目/事件类型过滤 + 分页，含 Spec B2b tracer bullet 全链路集成测试）。Spec B2c 已落地调度数据底座——builds/jobs/triggers/agents 四表迁移 + 各自 repo（per-pipeline 构建号并发单调、BuildSnapshot 快照落库读回与 model 等价、FIFO 排队、任务状态全集合迁移与 attempt 重跑、Agent 槽位/标签 AND 匹配、触发器基线/探测历史），engine 编排与 sched 调度推进随 B2c 后续批次。`/api/v1` 全面要求认证，未认证仅 login/setup/register 与静态资源可达。设计基线：21 篇 ADR + [CONTEXT.md](CONTEXT.md) 词汇表（见 [docs/adr/](docs/adr/)）。
 
 ## License
 
