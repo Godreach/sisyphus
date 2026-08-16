@@ -81,10 +81,11 @@
           "auth"
         ],
         "summary": "登出：删会话行（原 cookie 即刻失效）并清 cookie。",
+        "description": "Bearer PAT 通道无会话可结束：204 无动作（PAT 的失效面是吊销端点，\n[`super::tokens::revoke`]）。",
         "operationId": "logout",
         "responses": {
           "204": {
-            "description": "已登出：会话删除 + Set-Cookie 清空（需认证）"
+            "description": "已登出：会话删除 + Set-Cookie 清空（需认证；Bearer PAT 通道无事可做，同 204）"
           },
           "401": {
             "description": "未认证",
@@ -170,6 +171,135 @@
           },
           "422": {
             "description": "输入校验失败（用户名非空、密码最小 8 位）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/tokens": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "列出当前用户全部 PAT（按创建时间升序；无值形态）。",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "当前用户的 PAT 清单（名 / 创建时间 / 过期，永不含令牌值）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TokenResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "创建 PAT（需认证，权限 = owner 本人）。",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "已创建；token 值仅此一次返回，此后任何端点不再出现",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedTokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（名非空、过期时间须晚于当前时间）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/tokens/{id}": {
+      "delete": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "吊销 PAT（删行，下一请求即 401）。",
+        "operationId": "revoke",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "PAT 行 id（列表返回的 id）",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "已吊销：行已删，该令牌即刻失效"
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "id 不存在或不属于当前用户（不暴露存在性）",
             "content": {
               "application/json": {
                 "schema": {
@@ -470,6 +600,65 @@
           }
         }
       },
+      "CreateTokenRequest": {
+        "type": "object",
+        "description": "创建 PAT 请求体。",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "过期时间（Unix 毫秒；`null` = 永不过期）。须晚于当前时间。"
+          },
+          "name": {
+            "type": "string",
+            "description": "令牌名（管理用，如 `ci-deploy`；非空，trim 后生效）。"
+          }
+        }
+      },
+      "CreatedTokenResponse": {
+        "type": "object",
+        "description": "创建 PAT 响应：完整令牌仅此一次返回（此后任何端点不再出现值）。",
+        "required": [
+          "token",
+          "id",
+          "name",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "创建时间（Unix 毫秒）。"
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "过期时间（Unix 毫秒；`null` = 永不过期）。"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "行 id。"
+          },
+          "name": {
+            "type": "string",
+            "description": "令牌名。"
+          },
+          "token": {
+            "type": "string",
+            "description": "完整令牌（`sis_` 前缀 + 43 字符）。请立即保存：本响应是唯一一次\n出现，库里只存其 SHA-256，任何端点都无法找回。"
+          }
+        }
+      },
       "CredentialsRequest": {
         "type": "object",
         "description": "setup wizard / login 共用的凭据请求体。",
@@ -657,6 +846,39 @@
           "svn"
         ]
       },
+      "TokenResponse": {
+        "type": "object",
+        "description": "PAT 列表项（无值形态：名 / 创建时间 / 过期——令牌值任何端点不再出现）。",
+        "required": [
+          "id",
+          "name",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "创建时间（Unix 毫秒）。"
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "过期时间（Unix 毫秒；`null` = 永不过期）。"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "行 id（吊销端点的路径参数）。"
+          },
+          "name": {
+            "type": "string",
+            "description": "令牌名。"
+          }
+        }
+      },
       "ValidationIssue": {
         "type": "object",
         "description": "校验错误条目：字段定位路径 + 人读信息（与 sisyphus-model 的\n`ValidationError` 同形态，模型侧类型不透出 API 层）。",
@@ -684,7 +906,7 @@
     },
     {
       "name": "auth",
-      "description": "认证与会话（setup wizard / login / logout / me）"
+      "description": "认证与会话（setup wizard / login / logout / me）与 PAT（Bearer 通道，票 B2b-T3）"
     },
     {
       "name": "projects",

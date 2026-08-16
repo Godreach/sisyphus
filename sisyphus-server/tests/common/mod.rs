@@ -29,8 +29,8 @@ use sqlx::SqlitePool;
 use tower::ServiceExt;
 
 /// oneshot 请求的默认直连地址（无真实连接，经扩展注入；限流用例经
-/// `custom_req` 换地址驱动 per-IP 键）。
-const DEFAULT_PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 52000);
+/// `custom_req` 换地址驱动 per-IP 键；Bearer 面用例复用同一地址形态）。
+pub const DEFAULT_PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 52000);
 
 /// 进程内测试装配：TempDir 随结构体存活，测试结束才连同库文件一起清理。
 pub struct TestApp {

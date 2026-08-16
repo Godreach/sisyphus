@@ -8,6 +8,7 @@ use super::error::{ErrorBody, ValidationIssue};
 use super::health;
 use super::pipelines;
 use super::projects;
+use super::tokens;
 
 /// Server REST API 契约。
 ///
@@ -28,6 +29,9 @@ use super::projects;
         auth::login,
         auth::logout,
         auth::me,
+        tokens::list,
+        tokens::create,
+        tokens::revoke,
         projects::list,
         projects::create,
         projects::get_one,
@@ -40,6 +44,9 @@ use super::projects;
         ValidationIssue,
         auth::CredentialsRequest,
         auth::MeResponse,
+        tokens::CreateTokenRequest,
+        tokens::TokenResponse,
+        tokens::CreatedTokenResponse,
         projects::ScmTypeDto,
         projects::CreateProjectRequest,
         projects::ProjectResponse,
@@ -49,7 +56,7 @@ use super::projects;
     )),
     tags(
         (name = "infra", description = "探针与基础设施端点"),
-        (name = "auth", description = "认证与会话（setup wizard / login / logout / me）"),
+        (name = "auth", description = "认证与会话（setup wizard / login / logout / me）与 PAT（Bearer 通道，票 B2b-T3）"),
         (name = "projects", description = "项目管理（v1：list / create / get）"),
         (name = "pipelines", description = "Pipeline 定义读写（model 校验 + revision 语义）"),
     )

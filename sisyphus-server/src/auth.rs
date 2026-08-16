@@ -1,8 +1,8 @@
-//! 认证域逻辑（ADR-0014，票 B2b-T1/T2）：argon2id 密码哈希、session id
-//! 原语与登录限流器。
+//! 认证域逻辑（ADR-0014，票 B2b-T1/T2/T3）：argon2id 密码哈希、session id
+//! 原语、登录限流器与 API token 基座。
 //!
 //! 本模块只承载纯逻辑（可单测、不依赖 axum）；REST 面（端点与认证中间件）
-//! 在 [`crate::api::auth`]。后续批次（PAT、policy）在同一模块扩面
+//! 在 [`crate::api::auth`]。后续批次（policy）在同一模块扩面
 //! （ADR-0009 auth 模块职责）。
 //!
 //! - 密码：argon2id，OWASP 参数 m=19MiB/t=2/p=1（`19_456` KiB）；落库形态
@@ -11,6 +11,9 @@
 //! - session id：32 随机字节 base64url 无填充（43 字符，取值域不含 `=`，
 //!   可安全出现在 Cookie 值里）；库里只存其 SHA-256 十六进制——DB 泄露
 //!   ≠ 会话劫持。
+//! - API token 基座（票 B2b-T3）：族前缀 + 32 随机字节 base64url、库里只
+//!   存 SHA-256。PAT（`sis_`）本票落地；Agent token（`sisa_`）复用同一
+//!   基座，签发/吊销管理面随 Agent 批次。
 
 use argon2::Algorithm;
 use argon2::Argon2;
@@ -88,7 +91,20 @@ pub fn generate_session_id() -> String {
 
 /// session id 的落库/查询形态：SHA-256 十六进制（64 字符）。
 pub fn session_id_hash(session_id: &str) -> String {
-    let digest = Sha256::digest(session_id.as_bytes());
+    sha256_hex(session_id)
+}
+
+/// API token 的落库/查询形态：SHA-256 十六进制（64 字符）。
+///
+/// 与 session id 同纪律：库里只存哈希——DB 泄露拿不到可用凭据；认证时
+/// 以呈上的 token 现算哈希查行（吊销 = 行不在，过期 = 行在但不放行）。
+pub fn token_hash(token: &str) -> String {
+    sha256_hex(token)
+}
+
+/// 字符串的 SHA-256 十六进制（session id 与 API token 哈希的共用实现）。
+fn sha256_hex(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
     hex(&digest)
 }
 
@@ -101,6 +117,54 @@ fn hex(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0x0f) as usize] as char);
     }
     out
+}
+
+/// API token 族（ADR-0014：两族不混用）。
+///
+/// 基座（生成/哈希/校验）共享，族由前缀区分——令牌值出现在日志/issue 时
+/// 一眼可辨，且两族凭据互不能串用（PAT 不进 Agent 认证面，反之亦然）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenFamily {
+    /// 个人访问令牌（用户为脚本/CLI 调 REST API 生成，Bearer 提交，
+    /// 权限 = owner 本人）。
+    Pat,
+    /// Agent 令牌（构建机通道认证；签发/吊销管理面随 Agent 批次接线，
+    /// 基座本票已就绪）。
+    Agent,
+}
+
+impl TokenFamily {
+    /// 族前缀：PAT `sis_`、Agent `sisa_`（前缀字符集保证互不为前缀）。
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Self::Pat => "sis_",
+            Self::Agent => "sisa_",
+        }
+    }
+}
+
+/// 生成族内新令牌：族前缀 + 32 随机字节 base64url 无填充
+/// （`sis_`/`sisa_` + 43 字符）。
+pub fn generate_token(family: TokenFamily) -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    format!(
+        "{}{}",
+        family.prefix(),
+        Base64UrlUnpadded::encode_string(&bytes)
+    )
+}
+
+/// 按前缀识别令牌族；非本系统前缀返回 `None`（认证面按族放行，
+/// 它族/无前缀值一律不认）。
+pub fn token_family(token: &str) -> Option<TokenFamily> {
+    if token.starts_with(TokenFamily::Pat.prefix()) {
+        Some(TokenFamily::Pat)
+    } else if token.starts_with(TokenFamily::Agent.prefix()) {
+        Some(TokenFamily::Agent)
+    } else {
+        None
+    }
 }
 
 /// 登录限流的失败阈值：连续 5 次失败进入冷却（ADR-0014）。
@@ -248,6 +312,64 @@ mod tests {
     /// SHA-256("abc") 的十六进制（标准向量，钉住「确为 SHA-256」）。
     const SESSION_ID_HASH_OF_ABC: &str =
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    #[test]
+    fn token_generation_carries_family_prefix_and_url_safe_body() {
+        for (family, prefix) in [(TokenFamily::Pat, "sis_"), (TokenFamily::Agent, "sisa_")] {
+            let token = generate_token(family);
+            assert!(token.starts_with(prefix), "{token}");
+            let body = &token[prefix.len()..];
+            assert_eq!(
+                body.len(),
+                43,
+                "32 字节 base64url 无填充 = 43 字符：{token}"
+            );
+            assert!(
+                body.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+                "URL 安全字母表（不含 = / +）：{token}"
+            );
+        }
+
+        // 随机性：两次生成不同（32 字节随机碰撞概率上不可达）。
+        assert_ne!(
+            generate_token(TokenFamily::Pat),
+            generate_token(TokenFamily::Pat)
+        );
+    }
+
+    #[test]
+    fn token_hash_is_sha256_hex_and_same_discipline_as_session() {
+        let token = generate_token(TokenFamily::Pat);
+        let hash = token_hash(&token);
+        assert_eq!(hash.len(), 64);
+        assert!(
+            hash.bytes().all(|b| b.is_ascii_hexdigit()),
+            "十六进制：{hash}"
+        );
+        // 库里永远不是原值；与 session id 同一 SHA-256 纪律（共用实现）。
+        assert_ne!(hash, token);
+        assert_eq!(token_hash("abc"), SESSION_ID_HASH_OF_ABC);
+        assert_eq!(token_hash("abc"), session_id_hash("abc"));
+    }
+
+    #[test]
+    fn token_family_recognizes_both_prefixes_and_rejects_others() {
+        assert_eq!(token_family("sis_deadbeef"), Some(TokenFamily::Pat));
+        assert_eq!(token_family("sisa_deadbeef"), Some(TokenFamily::Agent));
+        // 前缀字符集保证互不为前缀：PAT 值不识别成 Agent 族，反之亦然。
+        assert_eq!(
+            token_family(&generate_token(TokenFamily::Pat)),
+            Some(TokenFamily::Pat)
+        );
+        assert_eq!(
+            token_family(&generate_token(TokenFamily::Agent)),
+            Some(TokenFamily::Agent)
+        );
+        for foreign in ["ghp_deadbeef", "sis-deadbeef", "sisadbeef", "", "bearer"] {
+            assert_eq!(token_family(foreign), None, "{foreign} 不应识别为任何族");
+        }
+    }
 
     /// 假时钟基点（任意值；限流器只做时间差运算）。
     const T0: i64 = 1_700_000_000_000;

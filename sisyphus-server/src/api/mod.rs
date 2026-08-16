@@ -1,11 +1,12 @@
-//! REST API 组合根（ADR-0005/0010；票 B2a-T3/T4、B2b-T1/T2）。
+//! REST API 组合根（ADR-0005/0010；票 B2a-T3/T4、B2b-T1/T2/T3）。
 //!
 //! - 业务端点全部挂 `/api/v1/` 前缀，统一 JSON 错误形态（[`error`]）。
-//! - `/api/v1` 受保护段全局面挂两层中间件：会话认证（[`auth::require_auth`]，
-//!   401，票 B2b-T1）在外层先跑；CSRF 防护（[`csrf::csrf_protect`]，403，
-//!   票 B2b-T2）在其内层——只拦「已认证且以 cookie 认证」的非安全方法
-//!   请求。放行清单仅 login、setup（healthz 与静态资源面不在 `/api/v1`
-//!   下，天然不拦）。未匹配路由不走中间件，维持 JSON 404 兜底。
+//! - `/api/v1` 受保护段全局面挂两层中间件：认证（[`auth::require_auth`]，
+//!   401，票 B2b-T1/T3：cookie 会话与 Bearer PAT 双通道）在外层先跑；
+//!   CSRF 防护（[`csrf::csrf_protect`]，403，票 B2b-T2）在其内层——只拦
+//!   「已认证且以 cookie 认证」的非安全方法请求（Bearer 天然免疫）。
+//!   放行清单仅 login、setup（healthz 与静态资源面不在 `/api/v1` 下，
+//!   天然不拦）。未匹配路由不走中间件，维持 JSON 404 兜底。
 //! - 存储依赖经 [`AppState`] 注入（池 → repo → handler，Spec B2a §6 组合根），
 //!   测试与二进制共用同一装配；登录限流器为进程内状态，随 [`AppState`]
 //!   存活（重启即清，票 B2b-T2）。
@@ -22,6 +23,7 @@ pub mod error;
 pub mod health;
 pub mod pipelines;
 pub mod projects;
+pub mod tokens;
 
 mod web;
 
@@ -32,7 +34,7 @@ use axum::extract::State;
 use axum::http::Uri;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use sqlx::SqlitePool;
 
 pub use docs::ApiDoc;
@@ -42,6 +44,7 @@ use crate::auth::LoginRateLimiter;
 use crate::store::pipelines::PipelineRepo;
 use crate::store::projects::ProjectRepo;
 use crate::store::sessions::SessionRepo;
+use crate::store::tokens::PatRepo;
 use crate::store::users::UserRepo;
 
 /// REST 层共享状态：repo 组合注入（池只在 [`AppState::new`] 处消费一次）。
@@ -55,6 +58,8 @@ pub struct AppState {
     pub users: UserRepo,
     /// 会话 repo（认证面）。
     pub sessions: SessionRepo,
+    /// PAT repo（认证面 + 管理端点，票 B2b-T3）。
+    pub pats: PatRepo,
     /// 登录限流器（进程内状态：per-IP / per-username 双键，重启即清，
     /// 票 B2b-T2）。
     pub login_limiter: LoginRateLimiter,
@@ -67,7 +72,8 @@ impl AppState {
             projects: ProjectRepo::new(pool.clone()),
             pipelines: PipelineRepo::new(pool.clone()),
             users: UserRepo::new(pool.clone()),
-            sessions: SessionRepo::new(pool),
+            sessions: SessionRepo::new(pool.clone()),
+            pats: PatRepo::new(pool),
             login_limiter: LoginRateLimiter::new(),
         }
     }
@@ -89,6 +95,8 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
     let v1_protected = Router::new()
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
+        .route("/auth/tokens", get(tokens::list).post(tokens::create))
+        .route("/auth/tokens/{id}", delete(tokens::revoke))
         .route("/projects", get(projects::list).post(projects::create))
         .route("/projects/{name}", get(projects::get_one))
         .route(
@@ -96,8 +104,9 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
             get(pipelines::get_definition).put(pipelines::put_definition),
         )
         // 层序（route_layer 后加者在外、先跑）：认证（401）在外层把关
-        // 「谁在说话」；CSRF（403）在其内层，只拦「已过认证且以 cookie
-        // 认证」的非安全方法请求——Bearer 面天然免疫（票 B2b-T2）。
+        // 「谁在说话」（cookie 会话 / Bearer PAT 双通道，票 B2b-T3）；
+        // CSRF（403）在其内层，只拦「已过认证且以 cookie 认证」的非安全
+        // 方法请求——Bearer 面天然免疫（票 B2b-T2）。
         .route_layer(from_fn(csrf::csrf_protect))
         .route_layer(from_fn_with_state(state.clone(), auth::require_auth));
 

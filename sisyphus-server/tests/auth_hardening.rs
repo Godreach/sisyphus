@@ -358,8 +358,9 @@ async fn csrf_rejects_missing_headers_but_auth_runs_first() {
     );
 }
 
-/// Bearer 请求不经 CSRF 检查（PAT 面，票 B2b-T1 时点 PAT 端点未落地，
-/// 表现为认证 401——断言「非 403」钉住免疫语义）。
+/// Bearer 请求不经 CSRF 检查（PAT 面）：无效 PAT 是认证 401（轮不到 CSRF
+/// 拒）；有效 PAT（T3 落地，经 /auth/tokens 签发）跨源照常 201——免疫的
+/// 完整生命周期见 tests/pat_auth.rs。
 #[tokio::test]
 async fn bearer_requests_are_immune_to_csrf() {
     let app = test_app().await;
@@ -388,8 +389,8 @@ async fn bearer_requests_are_immune_to_csrf() {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // cookie + Authorization 并存：按显式凭据对待，跨源 Origin 不拦
-    // （cookie 认证通过 → 201 证明 CSRF 面被跳过）。
+    // cookie + Bearer 并存：按显式凭据对待（T3 起 Bearer 优先于 cookie）。
+    // 无效 PAT 失败关闭——401 是认证拒绝（轮不到 CSRF），不回落 cookie 面。
     let mut headers = cross_origin_headers();
     headers.push(("authorization", "Bearer sis_not-a-token-yet".to_string()));
     let resp = authed(
@@ -401,5 +402,37 @@ async fn bearer_requests_are_immune_to_csrf() {
         &headers,
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "显式凭据跳过 CSRF 面");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "无效显式凭据失败关闭"
+    );
+
+    // 有效 PAT + 跨源 Origin：显式凭据跳过 CSRF 面，201 落地。
+    let resp = req_with_cookie(
+        &app,
+        "POST",
+        "/api/v1/auth/tokens",
+        Some(r#"{ "name": "csrf-proof" }"#.into()),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "签发真 PAT");
+    let token = body_json(resp).await["token"]
+        .as_str()
+        .expect("创建响应带 token")
+        .to_string();
+    let mut headers = cross_origin_headers();
+    headers.push(("authorization", format!("Bearer {token}")));
+    let resp = custom_req(
+        &app,
+        "POST",
+        "/api/v1/projects",
+        Some(r#"{ "name": "w", "scm_type": "git", "scm_url": "https://e.com/w" }"#.into()),
+        None,
+        &headers,
+        peer(9),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "有效 PAT 跳过 CSRF 面");
 }

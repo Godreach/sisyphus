@@ -9,6 +9,7 @@
 pub mod pipelines;
 pub mod projects;
 pub mod sessions;
+pub mod tokens;
 pub mod users;
 
 // 缝定形、无消费者（票 #32：只定契约不交付实现，日志/产物批次落同一缝后移除）。
@@ -279,6 +280,7 @@ mod tests {
             "DROP TABLE projects",
             "DROP TABLE users",
             "DROP TABLE sessions",
+            "DROP TABLE personal_access_tokens",
         ] {
             sqlx::raw_sql(stmt)
                 .execute(&pool)

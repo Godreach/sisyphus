@@ -1,16 +1,21 @@
-//! 认证端点与中间件（票 B2b-T1/T2，ADR-0014）：setup wizard / login /
-//! logout / me、挂在 `/api/v1` 受保护段全局面的会话认证中间件，以及
-//! login 上的进程内限流（per-IP + per-username）。
+//! 认证端点与中间件（票 B2b-T1/T2/T3，ADR-0014）：setup wizard / login /
+//! logout / me、挂在 `/api/v1` 受保护段全局面的认证中间件（cookie 会话 +
+//! Bearer PAT 双通道，T3），以及 login 上的进程内限流（per-IP +
+//! per-username）。
 //!
-//! - 认证（401）是全局 middleware：cookie 里的 session id → SHA-256 查行 →
-//!   未过期 → 用户未禁用，通过即顺延 7 天（滑动过期）并把
-//!   [`AuthContext`] 注入请求扩展；失败/缺失一律 401 统一 JSON 形态。
+//! - 认证（401）是全局 middleware，两通道同权重放：cookie 里的 session id
+//!   → SHA-256 查行 → 未过期 → 用户未禁用，通过即顺延 7 天（滑动过期）；
+//!   或 `Authorization: Bearer sis_…`（PAT，T3）→ 哈希查行 → 未过期 →
+//!   用户未禁用。携 Bearer scheme 的 Authorization 头按显式凭据对待
+//!   （优先于 cookie，与 CSRF 中间件的「Bearer 免疫」同一模型）；失败/
+//!   缺失一律 401 统一 JSON 形态。通过即把 [`AuthContext`]（含认证通道）
+//!   注入请求扩展。
 //! - 放行面即路由结构（[`super::router`]）：login 与 setup 挂公开段不经此
 //!   中间件（healthz 与静态资源面不在 `/api/v1` 下，天然不拦）；setup 的
 //!   「空库限定」由 handler 裁决——用户表非空一律 404，不暴露实例状态。
 //! - cookie：HttpOnly + SameSite=Lax + Path=/，v1 不设 Secure（跨公网走 TLS
 //!   的立场随部署文档，ADR-0014）。CSRF 面在 [`super::csrf`]（B2b-T2）；
-//!   授权（403 extractor）与 PAT 随后续批次。
+//!   授权（403 extractor）随后续批次。PAT 管理端点在 [`super::tokens`]。
 
 use axum::Json;
 use axum::body::Bytes;
@@ -30,8 +35,8 @@ use utoipa::ToSchema;
 use super::AppState;
 use super::error::{ApiError, ErrorBody, ValidationIssue, parse_body};
 use crate::auth::{
-    MIN_PASSWORD_LEN, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECS, SESSION_TTL_MS,
-    generate_session_id, hash_password, session_id_hash, verify_password,
+    MIN_PASSWORD_LEN, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECS, SESSION_TTL_MS, TokenFamily,
+    generate_session_id, hash_password, session_id_hash, token_family, token_hash, verify_password,
 };
 use crate::store::StoreError;
 use crate::store::now_ms;
@@ -48,8 +53,23 @@ pub struct AuthContext {
     pub username: String,
     /// 全局管理员。
     pub is_admin: bool,
-    /// 本会话的 id 哈希（登出删行用）。
-    pub session_id_hash: String,
+    /// 认证通道（会话面动作按通道分岔：登出删行、滑动续发 cookie 只对
+    /// cookie 会话有意义；Bearer PAT 无会话行）。
+    pub channel: AuthChannel,
+}
+
+/// 认证通道（[`AuthContext`] 携带）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthChannel {
+    /// cookie 会话：认证动作的落点见 `id_hash` 字段。
+    Session {
+        /// session id 的 SHA-256（登出删行、认证响应续发同值 cookie 刷新
+        /// Max-Age 的落点）。
+        id_hash: String,
+    },
+    /// Bearer PAT：无会话行——登出无事可做（PAT 吊销走 DELETE
+    /// /auth/tokens/{id}），响应不续发 cookie。
+    Pat,
 }
 
 /// setup wizard / login 共用的凭据请求体。
@@ -192,12 +212,15 @@ pub async fn login(
 }
 
 /// 登出：删会话行（原 cookie 即刻失效）并清 cookie。
+///
+/// Bearer PAT 通道无会话可结束：204 无动作（PAT 的失效面是吊销端点，
+/// [`super::tokens::revoke`]）。
 #[utoipa::path(
     post,
     path = "/api/v1/auth/logout",
     tag = "auth",
     responses(
-        (status = 204, description = "已登出：会话删除 + Set-Cookie 清空（需认证）"),
+        (status = 204, description = "已登出：会话删除 + Set-Cookie 清空（需认证；Bearer PAT 通道无事可做，同 204）"),
         (status = 401, description = "未认证", body = ErrorBody),
     )
 )]
@@ -205,9 +228,11 @@ pub async fn logout(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthContext>,
 ) -> Result<Response, ApiError> {
-    state.sessions.delete(&auth.session_id_hash).await?;
     let mut resp = StatusCode::NO_CONTENT.into_response();
-    clear_session_cookie(&mut resp);
+    if let AuthChannel::Session { id_hash } = &auth.channel {
+        state.sessions.delete(id_hash).await?;
+        clear_session_cookie(&mut resp);
+    }
     Ok(resp)
 }
 
@@ -228,26 +253,57 @@ pub async fn me(axum::Extension(auth): axum::Extension<AuthContext>) -> Json<MeR
     })
 }
 
-/// 会话认证中间件（挂在 `/api/v1` 受保护段全局面）：cookie → session 行 →
-/// 用户，通过注入 [`AuthContext`] 并顺延过期；失败/缺失 401 统一形态。
-/// 放行面由路由结构决定（login/setup 在公开段，不经过本中间件）。
+/// 认证中间件（挂在 `/api/v1` 受保护段全局面）：Bearer PAT 或 cookie
+/// 会话 → 用户，通过注入 [`AuthContext`]；失败/缺失 401 统一形态。放行面
+/// 由路由结构决定（login/setup 在公开段，不经过本中间件）。
+///
+/// 携 Bearer scheme 的 Authorization 头按显式凭据对待（优先于 cookie，与
+/// CSRF 中间件的「Bearer 免疫」同一模型）；其它 scheme（Basic 等）回落
+/// cookie 面。会话通道认证通过即顺延 7 天（滑动过期）并随响应续发同值
+/// cookie；PAT 通道无会话动作。
 pub async fn require_auth(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
+    let now = now_ms();
+
+    // Bearer PAT 面：族边界（两族不混用，Agent 族走自己的认证面）→ 哈希
+    // 查行（过期与吊销同表为 None）→ 属主未禁用。
+    if let Some(token) = bearer_token(req.headers()) {
+        if token_family(&token) != Some(TokenFamily::Pat) {
+            return ApiError::unauthorized().into_response();
+        }
+        let hash = token_hash(&token);
+        let pat = match state.pats.find_valid_by_hash(&hash, now).await {
+            Ok(Some(pat)) => pat,
+            Ok(None) => return ApiError::unauthorized().into_response(),
+            Err(e) => return ApiError::internal("token lookup", &e).into_response(),
+        };
+        let user = match active_user_or_reject(&state, pat.user_id).await {
+            Ok(user) => user,
+            Err(resp) => return resp,
+        };
+        req.extensions_mut().insert(AuthContext {
+            user_id: user.id,
+            username: user.username,
+            is_admin: user.is_admin,
+            channel: AuthChannel::Pat,
+        });
+        return next.run(req).await;
+    }
+
+    // cookie 会话面：session 行（未过期）→ 用户（未禁用）→ 注入上下文 +
+    // 滑动顺延。
     let Some(session_id) = cookie_value(req.headers(), SESSION_COOKIE_NAME) else {
         return ApiError::unauthorized().into_response();
     };
     let hash = session_id_hash(&session_id);
-    let now = now_ms();
 
-    // session 行（未过期）→ 用户（未禁用）→ 注入上下文 + 滑动顺延。
     let session = match state.sessions.get_valid(&hash, now).await {
         Ok(Some(session)) => session,
         Ok(None) => return ApiError::unauthorized().into_response(),
         Err(e) => return ApiError::internal("session lookup", &e).into_response(),
     };
-    let user = match state.users.get_by_id(session.user_id).await {
-        Ok(Some(user)) if !user.disabled => user,
-        Ok(_) => return ApiError::unauthorized().into_response(),
-        Err(e) => return ApiError::internal("user lookup", &e).into_response(),
+    let user = match active_user_or_reject(&state, session.user_id).await {
+        Ok(user) => user,
+        Err(resp) => return resp,
     };
     if let Err(e) = state.sessions.touch(&hash, now + SESSION_TTL_MS).await {
         return ApiError::internal("session touch", &e).into_response();
@@ -257,7 +313,9 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
         user_id: user.id,
         username: user.username,
         is_admin: user.is_admin,
-        session_id_hash: hash,
+        channel: AuthChannel::Session {
+            id_hash: hash.clone(),
+        },
     });
     let resp = next.run(req).await;
     // 滑动过期在浏览器侧收口：随认证响应续发同值 cookie（刷新 Max-Age），
@@ -269,6 +327,31 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
         return resp;
     }
     resp
+}
+
+/// 用户行解析（两通道共用）：按 id 取行且未禁用；缺失/禁用 401、库错 500
+/// （响应形态收口在此，通道分支只管各自的凭据查行）。
+async fn active_user_or_reject(
+    state: &AppState,
+    user_id: i64,
+) -> Result<crate::store::users::User, Response> {
+    match state.users.get_by_id(user_id).await {
+        Ok(Some(user)) if !user.disabled => Ok(user),
+        Ok(_) => Err(ApiError::unauthorized().into_response()),
+        Err(e) => Err(ApiError::internal("user lookup", &e).into_response()),
+    }
+}
+
+/// 解析 Bearer 凭据（RFC 7235，scheme 大小写不敏感）：Authorization 头为
+/// Bearer scheme 时返回凭据串（可为任意串——查不到行即 401，不在此区分
+/// 形态好坏）；其它 scheme / 头缺失返回 `None`（回落 cookie 面）。
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, credentials) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| credentials.trim().to_string())
+        .filter(|credentials| !credentials.is_empty())
 }
 
 /// setup/login 的输入校验（密码最小长度 8，无复杂度规则，ADR-0014）。
@@ -370,6 +453,34 @@ mod tests {
 
         let headers = HeaderMap::new();
         assert_eq!(cookie_value(&headers, SESSION_COOKIE_NAME), None);
+    }
+
+    #[test]
+    fn bearer_token_parses_scheme_and_rejects_other_forms() {
+        let auth = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, value.parse().unwrap());
+            headers
+        };
+
+        // scheme 大小写不敏感（RFC 7235）；凭据串原样透传（查不到行即 401）。
+        assert_eq!(
+            bearer_token(&auth("Bearer sis_abc")).as_deref(),
+            Some("sis_abc")
+        );
+        assert_eq!(
+            bearer_token(&auth("bearer sis_abc")).as_deref(),
+            Some("sis_abc")
+        );
+
+        // 非 Bearer scheme：回落 cookie 面；空凭据：不当 Bearer 处理。
+        assert_eq!(bearer_token(&auth("Basic dXNlcjpwYXNz")), None);
+        assert_eq!(bearer_token(&auth("Bearer")), None);
+        assert_eq!(bearer_token(&auth("Bearer ")), None);
+        assert_eq!(bearer_token(&auth("Bearer   ")), None);
+
+        // 头缺失 / 非法 ASCII：None。
+        assert_eq!(bearer_token(&HeaderMap::new()), None);
     }
 
     #[test]
