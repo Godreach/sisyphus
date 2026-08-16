@@ -21,6 +21,7 @@
 //! - 非 `/api` 未命中路径走静态资源解析（web 模块：本地覆盖目录 → 内嵌
 //!   sisyphus-web 产物 → SPA fallback 回 index.html，B2a-T5）。
 
+pub mod agents;
 pub mod audit;
 pub mod auth;
 pub mod csrf;
@@ -52,6 +53,7 @@ pub use docs::ApiDoc;
 use crate::api::error::ApiError;
 use crate::auth::LoginRateLimiter;
 use crate::secrets::MasterKey;
+use crate::store::agents::AgentRepo;
 use crate::store::audit::AuditRepo;
 use crate::store::members::MemberRepo;
 use crate::store::pipelines::PipelineRepo;
@@ -61,9 +63,13 @@ use crate::store::sessions::SessionRepo;
 use crate::store::tokens::PatRepo;
 use crate::store::users::UserRepo;
 
-/// REST 层共享状态：repo 组合注入（池只在 [`AppState::new`] 处消费一次）。
+/// REST 层共享状态：repo 组合注入（池在 [`AppState::new`] 处消费一次后
+/// 随状态存留——repo 共池，句柄克隆零成本）。
 #[derive(Debug, Clone)]
 pub struct AppState {
+    /// 底层连接池（组合根持有；repo 共池，供跨 repo 复用——如 Agent
+    /// 详情在途任务数经 jobs repo 计数）。
+    pub pool: SqlitePool,
     /// 项目元数据 repo。
     pub projects: ProjectRepo,
     /// pipeline 定义 repo。
@@ -78,6 +84,9 @@ pub struct AppState {
     pub members: MemberRepo,
     /// 项目机密 repo（票 B2b-T6：建/覆写/列名/删，值只写不读）。
     pub secrets: SecretRepo,
+    /// Agent 注册面 repo（票 B2c-T3：建条目/启停/编辑/在线维护/标签匹配；
+    /// REST 面与 gRPC 通道认证面共用）。
+    pub agents: AgentRepo,
     /// 审计日志 repo（票 B2b-T7，ADR-0015：只增 + 过滤回放，全局 admin
     /// 查询端点消费；各端点安全事件接线处写入）。
     pub audit: AuditRepo,
@@ -100,6 +109,7 @@ impl AppState {
     /// B2b-T6：启动路径已生成/读回密钥文件）。
     pub fn new(pool: SqlitePool, registration_enabled: bool, master_key: MasterKey) -> Self {
         Self {
+            pool: pool.clone(),
             projects: ProjectRepo::new(pool.clone()),
             pipelines: PipelineRepo::new(pool.clone()),
             users: UserRepo::new(pool.clone()),
@@ -107,6 +117,7 @@ impl AppState {
             pats: PatRepo::new(pool.clone()),
             members: MemberRepo::new(pool.clone()),
             secrets: SecretRepo::new(pool.clone()),
+            agents: AgentRepo::new(pool.clone()),
             audit: AuditRepo::new(pool.clone()),
             master_key,
             login_limiter: LoginRateLimiter::new(),
@@ -159,6 +170,8 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
             get(pipelines::get_definition).put(pipelines::put_definition),
         )
         .route("/audit", get(audit::list))
+        .route("/agents", get(agents::list).post(agents::create))
+        .route("/agents/{name}", get(agents::get_one).patch(agents::patch))
         // 层序（route_layer 后加者在外、先跑）：认证（401）在外层把关
         // 「谁在说话」（cookie 会话 / Bearer PAT 双通道，票 B2b-T3）；
         // CSRF（403）在其内层，只拦「已过认证且以 cookie 认证」的非安全

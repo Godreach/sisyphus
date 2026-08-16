@@ -24,6 +24,23 @@ async fn rest_and_grpc_serve_side_by_side() {
     let state = api::AppState::new(pool, false, master_key);
     let web_override_dir = dir.path().join(sisyphus_server::config::WEB_DIR);
 
+    // 建一个 Agent 条目（票 #47 起通道认证 Bearer sisa_ token）：握手
+    // 冒烟带真凭据过认证面。
+    let token = sisyphus_server::auth::generate_token(sisyphus_server::auth::TokenFamily::Agent);
+    let code = sisyphus_server::auth::generate_register_code();
+    state
+        .agents
+        .create(sisyphus_server::store::agents::NewAgent {
+            name: "smoke-agent".into(),
+            token_hash: sisyphus_server::auth::token_hash(&token),
+            system_labels: "[]".into(),
+            custom_labels: "[]".into(),
+            max_concurrency: 1,
+            register_code_hash: sisyphus_server::auth::token_hash(&code),
+        })
+        .await
+        .expect("建 Agent 条目");
+
     let rest_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind REST");
@@ -33,6 +50,8 @@ async fn rest_and_grpc_serve_side_by_side() {
     let rest_addr = rest_listener.local_addr().expect("REST addr");
     let grpc_addr = grpc_listener.local_addr().expect("gRPC addr");
 
+    let grpc_state = state.clone();
+    let check_state = state.clone();
     let rest = tokio::spawn(async move {
         axum::serve(rest_listener, api::router(state, web_override_dir))
             .await
@@ -40,7 +59,7 @@ async fn rest_and_grpc_serve_side_by_side() {
     });
     let grpc = tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(grpc::service())
+            .add_service(grpc::service(grpc_state))
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
                 grpc_listener,
             ))
@@ -51,7 +70,8 @@ async fn rest_and_grpc_serve_side_by_side() {
     // REST：healthz 经真实 socket 返回 200。
     assert_eq!(http1_get_status(rest_addr, "/healthz").await, 200);
 
-    // gRPC：Agent 握手经真实通道收到 Server 版本回执。
+    // gRPC：Agent 握手经真实通道收到 Server 版本回执（带 Bearer token 过
+    // 通道认证面，票 #47）。
     let channel = tonic::transport::Endpoint::from_shared(format!("http://{grpc_addr}"))
         .expect("endpoint")
         .connect()
@@ -69,10 +89,12 @@ async fn rest_and_grpc_serve_side_by_side() {
             agent_name: "smoke-agent".into(),
         })),
     };
-    let outbound = client
-        .connect(tonic::Request::new(tokio_stream::iter(vec![handshake])))
-        .await
-        .expect("connect call");
+    let mut request = tonic::Request::new(tokio_stream::iter(vec![handshake]));
+    request.metadata_mut().insert(
+        "authorization",
+        tonic::metadata::MetadataValue::try_from(format!("Bearer {token}")).expect("值"),
+    );
+    let outbound = client.connect(request).await.expect("connect call");
     let first = outbound
         .into_inner()
         .message()
@@ -80,6 +102,15 @@ async fn rest_and_grpc_serve_side_by_side() {
         .expect("recv")
         .expect("msg");
     assert!(matches!(first.kind, Some(Kind::Handshake(_))));
+
+    // 握手后会话任务会置 Agent 在线（通道认证面全链路：连接即上线）。
+    let row = check_state
+        .agents
+        .get_by_name("smoke-agent")
+        .await
+        .expect("查")
+        .expect("应存在");
+    assert!(row.online, "通道认证通过即置在线");
 
     rest.abort();
     grpc.abort();

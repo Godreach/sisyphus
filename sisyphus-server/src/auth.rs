@@ -156,6 +156,25 @@ pub fn generate_token(family: TokenFamily) -> String {
     )
 }
 
+/// Agent 一次性注册码的前缀（ADR-0007：管理员建条目即得、Agent 凭码换
+/// 长期 token；本批建条目即签发 token，注册码仍生成并仅存哈希——注册码
+/// 换 token 流程随 Agent 批次，前缀取值域先行）。
+pub const REGISTER_CODE_PREFIX: &str = "sisa_reg_";
+
+/// 生成 Agent 一次性注册码（`sisa_reg_` + 32 随机字节 base64url 无填充）。
+///
+/// 与 token 同纪律：明文只在建条目响应出现一次，库里只存其 SHA-256
+/// （[`crate::auth::token_hash`] 共用实现）。
+pub fn generate_register_code() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    format!(
+        "{}{}",
+        REGISTER_CODE_PREFIX,
+        Base64UrlUnpadded::encode_string(&bytes)
+    )
+}
+
 /// 按前缀识别令牌族；非本系统前缀返回 `None`（认证面按族放行，
 /// 它族/无前缀值一律不认）。
 pub fn token_family(token: &str) -> Option<TokenFamily> {
@@ -447,6 +466,27 @@ mod tests {
         for foreign in ["ghp_deadbeef", "sis-deadbeef", "sisadbeef", "", "bearer"] {
             assert_eq!(token_family(foreign), None, "{foreign} 不应识别为任何族");
         }
+        // 注册码是 Agent 族内的独立取值域（`sisa_reg_` 前缀仍在 `sisa_`
+        // 族内，但通道认证只查 token_hash 列——注册码哈希落的是
+        // register_code_hash 列，永远过不了通道认证）。
+        assert_eq!(
+            token_family(REGISTER_CODE_PREFIX),
+            Some(TokenFamily::Agent),
+            "注册码属 Agent 凭据族（前缀子集），但非有效通道 token"
+        );
+    }
+
+    #[test]
+    fn register_code_carries_prefix_and_hashes_like_token() {
+        let code = generate_register_code();
+        assert!(code.starts_with(REGISTER_CODE_PREFIX), "{code}");
+        let body = &code[REGISTER_CODE_PREFIX.len()..];
+        assert_eq!(body.len(), 43, "32 字节 base64url 无填充 = 43 字符");
+        // 与 token 同纪律：库里只存 SHA-256，明文仅在创建响应出现一次。
+        assert_eq!(token_hash(&code).len(), 64);
+        assert_ne!(token_hash(&code), code);
+        // 随机性：两次生成不同。
+        assert_ne!(generate_register_code(), generate_register_code());
     }
 
     /// ADR-0014 三档矩阵全集：viewer 看、runner 看 + 跑、admin 全量；

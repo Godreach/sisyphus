@@ -47,12 +47,19 @@ pub enum AuditEvent {
     SecretOverwritten,
     /// 机密删除（detail 只记名）。
     SecretDeleted,
+    /// 建 Agent 条目（ADR-0015 清单：Agent 建立 + 注册码签发；detail 记
+    /// 构建机名——token/注册码值永不落审计）。
+    AgentCreated,
+    /// 停用 Agent（即吊销 token 踢线；detail 记构建机名）。
+    AgentDisabled,
+    /// 启用 Agent（撤销停用；detail 记构建机名）。
+    AgentEnabled,
 }
 
 impl AuditEvent {
     /// 全部事件类型（契约单点：`as_str` 映射 + [`Self::parse`] 识别 +
     /// OpenAPI enum 生成的共同来源——新增事件类型只改这里与 [`Self::as_str`]）。
-    pub const ALL: [AuditEvent; 14] = [
+    pub const ALL: [AuditEvent; 17] = [
         Self::LoginSuccess,
         Self::LoginFailure,
         Self::Logout,
@@ -67,6 +74,9 @@ impl AuditEvent {
         Self::SecretCreated,
         Self::SecretOverwritten,
         Self::SecretDeleted,
+        Self::AgentCreated,
+        Self::AgentDisabled,
+        Self::AgentEnabled,
     ];
 
     /// 落库 / 查询过滤文本（契约值；filter 参数按此匹配）。
@@ -86,6 +96,9 @@ impl AuditEvent {
             Self::SecretCreated => "secret_created",
             Self::SecretOverwritten => "secret_overwritten",
             Self::SecretDeleted => "secret_deleted",
+            Self::AgentCreated => "agent_created",
+            Self::AgentDisabled => "agent_disabled",
+            Self::AgentEnabled => "agent_enabled",
         }
     }
 

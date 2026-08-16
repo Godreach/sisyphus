@@ -116,7 +116,10 @@ async fn main() {
 
     // 并行 serve：expect 收在各自 async 块内——任一出错即 panic 带崩整个
     // 进程，不带病运行半个服务。REST 侧带连接信息（login 限流的 per-IP
-    // 键取直连地址，票 B2b-T2）。
+    // 键取直连地址，票 B2b-T2）。状态克隆给 gRPC/扫描共用（同一组合根，
+    // 共享同一池）。
+    let grpc_state = state.clone();
+    let sweep_state = state.clone();
     let rest = async {
         axum::serve(
             rest_listener,
@@ -128,14 +131,21 @@ async fn main() {
     };
     let grpc = async {
         tonic::transport::Server::builder()
-            .add_service(grpc::service())
+            .add_service(grpc::service(grpc_state))
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
                 grpc_listener,
             ))
             .await
             .expect("gRPC serve");
     };
-    tokio::join!(rest, grpc);
+    // 心跳超时扫描（票 B2c-T3，ADR-0007/0008）：45s 无心跳判离线。与
+    // gRPC 服务同生命周期（server 进程即扫描进程，单实例调度纪律）。
+    let sweep = tokio::spawn(grpc::heartbeat_sweep(sweep_state));
+    tokio::select! {
+        _ = rest => {}
+        _ = grpc => {}
+    }
+    sweep.abort();
 }
 
 /// tracing 基础初始化（ADR-0019）：RUST_LOG 整体胜出，否则用配置级别

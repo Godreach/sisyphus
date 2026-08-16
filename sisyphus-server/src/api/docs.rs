@@ -3,6 +3,7 @@
 
 use utoipa::OpenApi;
 
+use super::agents;
 use super::audit;
 use super::auth;
 use super::error::{ErrorBody, ValidationIssue};
@@ -54,6 +55,10 @@ use super::users;
         users::reset_password,
         users::directory,
         audit::list,
+        agents::list,
+        agents::create,
+        agents::get_one,
+        agents::patch,
     ),
     components(schemas(
         health::Healthz,
@@ -82,6 +87,12 @@ use super::users;
         users::ResetPasswordRequest,
         users::DirectoryEntryResponse,
         audit::AuditEntryResponse,
+        agents::CreateAgentRequest,
+        agents::PatchAgentRequest,
+        agents::AgentResponse,
+        agents::CreatedAgentResponse,
+        agents::VolumeUsageDto,
+        agents::DiskUsageDto,
     )),
     tags(
         (name = "infra", description = "探针与基础设施端点"),
@@ -91,6 +102,7 @@ use super::users;
         (name = "pipelines", description = "Pipeline 定义读写（model 校验 + revision 语义）"),
         (name = "users", description = "用户管理（全局 admin：建/列/禁用/重置，票 B2b-T4）与用户目录（项目 admin 的最小只读清单，票 B2b-T5）"),
         (name = "audit", description = "审计回放（票 B2b-T7：安全事件只增记账，仅全局 admin 可查询——按时间/用户/项目/事件类型过滤 + 分页）"),
+        (name = "agents", description = "Agent 注册面（票 B2c-T3：建条目/启停/编辑/详情——全局 admin 专属；token 与注册码明文仅在创建响应出现一次）"),
     )
 )]
 pub struct ApiDoc;

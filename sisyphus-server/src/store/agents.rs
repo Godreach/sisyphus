@@ -13,12 +13,40 @@
 //! [`crate::store::jobs::JobRepo::active_by_agent`]（running/unknown 在途，
 //! ADR-0008），[`Self::has_slots`] 供 sched 判定。
 
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use super::{StoreError, is_unique_violation, now_ms};
 
-/// Agent 行（`system_labels`/`custom_labels` 为 JSON 数组文本——匹配取并集
-/// 由 [`Self::all_labels`] 收敛，schema 不解析内部）。
+/// 卷级磁盘占用（ADR-0019：随心跳上报的 statvfs/GetDiskFreeSpaceEx 值）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeUsage {
+    /// 挂载点/盘符。
+    pub mount_point: String,
+    /// 总量（字节）。
+    pub total_bytes: i64,
+    /// 剩余量（字节）。
+    pub free_bytes: i64,
+}
+
+/// Agent 磁盘占用上报的落库形态（JSON 文本列 `agents.disk_usage`，可空；
+/// 解析收在 [`AgentRow::disk_usage`] 返回前，schema 不拆内里）。
+///
+/// 与 proto `DiskUsage` 同构（卷级 + 缓存占用 + 工作区最近采样），由
+/// gRPC 面把 proto 消息转成此形态落库（store 不依赖 proto，转换在调用侧）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDiskUsage {
+    /// 卷级剩余/总量（多卷逐项）。
+    pub volumes: Vec<VolumeUsage>,
+    /// 缓存占用（记账值，ADR-0012 registry）。
+    pub cache_bytes: i64,
+    /// 工作区占用最近采样（ADR-0019，Agent 后台任务降频采样）。
+    pub workspace_bytes: i64,
+}
+
+/// Agent 行（`system_labels`/`custom_labels`/`disk_usage` 为 JSON 文本——
+/// 匹配取并集由 [`Self::all_labels`] 收敛、磁盘占用经 [`Self::disk_usage`]
+/// 解析，schema 不解析内部）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentRow {
     /// 行 id（jobs.agent_id 引用）。
@@ -39,6 +67,8 @@ pub struct AgentRow {
     pub disabled: bool,
     /// 最近心跳时间（Unix 毫秒）。
     pub last_seen_at: Option<i64>,
+    /// 磁盘占用 JSON（ADR-0019；从未上报为空）。
+    pub disk_usage: Option<String>,
     /// 一次性注册码的 SHA-256（注册码换 token 流程随 Agent 批次）。
     pub register_code_hash: String,
     /// 创建时间（Unix 毫秒）。
@@ -57,11 +87,20 @@ impl AgentRow {
         labels.extend(custom);
         Ok(labels)
     }
+
+    /// 磁盘占用解析（从未上报为 `None`；脏 JSON 视为库损坏）。
+    pub fn disk_usage(&self) -> Result<Option<AgentDiskUsage>, StoreError> {
+        self.disk_usage
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(StoreError::DefinitionJson)
+    }
 }
 
 /// 建条目后立刻签发 token（最小注册面）在调用侧组装：本 repo 只落库行，
 /// token 生成与哈希经 [`crate::auth`] 基座（与 PAT 同纪律：明文只在创建
-/// 响应出现一次）。
+/// 响应出现一次）。disk_usage 不在建条目面：随心跳上报（ADR-0019）。
 #[derive(Debug, Clone)]
 pub struct NewAgent {
     /// 构建机名（唯一）。
@@ -180,6 +219,33 @@ impl AgentRepo {
         Ok(result.rows_affected() > 0)
     }
 
+    /// 心跳上报：刷在线与 last_seen、整组替换系统标签（连接面事实，随每
+    /// 次心跳重写保持最新）、落磁盘占用（首次上报即写入，之后随心跳覆盖；
+    /// 上报 `None` 不清旧值）。停用即踢线：`disabled` Agent 的心跳不生效
+    /// （返回 false，通道面据此断开——与认证面同纪律，不等待下次连接受拒）。
+    pub async fn heartbeat(
+        &self,
+        id: i64,
+        system_labels: &str,
+        disk_usage: Option<&str>,
+        seen_at: i64,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE agents
+             SET online = 1, system_labels = ?, last_seen_at = ?,
+                 disk_usage = COALESCE(?, disk_usage), updated_at = ?
+             WHERE id = ? AND disabled = 0",
+        )
+        .bind(system_labels)
+        .bind(seen_at)
+        .bind(disk_usage)
+        .bind(now_ms())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// 离线（心跳超时判定）：置 online=0、刷 last_seen。运行中任务由
     /// sched 转 unknown，Agent 侧继续跑（ADR-0008 离线不判死）。
     pub async fn mark_offline(&self, id: i64, at: i64) -> Result<bool, StoreError> {
@@ -199,7 +265,8 @@ impl AgentRepo {
     pub async fn find_active_by_hash(&self, token_hash: &str) -> Result<Option<AgentRow>, StoreError> {
         let row = sqlx::query_as::<_, AgentTuple>(
             "SELECT id, name, token_hash, system_labels, custom_labels, max_concurrency,
-                    online, disabled, last_seen_at, register_code_hash, created_at, updated_at
+                    online, disabled, last_seen_at, disk_usage, register_code_hash,
+                    created_at, updated_at
              FROM agents WHERE token_hash = ? AND disabled = 0",
         )
         .bind(token_hash)
@@ -212,8 +279,24 @@ impl AgentRepo {
     pub async fn list(&self) -> Result<Vec<AgentRow>, StoreError> {
         let rows = sqlx::query_as::<_, AgentTuple>(
             "SELECT id, name, token_hash, system_labels, custom_labels, max_concurrency,
-                    online, disabled, last_seen_at, register_code_hash, created_at, updated_at
+                    online, disabled, last_seen_at, disk_usage, register_code_hash,
+                    created_at, updated_at
              FROM agents ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(AgentRow::from_tuple).collect()
+    }
+
+    /// 在线 Agent（心跳超时扫描的输入面；按名排序输出稳定）。
+    /// 在线判定：45s 无心跳判离线由扫描侧（`grpc` 面 sweep）以
+    /// `last_seen_at` 裁决，本方法只列「当前在线」行。
+    pub async fn list_online(&self) -> Result<Vec<AgentRow>, StoreError> {
+        let rows = sqlx::query_as::<_, AgentTuple>(
+            "SELECT id, name, token_hash, system_labels, custom_labels, max_concurrency,
+                    online, disabled, last_seen_at, disk_usage, register_code_hash,
+                    created_at, updated_at
+             FROM agents WHERE online = 1 ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -224,7 +307,8 @@ impl AgentRepo {
     pub async fn get(&self, id: i64) -> Result<Option<AgentRow>, StoreError> {
         let row = sqlx::query_as::<_, AgentTuple>(
             "SELECT id, name, token_hash, system_labels, custom_labels, max_concurrency,
-                    online, disabled, last_seen_at, register_code_hash, created_at, updated_at
+                    online, disabled, last_seen_at, disk_usage, register_code_hash,
+                    created_at, updated_at
              FROM agents WHERE id = ?",
         )
         .bind(id)
@@ -237,7 +321,8 @@ impl AgentRepo {
     pub async fn get_by_name(&self, name: &str) -> Result<Option<AgentRow>, StoreError> {
         let row = sqlx::query_as::<_, AgentTuple>(
             "SELECT id, name, token_hash, system_labels, custom_labels, max_concurrency,
-                    online, disabled, last_seen_at, register_code_hash, created_at, updated_at
+                    online, disabled, last_seen_at, disk_usage, register_code_hash,
+                    created_at, updated_at
              FROM agents WHERE name = ?",
         )
         .bind(name)
@@ -291,18 +376,19 @@ impl AgentRepo {
 
 /// agents 行元组（列形态唯一收敛点，免逐查询散落 `Row::get`）。
 type AgentTuple = (
-    i64,          // id
-    String,       // name
-    String,       // token_hash
-    String,       // system_labels
-    String,       // custom_labels
-    i32,          // max_concurrency
-    bool,         // online
-    bool,         // disabled
-    Option<i64>,  // last_seen_at
-    String,       // register_code_hash
-    i64,          // created_at
-    i64,          // updated_at
+    i64,            // id
+    String,         // name
+    String,         // token_hash
+    String,         // system_labels
+    String,         // custom_labels
+    i32,            // max_concurrency
+    bool,           // online
+    bool,           // disabled
+    Option<i64>,    // last_seen_at
+    Option<String>, // disk_usage
+    String,         // register_code_hash
+    i64,            // created_at
+    i64,            // updated_at
 );
 
 impl AgentRow {
@@ -319,9 +405,10 @@ impl AgentRow {
             online: row.6,
             disabled: row.7,
             last_seen_at: row.8,
-            register_code_hash: row.9,
-            created_at: row.10,
-            updated_at: row.11,
+            disk_usage: row.9,
+            register_code_hash: row.10,
+            created_at: row.11,
+            updated_at: row.12,
         })
     }
 }
@@ -630,6 +717,103 @@ mod tests {
         // 空要求：任意 Agent 命中（无标签约束任务）。
         assert!(AgentRepo::matches_tags(&agent, &[]));
         assert!(AgentRepo::matches_tags(&[], &[]));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_persists_disk_usage_labels_and_respects_disabled() {
+        let (_dir, pool) = fixture().await;
+        let repo = AgentRepo::new(pool.clone());
+        let agent = repo
+            .create(new_agent("linux-1", "[]", "[]"))
+            .await
+            .expect("建");
+
+        // 心跳：置在线、刷 last_seen、整组替换系统标签、落磁盘占用。
+        let disk = r#"{"volumes":[{"mount_point":"/","total_bytes":100,"free_bytes":40}],"cache_bytes":5,"workspace_bytes":10}"#;
+        let ok = repo
+            .heartbeat(
+                agent.id,
+                r#"["sisyphus/os=linux","sisyphus/arch=amd64","sisyphus/container=docker"]"#,
+                Some(disk),
+                1_000,
+            )
+            .await
+            .expect("心跳");
+        assert!(ok);
+        let row = repo.get(agent.id).await.expect("查").expect("应存在");
+        assert!(row.online);
+        assert_eq!(row.last_seen_at, Some(1_000));
+        assert!(row.system_labels.contains("sisyphus/container=docker"));
+        assert_eq!(
+            row.disk_usage().expect("磁盘占用").expect("应上报"),
+            AgentDiskUsage {
+                volumes: vec![VolumeUsage {
+                    mount_point: "/".into(),
+                    total_bytes: 100,
+                    free_bytes: 40,
+                }],
+                cache_bytes: 5,
+                workspace_bytes: 10,
+            }
+        );
+
+        // 再次心跳不带上报：在线/标签刷新、旧磁盘占用保留。
+        assert!(repo
+            .heartbeat(agent.id, r#"["sisyphus/os=linux"]"#, None, 2_000)
+            .await
+            .expect("再心跳"));
+        let row = repo.get(agent.id).await.expect("查").expect("应存在");
+        assert_eq!(row.last_seen_at, Some(2_000));
+        assert_eq!(row.system_labels, r#"["sisyphus/os=linux"]"#);
+        assert!(
+            row.disk_usage().expect("磁盘占用").is_some(),
+            "None 上报不清旧值"
+        );
+
+        // 停用即踢线：停用 Agent 的心跳不生效（在线面立即拒——通道据此断开，
+        // 不等待下次连接受拒）。
+        assert!(repo.set_disabled(agent.id, true).await.expect("停用"));
+        assert!(
+            !repo
+                .heartbeat(agent.id, "[]", None, 3_000)
+                .await
+                .expect("停用心跳"),
+            "停用心跳应不生效"
+        );
+        let row = repo.get(agent.id).await.expect("查").expect("应存在");
+        assert_eq!(row.last_seen_at, Some(2_000), "停用心跳不刷 last_seen");
+
+        // 启用后心跳恢复生效。
+        assert!(repo.set_disabled(agent.id, false).await.expect("启用"));
+        assert!(repo
+            .heartbeat(agent.id, "[]", None, 4_000)
+            .await
+            .expect("启用心跳"));
+
+        // 不存在的 Agent：false。
+        assert!(!repo
+            .heartbeat(agent.id + 999, "[]", None, 5_000)
+            .await
+            .expect("不存在"));
+    }
+
+    #[tokio::test]
+    async fn list_online_filters_by_online_flag() {
+        let (_dir, pool) = fixture().await;
+        let repo = AgentRepo::new(pool.clone());
+        let a = repo
+            .create(new_agent("linux-1", "[]", "[]"))
+            .await
+            .expect("a");
+        repo.create(new_agent("linux-2", "[]", "[]"))
+            .await
+            .expect("b");
+
+        assert!(repo.list_online().await.expect("在线清单").is_empty());
+        repo.heartbeat(a.id, "[]", None, 1_000).await.expect("a 上线");
+        let online = repo.list_online().await.expect("在线清单");
+        assert_eq!(online.len(), 1);
+        assert_eq!(online[0].name, "linux-1");
     }
 
     /// 票 #45 AC：匹配查询——在线 + 空槽 + 标签 AND 全集命中才下发候选；

@@ -13,6 +13,261 @@
     "version": "1.0.0"
   },
   "paths": {
+    "/api/v1/agents": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Agent 清单（全局 admin；按名排序，含已停用，无凭据值形态）。",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "全部 Agent（按名排序，含已停用）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AgentResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非全局管理员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "建 Agent 条目（全局 admin）：签发 token + 注册码，落库行（离线、未\n停用；系统标签空——由首次连接上报）。",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAgentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "已创建；token 与注册码明文仅此一次返回",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedAgentResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非全局管理员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Agent 名已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（名非空/字符集、标签形态、槽位 >= 1）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{name}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Agent 详情（全局 admin）：在线/标签/槽位/磁盘占用。",
+        "operationId": "get_one",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "构建机名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent 详情（含在途任务数/磁盘占用）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非全局管理员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent 不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "启停 / 编辑（全局 admin）：字段均可选，只更新出现者。停用即踢线——\n认证面（下一连接/下一帧）与在线面（心跳不生效）即刻不命中。",
+        "operationId": "patch",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "构建机名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchAgentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已更新，返回落定后的 Agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非全局管理员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent 不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（标签形态、槽位 >= 1）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/audit": {
       "get": {
         "tags": [
@@ -91,7 +346,10 @@
                 "member_roles_changed",
                 "secret_created",
                 "secret_overwritten",
-                "secret_deleted"
+                "secret_deleted",
+                "agent_created",
+                "agent_disabled",
+                "agent_enabled"
               ]
             }
           },
@@ -1587,6 +1845,88 @@
   },
   "components": {
     "schemas": {
+      "AgentResponse": {
+        "type": "object",
+        "description": "Agent 管理视图（无 token/注册码值形态——明文只在创建响应出现一次）。",
+        "required": [
+          "name",
+          "online",
+          "disabled",
+          "system_labels",
+          "custom_labels",
+          "max_concurrency",
+          "active_jobs",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "active_jobs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "在途任务数（running/unknown 占槽，ADR-0008 中心化计数）。"
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "创建时间（Unix 毫秒）。"
+          },
+          "custom_labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "自定义标签（管理员可编辑）。"
+          },
+          "disabled": {
+            "type": "boolean",
+            "description": "停用标志（停用即踢线）。"
+          },
+          "disk_usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DiskUsageDto",
+                "description": "磁盘占用（ADR-0019：卷级/缓存/工作区最近采样；从未上报为空）。"
+              }
+            ]
+          },
+          "last_seen_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "最近心跳时间（Unix 毫秒；从未在线为空）。"
+          },
+          "max_concurrency": {
+            "type": "integer",
+            "format": "int32",
+            "description": "并发槽位数。"
+          },
+          "name": {
+            "type": "string",
+            "description": "构建机名（唯一）。"
+          },
+          "online": {
+            "type": "boolean",
+            "description": "在线状态（心跳 15s 收、45s 无心跳判离线）。"
+          },
+          "system_labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "系统事实标签（sisyphus/os、sisyphus/arch、sisyphus/container；由\n注册/心跳上报，不可手编）。"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "最后更新时间（Unix 毫秒）。"
+          }
+        }
+      },
       "AuditEntryResponse": {
         "type": "object",
         "description": "审计条目（detail 为 JSON 对象——机密事件只含名，永不出现值形态）。",
@@ -1642,6 +1982,37 @@
           "new_password": {
             "type": "string",
             "description": "新密码（最小长度 8，无复杂度规则）。"
+          }
+        }
+      },
+      "CreateAgentRequest": {
+        "type": "object",
+        "description": "建 Agent 条目请求体（全局 admin）。",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "custom_labels": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "自定义标签（key=value 字符串数组，可空/省略 = 空集；管理员可编辑，\n匹配与系统标签取并集做 AND 全集语义）。"
+          },
+          "max_concurrency": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "并发槽位数（默认 1；>= 1）。"
+          },
+          "name": {
+            "type": "string",
+            "description": "构建机名（唯一；1-64 位字母数字或 `_ . -`，trim 后生效——名会进\nURL 路径 `/agents/{name}`）。"
           }
         }
       },
@@ -1721,6 +2092,29 @@
           }
         }
       },
+      "CreatedAgentResponse": {
+        "type": "object",
+        "description": "建条目响应：token 与注册码明文仅此一次返回（此后任何端点不再出现值；\n库里只存各自哈希，任何端点都无法找回）。",
+        "required": [
+          "token",
+          "register_code",
+          "agent"
+        ],
+        "properties": {
+          "agent": {
+            "$ref": "#/components/schemas/AgentResponse",
+            "description": "Agent 管理视图。"
+          },
+          "register_code": {
+            "type": "string",
+            "description": "一次性注册码（`sisa_reg_` + 43 字符；注册码换 token 流程随 Agent\n批次，本批建条目即签发 token）。"
+          },
+          "token": {
+            "type": "string",
+            "description": "per-Agent 通道 token（`sisa_` + 43 字符）。请立即保存：本响应是\n唯一一次出现。"
+          }
+        }
+      },
       "CreatedTokenResponse": {
         "type": "object",
         "description": "创建 PAT 响应：完整令牌仅此一次返回（此后任何端点不再出现值）。",
@@ -1793,6 +2187,34 @@
           "username": {
             "type": "string",
             "description": "用户名。"
+          }
+        }
+      },
+      "DiskUsageDto": {
+        "type": "object",
+        "description": "磁盘占用视图（ADR-0019：随心跳上报入库）。",
+        "required": [
+          "volumes",
+          "cache_bytes",
+          "workspace_bytes"
+        ],
+        "properties": {
+          "cache_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "缓存占用（记账值）。"
+          },
+          "volumes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VolumeUsageDto"
+            },
+            "description": "卷级剩余/总量（多卷逐项）。"
+          },
+          "workspace_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "工作区占用最近采样。"
           }
         }
       },
@@ -1887,6 +2309,37 @@
           "username": {
             "type": "string",
             "description": "用户名。"
+          }
+        }
+      },
+      "PatchAgentRequest": {
+        "type": "object",
+        "description": "启停 / 编辑请求体（全局 admin）：字段均可选，只更新出现者。",
+        "properties": {
+          "custom_labels": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "自定义标签整组替换（key=value 字符串数组）。"
+          },
+          "disabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "停用（true）即踢线：认证面与在线面即刻不命中，运行中任务处置归\nsched（B2c-T4）；false = 启用恢复。"
+          },
+          "max_concurrency": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "并发槽位数（>= 1）。"
           }
         }
       },
@@ -2159,6 +2612,31 @@
             "description": "字段定位路径（如 `stages[0].jobs[1].steps[0].command`）。"
           }
         }
+      },
+      "VolumeUsageDto": {
+        "type": "object",
+        "description": "卷级磁盘占用（详情视图）。",
+        "required": [
+          "mount_point",
+          "total_bytes",
+          "free_bytes"
+        ],
+        "properties": {
+          "free_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "剩余量（字节）。"
+          },
+          "mount_point": {
+            "type": "string",
+            "description": "挂载点/盘符。"
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "总量（字节）。"
+          }
+        }
       }
     }
   },
@@ -2190,6 +2668,10 @@
     {
       "name": "audit",
       "description": "审计回放（票 B2b-T7：安全事件只增记账，仅全局 admin 可查询——按时间/用户/项目/事件类型过滤 + 分页）"
+    },
+    {
+      "name": "agents",
+      "description": "Agent 注册面（票 B2c-T3：建条目/启停/编辑/详情——全局 admin 专属；token 与注册码明文仅在创建响应出现一次）"
     }
   ]
 }
