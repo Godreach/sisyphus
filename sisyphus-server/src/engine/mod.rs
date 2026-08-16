@@ -26,7 +26,7 @@
 
 mod spec;
 
-pub(crate) use spec::{eval_when, var_env, AssembleError, ResolvedJobSpec};
+pub(crate) use spec::{eval_when, var_env, AssembleError, ResolvedJobSpec, ResolvedStep, Vcs};
 
 use std::collections::HashMap;
 

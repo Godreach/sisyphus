@@ -15,6 +15,9 @@ pub const DEFAULT_LOG_LEVEL: &str = "info";
 pub const DEFAULT_LOG_FORMAT: &str = "json";
 /// 用户自注册开关默认值（ADR-0014：默认关，内网由全局 admin 建号）。
 pub const DEFAULT_REGISTRATION_ENABLED: bool = false;
+/// orphan 宽限默认值（分钟，ADR-0008：Agent 离线后运行中任务 unknown 宽限
+/// 超时判失败；默认 10 分钟，config `[scheduler]` 可覆盖）。
+pub const DEFAULT_ORPHAN_GRACE_MINUTES: i64 = 10;
 
 /// 数据目录内的配置文件名。
 pub const CONFIG_FILE_NAME: &str = "config.toml";
@@ -59,6 +62,9 @@ pub struct Config {
     /// 主密钥文件路径（ADR-0015：默认数据目录内 `master.key`，可经 config
     /// 改到独立卷；首启自动生成、已有文件不重生成，票 B2b-T6）。
     pub master_key_path: PathBuf,
+    /// orphan 宽限分钟（ADR-0008：Agent 离线后运行中任务 unknown 的宽限；
+    /// 默认 10 分钟）。
+    pub orphan_grace_minutes: i64,
 }
 
 /// 同一形态的覆盖层：CLI flag 与 `SISYPHUS_` 环境变量都归约为它。
@@ -91,6 +97,9 @@ pub struct FileConfig {
     /// `[auth]` 段。
     #[serde(default)]
     pub auth: AuthFile,
+    /// `[scheduler]` 段（ADR-0008：调度时间语义）。
+    #[serde(default)]
+    pub scheduler: SchedulerFile,
 }
 
 /// `[server]` 段。
@@ -122,6 +131,15 @@ pub struct AuthFile {
     /// 主密钥文件路径（相对路径按相对数据目录解析；默认数据目录内
     /// `master.key`，ADR-0015：可改到独立卷做运维纵深）。
     pub master_key_path: Option<PathBuf>,
+}
+
+/// `[scheduler]` 段（ADR-0008：调度时间语义；B2c-T4 起）。
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulerFile {
+    /// orphan 宽限分钟（Agent 离线后运行中任务 unknown 的宽限，超时判失败；
+    /// 默认 10 分钟）。
+    pub orphan_grace_minutes: Option<i64>,
 }
 
 /// 配置加载/合并错误。
@@ -186,6 +204,11 @@ registration_enabled = false
 # 防「DB 文件/备份单独泄露」的最后一环：可改到独立卷做运维纵深——数据目录整体失守
 # （含密钥文件）无解。相对路径按相对数据目录解析，修改后重启生效）
 # master_key_path = "/secure/volume/master.key"
+
+[scheduler]
+# orphan 宽限分钟（Agent 离线后运行中任务 unknown 的宽限，超时未恢复判失败，ADR-0008；
+# 默认 10 分钟）
+orphan_grace_minutes = 10
 "#
 }
 
@@ -300,6 +323,14 @@ pub fn merge(
         return Err(ConfigError::InvalidLogValue(log_level));
     }
 
+    // orphan 宽限分钟：文件层可配，无 CLI/env 覆盖层（默认 10，ADR-0008）。
+    // 负值/0 按 0 处理（宽限即时判败——调用侧 max(0) 收口）。
+    let orphan_grace_minutes = file
+        .scheduler
+        .orphan_grace_minutes
+        .unwrap_or(DEFAULT_ORPHAN_GRACE_MINUTES)
+        .max(0);
+
     Ok(Config {
         data_dir,
         rest_addr,
@@ -308,6 +339,7 @@ pub fn merge(
         log_format,
         registration_enabled,
         master_key_path,
+        orphan_grace_minutes,
     })
 }
 
@@ -358,6 +390,10 @@ mod tests {
             PathBuf::from("/tmp/data").join(MASTER_KEY_FILE_NAME),
             "主密钥默认落数据目录内"
         );
+        assert_eq!(
+            cfg.orphan_grace_minutes, DEFAULT_ORPHAN_GRACE_MINUTES,
+            "orphan 宽限默认 10 分钟（ADR-0008）"
+        );
     }
 
     #[test]
@@ -388,6 +424,7 @@ mod tests {
                 registration_enabled: Some(true),
                 master_key_path: Some("/vol/file.key".into()),
             },
+            scheduler: SchedulerFile::default(),
         };
 
         let cfg = merge(PathBuf::from("/tmp/data"), &cli, &env, &file)
@@ -532,9 +569,55 @@ mod tests {
         assert_eq!(cfg.log_level, DEFAULT_LOG_LEVEL);
         assert_eq!(cfg.log_format, LogFormat::Json);
         assert!(!cfg.registration_enabled, "样例值与内置默认一致");
+        assert_eq!(
+            cfg.orphan_grace_minutes, DEFAULT_ORPHAN_GRACE_MINUTES,
+            "样例值与内置默认一致（orphan 宽限）"
+        );
 
         // 带注释：样例要能当作文档读。
         assert!(sample_toml().lines().any(|l| l.trim_start().starts_with('#')));
+    }
+
+    /// 票 B2c-T4：`[scheduler] orphan_grace_minutes` 文件层可配；负值按 0
+    /// 处理（宽限即时判败）；未知字段拒绝（防手误静默失效）。
+    #[test]
+    fn scheduler_orphan_grace_merges_from_file_and_clamps_negative() {
+        let file = FileConfig {
+            scheduler: SchedulerFile {
+                orphan_grace_minutes: Some(30),
+            },
+            ..FileConfig::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file,
+        )
+        .expect("文件层 orphan 宽限");
+        assert_eq!(cfg.orphan_grace_minutes, 30);
+
+        // 负值/0 按 0（宽限即时判败——调用侧 max(0) 收口）。
+        let file_zero = FileConfig {
+            scheduler: SchedulerFile {
+                orphan_grace_minutes: Some(-5),
+            },
+            ..FileConfig::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file_zero,
+        )
+        .expect("负值按 0");
+        assert_eq!(cfg.orphan_grace_minutes, 0);
+
+        // 未知字段拒绝（deny_unknown_fields）。
+        assert!(matches!(
+            parse_toml("[scheduler]\norphan_grace = 5\n"),
+            Err(ConfigError::InvalidToml(_))
+        ));
     }
 
     #[test]

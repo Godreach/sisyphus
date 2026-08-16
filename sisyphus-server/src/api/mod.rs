@@ -52,6 +52,8 @@ pub use docs::ApiDoc;
 
 use crate::api::error::ApiError;
 use crate::auth::LoginRateLimiter;
+use crate::engine::Engine;
+use crate::events::EventBus;
 use crate::secrets::MasterKey;
 use crate::store::agents::AgentRepo;
 use crate::store::audit::AuditRepo;
@@ -90,6 +92,11 @@ pub struct AppState {
     /// 审计日志 repo（票 B2b-T7，ADR-0015：只增 + 过滤回放，全局 admin
     /// 查询端点消费；各端点安全事件接线处写入）。
     pub audit: AuditRepo,
+    /// 编排引擎（票 B2c-T2，ADR-0006：统一触发入口 + 构建推进 + 任务终态
+    /// 接线点；sched/grpc/REST 共享同一引擎与事件总线）。
+    pub engine: Engine,
+    /// 进程内事件总线（热通知，可丢，DB 重放兜底；sched 循环消费）。
+    pub bus: EventBus,
     /// 主密钥（票 B2b-T6，ADR-0015）：首启由启动路径经
     /// [`crate::secrets::ensure_master_key`] 生成/读回后注入，机密写入路径
     /// 加密用。
@@ -108,6 +115,7 @@ impl AppState {
     /// 默认，ADR-0010）；`master_key` 为机密加密主密钥（ADR-0015，票
     /// B2b-T6：启动路径已生成/读回密钥文件）。
     pub fn new(pool: SqlitePool, registration_enabled: bool, master_key: MasterKey) -> Self {
+        let bus = EventBus::new();
         Self {
             pool: pool.clone(),
             projects: ProjectRepo::new(pool.clone()),
@@ -119,6 +127,8 @@ impl AppState {
             secrets: SecretRepo::new(pool.clone()),
             agents: AgentRepo::new(pool.clone()),
             audit: AuditRepo::new(pool.clone()),
+            engine: Engine::new(pool.clone(), master_key, bus.clone()),
+            bus,
             master_key,
             login_limiter: LoginRateLimiter::new(),
             registration_enabled,

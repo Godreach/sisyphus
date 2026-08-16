@@ -12,8 +12,10 @@ use sisyphus_proto::agent::{
     Handshake, Heartbeat, Version,
 };
 use sisyphus_server::auth::{TokenFamily, generate_register_code, generate_token, token_hash};
+use sisyphus_server::sched::SchedulerHandle;
 use sisyphus_server::store::agents::NewAgent;
 use sisyphus_server::{api, grpc, store};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
@@ -78,9 +80,12 @@ async fn spawn_grpc(state: api::AppState) -> (std::net::SocketAddr, tokio::task:
         .await
         .expect("bind");
     let addr = listener.local_addr().expect("addr");
+    let sessions = Arc::new(grpc::SessionRegistry::new());
+    // 认证/心跳用例不驱动调度循环：丢弃面句柄（任务面帧不转发）。
+    let scheduler = SchedulerHandle::discard();
     let handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(grpc::service(state))
+            .add_service(grpc::service(state, sessions, scheduler))
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
                 listener,
             ))

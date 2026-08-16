@@ -4,11 +4,12 @@
 //! REST（axum）与 gRPC（tonic）并行 serve。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 
 use sisyphus_server::config::{Config, LogFormat, Overrides};
-use sisyphus_server::{api, grpc, store};
+use sisyphus_server::{api, grpc, sched, store};
 
 /// sisyphus Server
 #[derive(Parser, Debug)]
@@ -96,6 +97,30 @@ async fn main() {
     // 静态资源本地覆盖目录（B2a-T5）：数据目录 web/ 子目录，不存在即纯内嵌。
     let web_override_dir = config.data_dir.join(sisyphus_server::config::WEB_DIR);
 
+    // 调度装配（票 B2c-T4，ADR-0008）：会话注册表（grpc 面）→ 下发端口
+    // （真实通道）→ 调度循环（事件驱动，共享 engine + 事件总线）。调度
+    // 循环与 gRPC 服务同生命周期（server 进程即调度进程，单实例纪律）。
+    let sessions = Arc::new(grpc::SessionRegistry::new());
+    let dispatcher = Arc::new(grpc::GrpcDispatcher::new(sessions.clone()));
+    let scheduler = sched::Scheduler::new(
+        state.engine.clone(),
+        pool.clone(),
+        dispatcher,
+        config.orphan_grace_minutes,
+    );
+    let scheduler_handle = scheduler.handle();
+    let scheduler_state = state.clone();
+    let sched_task = tokio::spawn(async move {
+        // 启动从库重建（running/queued/unknown 任务、挂起取消补发）后进入
+        // 事件驱动循环。
+        if let Err(e) = scheduler.reconstruct().await {
+            tracing::error!(error = %e, "调度状态重建失败");
+        }
+        scheduler.run(scheduler_state.bus.clone()).await;
+    });
+    // 构建终态通知钩子（票 #46 留位；notify 批次在此接 SMTP 发送）。
+    let _notifier = sisyphus_server::notify::spawn_notifier(state.bus.clone());
+
     // 双端口先绑定再 serve（ADR-0005 端口合并策略推迟，各自独立监听）：
     // 任一端口被占即启动失败，不带病运行半个服务。
     let rest_addr: std::net::SocketAddr = config.rest_addr.parse().expect("配置层已校验监听地址");
@@ -120,6 +145,8 @@ async fn main() {
     // 共享同一池）。
     let grpc_state = state.clone();
     let sweep_state = state.clone();
+    let grpc_sessions = sessions.clone();
+    let grpc_scheduler = scheduler_handle.clone();
     let rest = async {
         axum::serve(
             rest_listener,
@@ -131,7 +158,7 @@ async fn main() {
     };
     let grpc = async {
         tonic::transport::Server::builder()
-            .add_service(grpc::service(grpc_state))
+            .add_service(grpc::service(grpc_state, grpc_sessions, grpc_scheduler))
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
                 grpc_listener,
             ))
@@ -146,6 +173,7 @@ async fn main() {
         _ = grpc => {}
     }
     sweep.abort();
+    sched_task.abort();
 }
 
 /// tracing 基础初始化（ADR-0019）：RUST_LOG 整体胜出，否则用配置级别

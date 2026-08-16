@@ -125,6 +125,11 @@ pub struct JobRow {
     pub exit_code: Option<i32>,
     /// 详情（失败原因、缺失机密名、超时等）。
     pub detail: Option<String>,
+    /// 判离线转 unknown 的时刻（Unix 毫秒；orphan 宽限计时起点，重连回归
+    /// running 清空，ADR-0008）。
+    pub unknown_at: Option<i64>,
+    /// pending 池等待原因（缺失标签 / 等待上线 / 等待槽位；匹配下发清空）。
+    pub waiting_detail: Option<String>,
 }
 
 /// 新建任务输入（初始 queued、attempt 由调用侧定——重跑语义的裁决方）。
@@ -196,7 +201,9 @@ impl JobRepo {
     /// 保留首启时刻）；排队中直接取消/跳过的任务不落开始时刻（Spec B2c
     /// §2：started_at 即开始执行时刻）。进终态记 `finished_at`；
     /// `exit_code`/`detail` 只在 Some 时覆写（保留历史信息，未知值不清）。
-    /// 已是终态或行不存在返回 `false`。
+    /// 进 running 清 `unknown_at`（重连回归即结束宽限计时）与
+    /// `waiting_detail`（下发即结束等待）；进 unknown 记 `unknown_at`（宽限
+    /// 计时起点）。已是终态或行不存在返回 `false`。
     pub async fn transition(
         &self,
         id: i64,
@@ -212,7 +219,12 @@ impl JobRepo {
              SET status = ?, started_at = COALESCE(started_at, ?),
                  finished_at = ?,
                  exit_code = COALESCE(?, exit_code),
-                 detail = COALESCE(?, detail)
+                 detail = COALESCE(?, detail),
+                 unknown_at = CASE
+                     WHEN ? = 'unknown' THEN ?
+                     WHEN ? = 'running' THEN NULL
+                     ELSE unknown_at END,
+                 waiting_detail = CASE WHEN ? = 'running' THEN NULL ELSE waiting_detail END
              WHERE id = ? AND status IN ('queued', 'running', 'unknown')",
         )
         .bind(to.as_str())
@@ -220,6 +232,10 @@ impl JobRepo {
         .bind(finished)
         .bind(exit_code)
         .bind(detail)
+        .bind(to.as_str())
+        .bind(now)
+        .bind(to.as_str())
+        .bind(to.as_str())
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -283,10 +299,10 @@ impl JobRepo {
 
     /// 构建下待入池任务（queued，按阶段/名排序输出稳定——sched 取就绪集）。
     pub async fn queued_by_build(&self, build_id: i64) -> Result<Vec<JobRow>, StoreError> {
-        let rows = sqlx::query_as::<_, JobTuple>(
+        let rows = sqlx::query_as::<_, JobRowTuple>(
             "SELECT id, build_id, stage_index, name, status, attempt, spec_json, agent_id,
                     labels, timeout_minutes, retry_count, allow_failure,
-                    started_at, finished_at, exit_code, detail
+                    started_at, finished_at, exit_code, detail, unknown_at, waiting_detail
              FROM jobs WHERE build_id = ? AND status = 'queued' ORDER BY stage_index, id",
         )
         .bind(build_id)
@@ -297,10 +313,10 @@ impl JobRepo {
 
     /// 构建下全部任务（构建详情视图：阶段/任务状态与耗时）。
     pub async fn list_by_build(&self, build_id: i64) -> Result<Vec<JobRow>, StoreError> {
-        let rows = sqlx::query_as::<_, JobTuple>(
+        let rows = sqlx::query_as::<_, JobRowTuple>(
             "SELECT id, build_id, stage_index, name, status, attempt, spec_json, agent_id,
                     labels, timeout_minutes, retry_count, allow_failure,
-                    started_at, finished_at, exit_code, detail
+                    started_at, finished_at, exit_code, detail, unknown_at, waiting_detail
              FROM jobs WHERE build_id = ? ORDER BY stage_index, id",
         )
         .bind(build_id)
@@ -311,10 +327,10 @@ impl JobRepo {
 
     /// 按行 id 取任务；不存在返回 `None`。
     pub async fn get(&self, id: i64) -> Result<Option<JobRow>, StoreError> {
-        let row = sqlx::query_as::<_, JobTuple>(
+        let row = sqlx::query_as::<_, JobRowTuple>(
             "SELECT id, build_id, stage_index, name, status, attempt, spec_json, agent_id,
                     labels, timeout_minutes, retry_count, allow_failure,
-                    started_at, finished_at, exit_code, detail
+                    started_at, finished_at, exit_code, detail, unknown_at, waiting_detail
              FROM jobs WHERE id = ?",
         )
         .bind(id)
@@ -322,48 +338,319 @@ impl JobRepo {
         .await?;
         row.map(JobRow::from_tuple).transpose()
     }
+
+    // -----------------------------------------------------------------------
+    // sched 面（票 B2c-T4，ADR-0008）：pending 池 / 在途下发 / 超时 / 宽限 /
+    // 取消。所有调度状态都落库（无内存队列），重启从库重建。
+    // -----------------------------------------------------------------------
+
+    /// 全局 pending 池：全部 queued 任务按就绪时间 FIFO（同阶段按 id——
+    /// 插入序即下发序；跨构建按 build_id——构建号大序即就绪先后），
+    /// spec 已组装（engine 下发前完成，见 [`Self::set_spec`]）。
+    pub async fn pending_pool(&self) -> Result<Vec<JobRow>, StoreError> {
+        let rows = sqlx::query_as::<_, JobRowTuple>(
+            "SELECT id, build_id, stage_index, name, status, attempt, spec_json, agent_id,
+                    labels, timeout_minutes, retry_count, allow_failure,
+                    started_at, finished_at, exit_code, detail, unknown_at, waiting_detail
+             FROM jobs WHERE status = 'queued' AND spec_json IS NOT NULL
+             ORDER BY build_id, id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(JobRow::from_tuple).collect()
+    }
+
+    /// 调度：任务从 queued → running、占 Agent 槽位（下发未回执前即占，
+    /// 防并发重复下发；回执失败由调用侧回收）。返回 false 表示行不存在
+    /// 或已非 queued（并发裁决：同时只有一次下发成功）。
+    pub async fn dispatch(
+        &self,
+        id: i64,
+        agent_id: i64,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE jobs
+             SET status = 'running', agent_id = ?, started_at = COALESCE(started_at, ?),
+                 finished_at = NULL, unknown_at = NULL, waiting_detail = NULL
+             WHERE id = ? AND status = 'queued'",
+        )
+        .bind(agent_id)
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// 在途回收：running/unknown → queued（下发失败/回执拒绝/Agent 离线
+    /// 重发前回池重排）。不动的行（已终态/行不存在）返回 `None`。
+    pub async fn revert_to_queued(&self, id: i64) -> Result<Option<JobRow>, StoreError> {
+        let result = sqlx::query(
+            "UPDATE jobs
+             SET status = 'queued', agent_id = NULL, started_at = NULL,
+                 unknown_at = NULL, waiting_detail = NULL
+             WHERE id = ? AND status IN ('running', 'unknown')",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get(id).await
+    }
+
+    /// 任务按 Agent 置 waiting_detail（pending 池匹配无果的原因标注；
+    /// 供 UI 警示态，ADR-0019「无匹配 Agent/缺标签」分类）。
+    pub async fn set_waiting(&self, id: i64, detail: Option<&str>) -> Result<bool, StoreError> {
+        let result = sqlx::query("UPDATE jobs SET waiting_detail = ? WHERE id = ?")
+            .bind(detail)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// 超时扫描：返回已到点（running 且 (now - started_at)/60000 >=
+    /// timeout_minutes，timeout_minutes > 0）的任务行——状态迁移由调用侧
+    /// （sched）经 [`Self::transition`] 置 timeout 终态。返回行保证仍
+    /// running（条件更新防重复裁决）；终态吸收使重复扫描幂等。
+    pub async fn timeout_due(&self, now: i64) -> Result<Vec<JobRow>, StoreError> {
+        let rows = sqlx::query_as::<_, JobRowTuple>(
+            "SELECT id, build_id, stage_index, name, status, attempt, spec_json, agent_id,
+                    labels, timeout_minutes, retry_count, allow_failure,
+                    started_at, finished_at, exit_code, detail, unknown_at, waiting_detail
+             FROM jobs WHERE status = 'running'
+               AND timeout_minutes > 0
+               AND started_at IS NOT NULL
+               AND (? - started_at) / 60000 >= timeout_minutes
+             ORDER BY id",
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(JobRow::from_tuple).collect()
+    }
+
+    /// orphan 宽限扫描输入：unknown 状态、按 unknown_at 排序输出稳定
+    /// （调用侧裁决到点后经 [`Self::mark_orphan_failed`] 判败）。
+    pub async fn unknown_jobs(&self) -> Result<Vec<JobRow>, StoreError> {
+        let rows = sqlx::query_as::<_, JobRowTuple>(
+            "SELECT id, build_id, stage_index, name, status, attempt, spec_json, agent_id,
+                    labels, timeout_minutes, retry_count, allow_failure,
+                    started_at, finished_at, exit_code, detail, unknown_at, waiting_detail
+             FROM jobs WHERE status = 'unknown' ORDER BY unknown_at, id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(JobRow::from_tuple).collect()
+    }
+
+    /// orphan 宽限超时判败（unknown → failed，detail 记宽限超时；调用侧
+    /// 已按宽限分钟裁决到点）。返回 false 表示行不存在或已非 unknown。
+    pub async fn mark_orphan_failed(&self, id: i64, now: i64) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE jobs
+             SET status = 'failed', finished_at = ?,
+                 detail = COALESCE(detail, 'orphan 宽限超时：Agent 未恢复')
+             WHERE id = ? AND status = 'unknown'",
+        )
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// 排队中任务移出 pending 池（构建级取消：queued → cancelled，不落
+    /// 开始时刻——未运行）。返回受影响行数。
+    pub async fn cancel_queued_by_build(&self, build_id: i64, now: i64) -> Result<u64, StoreError> {
+        let result = sqlx::query(
+            "UPDATE jobs
+             SET status = 'cancelled', finished_at = ?, detail = COALESCE(detail, 'build 取消')
+             WHERE build_id = ? AND status = 'queued'",
+        )
+        .bind(now)
+        .bind(build_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// 构建在途任务清单（运行中构建取消下发 CancelBuild 用）。
+    pub async fn in_flight_by_build(&self, build_id: i64) -> Result<Vec<JobRow>, StoreError> {
+        let rows = sqlx::query_as::<_, JobRowTuple>(
+            "SELECT id, build_id, stage_index, name, status, attempt, spec_json, agent_id,
+                    labels, timeout_minutes, retry_count, allow_failure,
+                    started_at, finished_at, exit_code, detail, unknown_at, waiting_detail
+             FROM jobs WHERE build_id = ? AND status IN ('running', 'unknown')
+             ORDER BY id",
+        )
+        .bind(build_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(JobRow::from_tuple).collect()
+    }
+
+    /// Agent 在途任务清单（Agent 离线转 unknown、重连重挂、补发挂起取消的
+    /// 输入面）。
+    pub async fn by_agent(&self, agent_id: i64) -> Result<Vec<JobRow>, StoreError> {
+        let rows = sqlx::query_as::<_, JobRowTuple>(
+            "SELECT id, build_id, stage_index, name, status, attempt, spec_json, agent_id,
+                    labels, timeout_minutes, retry_count, allow_failure,
+                    started_at, finished_at, exit_code, detail, unknown_at, waiting_detail
+             FROM jobs WHERE agent_id = ? AND status IN ('running', 'unknown')
+             ORDER BY id",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(JobRow::from_tuple).collect()
+    }
+
+    /// Agent 判离线：该 Agent 的 running 任务全部转 unknown（离线不判死，
+    /// 重连回归 running；unknown_at 记此刻起宽限计时，ADR-0008）。返回
+    /// 受影响行数。
+    pub async fn agent_offline_to_unknown(&self, agent_id: i64, now: i64) -> Result<u64, StoreError> {
+        let result = sqlx::query(
+            "UPDATE jobs
+             SET status = 'unknown', unknown_at = ?,
+                 detail = COALESCE(detail, 'agent 离线')
+             WHERE agent_id = ? AND status = 'running'",
+        )
+        .bind(now)
+        .bind(agent_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// 在途任务按 Agent 回收：running/unknown → queued（Agent 重启丢任务/
+    /// 上报不一致时由调用侧裁决——恢复调度的候选，等重新匹配）。
+    pub async fn in_flight_by_agent_to_queued(&self, agent_id: i64) -> Result<u64, StoreError> {
+        let result = sqlx::query(
+            "UPDATE jobs
+             SET status = 'queued', agent_id = NULL, started_at = NULL,
+                 unknown_at = NULL, waiting_detail = NULL
+             WHERE agent_id = ? AND status IN ('running', 'unknown')",
+        )
+        .bind(agent_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// 挂起取消视图（全库）：构建已取消/失败（含 fail-fast 级联）但任务仍
+    /// 在途（running/unknown、agent_id 非空）——CancelBuild 补发的输入面
+    /// （离线者挂起，重连经 [`Self::channel_cancel_pending_for_agent`] 对账）。
+    pub async fn channel_cancel_pending(&self) -> Result<Vec<JobRow>, StoreError> {
+        let rows = sqlx::query_as::<_, JobRowTuple>(
+            "SELECT j.id, j.build_id, j.stage_index, j.name, j.status, j.attempt, j.spec_json,
+                    j.agent_id, j.labels, j.timeout_minutes, j.retry_count, j.allow_failure,
+                    j.started_at, j.finished_at, j.exit_code, j.detail, j.unknown_at, j.waiting_detail
+             FROM jobs j JOIN builds b ON b.id = j.build_id
+             WHERE b.status IN ('cancelled', 'failed')
+               AND j.status IN ('running', 'unknown')
+               AND j.agent_id IS NOT NULL
+             ORDER BY j.id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(JobRow::from_tuple).collect()
+    }
+
+    /// 挂起取消视图（按 Agent）：同上但限定某 Agent（重连 JobReported 对账
+    /// 补发输入面）。
+    pub async fn channel_cancel_pending_for_agent(
+        &self,
+        agent_id: i64,
+    ) -> Result<Vec<JobRow>, StoreError> {
+        let rows = sqlx::query_as::<_, JobRowTuple>(
+            "SELECT j.id, j.build_id, j.stage_index, j.name, j.status, j.attempt, j.spec_json,
+                    j.agent_id, j.labels, j.timeout_minutes, j.retry_count, j.allow_failure,
+                    j.started_at, j.finished_at, j.exit_code, j.detail, j.unknown_at, j.waiting_detail
+             FROM jobs j JOIN builds b ON b.id = j.build_id
+             WHERE b.status IN ('cancelled', 'failed')
+               AND j.status IN ('running', 'unknown')
+               AND j.agent_id = ?
+             ORDER BY j.id",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(JobRow::from_tuple).collect()
+    }
+
+    /// 挂起取消视图（按构建）：同上但限定某构建（fail-fast 级联事件补发
+    /// 输入面）。
+    pub async fn channel_cancel_pending_for_build(
+        &self,
+        build_id: i64,
+    ) -> Result<Vec<JobRow>, StoreError> {
+        let rows = sqlx::query_as::<_, JobRowTuple>(
+            "SELECT id, build_id, stage_index, name, status, attempt, spec_json, agent_id,
+                    labels, timeout_minutes, retry_count, allow_failure,
+                    started_at, finished_at, exit_code, detail, unknown_at, waiting_detail
+             FROM jobs
+             WHERE build_id = ? AND status IN ('running', 'unknown')
+               AND agent_id IS NOT NULL
+             ORDER BY id",
+        )
+        .bind(build_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(JobRow::from_tuple).collect()
+    }
 }
 
-/// jobs 行元组（列形态唯一收敛点，免逐查询散落 `Row::get`）。
-type JobTuple = (
-    i64,          // id
-    i64,          // build_id
-    i32,          // stage_index
-    String,       // name
-    String,       // status
-    i32,          // attempt
-    Option<String>, // spec_json
-    Option<i64>,  // agent_id
-    String,       // labels
-    i32,          // timeout_minutes
-    i32,          // retry_count
-    bool,         // allow_failure
-    Option<i64>,  // started_at
-    Option<i64>,  // finished_at
-    Option<i32>,  // exit_code
-    Option<String>, // detail
-);
+/// jobs 行元组（列形态唯一收敛点，免逐查询散落 `Row::get`）。struct 而非
+/// 元组：列数超 sqlx 的 16 列元组上限（`unknown_at`/`waiting_detail` 为
+/// B2c-T4 加列后共 18 列）。
+#[derive(sqlx::FromRow)]
+struct JobRowTuple {
+    id: i64,
+    build_id: i64,
+    stage_index: i32,
+    name: String,
+    status: String,
+    attempt: i32,
+    spec_json: Option<String>,
+    agent_id: Option<i64>,
+    labels: String,
+    timeout_minutes: i32,
+    retry_count: i32,
+    allow_failure: bool,
+    started_at: Option<i64>,
+    finished_at: Option<i64>,
+    exit_code: Option<i32>,
+    detail: Option<String>,
+    unknown_at: Option<i64>,
+    waiting_detail: Option<String>,
+}
 
 impl JobRow {
     /// 手工行映射（未知状态取值视为库损坏，与 ScmType 同纪律）。
-    fn from_tuple(row: JobTuple) -> Result<Self, StoreError> {
+    fn from_tuple(row: JobRowTuple) -> Result<Self, StoreError> {
         Ok(Self {
-            id: row.0,
-            build_id: row.1,
-            stage_index: row.2,
-            name: row.3,
-            status: JobStatus::parse(&row.4)?,
-            attempt: row.5,
-            spec_json: row.6,
-            agent_id: row.7,
-            labels: row.8,
-            timeout_minutes: row.9,
-            retry_count: row.10,
-            allow_failure: row.11,
-            started_at: row.12,
-            finished_at: row.13,
-            exit_code: row.14,
-            detail: row.15,
+            id: row.id,
+            build_id: row.build_id,
+            stage_index: row.stage_index,
+            name: row.name,
+            status: JobStatus::parse(&row.status)?,
+            attempt: row.attempt,
+            spec_json: row.spec_json,
+            agent_id: row.agent_id,
+            labels: row.labels,
+            timeout_minutes: row.timeout_minutes,
+            retry_count: row.retry_count,
+            allow_failure: row.allow_failure,
+            started_at: row.started_at,
+            finished_at: row.finished_at,
+            exit_code: row.exit_code,
+            detail: row.detail,
+            unknown_at: row.unknown_at,
+            waiting_detail: row.waiting_detail,
         })
     }
 }
@@ -538,8 +825,9 @@ mod tests {
         let unknown = repo.get(job.id).await.expect("查").expect("应存在");
         assert_eq!(unknown.status, JobStatus::Unknown);
         assert_eq!(unknown.finished_at, None, "unknown 非终态");
+        assert_eq!(unknown.unknown_at, Some(2_000), "unknown_at 记宽限计时起点");
 
-        // unknown→running（重连回归）：started_at 保留首启时刻。
+        // unknown→running（重连回归）：started_at 保留首启时刻、unknown_at 清空。
         assert!(repo
             .transition(job.id, JobStatus::Running, None, None, 3_000)
             .await
@@ -548,6 +836,7 @@ mod tests {
         assert_eq!(back.status, JobStatus::Running);
         assert_eq!(back.started_at, Some(1_000), "首启时刻保留");
         assert_eq!(back.detail.as_deref(), Some("agent offline"), "历史 detail 保留");
+        assert_eq!(back.unknown_at, None, "重连回归清空宽限计时");
 
         // running→succeeded：终态、记 finished_at、留退出码。
         assert!(repo
@@ -749,5 +1038,218 @@ mod tests {
         let queued = repo.queued_by_build(build_id).await.expect("待跑");
         let names: Vec<&str> = queued.iter().map(|j| j.name.as_str()).collect();
         assert_eq!(names, vec!["pending"], "终态任务不在待跑集");
+    }
+
+    // -----------------------------------------------------------------------
+    // sched 面（票 B2c-T4）：pending 池 / 调度回收 / 超时 / 宽限 / 取消 /
+    // 离线转 unknown。只测外部行为与状态机结果（不测 SQL 文本）。
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pending_pool_fifo_excludes_spec_missing_and_terminal() {
+        let (_dir, pool, build_id) = fixture().await;
+        let repo = JobRepo::new(pool.clone());
+        let a = repo.insert(new_job(build_id, "a")).await.expect("a"); // spec 有
+        let _b = repo
+            .insert(NewJob {
+                spec_json: None, // 未组装（engine 未下发）
+                ..new_job(build_id, "b")
+            })
+            .await
+            .expect("b");
+        let c = repo.insert(new_job(build_id, "c")).await.expect("c");
+
+        repo.transition(c.id, JobStatus::Running, None, None, 1_000)
+            .await
+            .expect("c 运行");
+        repo.transition(a.id, JobStatus::Succeeded, Some(0), None, 2_000)
+            .await
+            .expect("a 完成");
+
+        let pool_rows = repo.pending_pool().await.expect("pending 池");
+        assert!(pool_rows.is_empty(), "a 终态、c 在途、b 无 spec——都不在待跑集");
+    }
+
+    #[tokio::test]
+    async fn dispatch_occupies_slot_and_revert_returns_to_pool() {
+        let (_dir, pool, build_id) = fixture().await;
+        let agents = crate::store::agents::AgentRepo::new(pool.clone());
+        let agent = agents
+            .create(crate::store::agents::NewAgent {
+                name: "linux-1".into(),
+                token_hash: "sisa-hash-sched-1".into(),
+                system_labels: "[]".into(),
+                custom_labels: "[]".into(),
+                max_concurrency: 1,
+                register_code_hash: "code-hash-sched-1".into(),
+            })
+            .await
+            .expect("建 Agent");
+        agents.mark_online(agent.id, "[]", None, 1_000).await.expect("上线");
+        let repo = JobRepo::new(pool.clone());
+        let job = repo.insert(new_job(build_id, "compile")).await.expect("建");
+
+        // 下发：queued → running、占槽。
+        assert!(repo.dispatch(job.id, agent.id, 1_000).await.expect("下发"));
+        let running = repo.get(job.id).await.expect("查").expect("应存在");
+        assert_eq!(running.status, JobStatus::Running);
+        assert_eq!(running.agent_id, Some(agent.id));
+        assert_eq!(running.started_at, Some(1_000), "下发记 started_at（超时计时起点）");
+        assert_eq!(repo.active_by_agent(agent.id).await.expect("在途"), 1, "下发即占槽");
+
+        // 并发裁决：非 queued 再下发返回 false（同时只有一次赢）。
+        assert!(!repo.dispatch(job.id, agent.id, 1_100).await.expect("重复下发"));
+
+        // 回收：running → queued、清 agent/started_at/unknown_at/waiting（重发前回池）。
+        let reverted = repo
+            .revert_to_queued(job.id)
+            .await
+            .expect("回收")
+            .expect("应有回收行");
+        assert_eq!(reverted.status, JobStatus::Queued);
+        assert_eq!(reverted.agent_id, None);
+        assert_eq!(reverted.started_at, None);
+        assert_eq!(repo.active_by_agent(agent.id).await.expect("在途"), 0, "回收释放槽位");
+
+        // 已终态任务回收返回 None（不破坏终态）。
+        repo.transition(job.id, JobStatus::Succeeded, Some(0), None, 1_200)
+            .await
+            .expect("成功");
+        assert!(repo.revert_to_queued(job.id).await.expect("终态回收").is_none());
+        assert_eq!(
+            repo.get(job.id).await.expect("查").expect("应存在").status,
+            JobStatus::Succeeded,
+            "终态不被回收改写"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_marks_running_jobs_with_elapsed_timeout() {
+        let (_dir, pool, build_id) = fixture().await;
+        let repo = JobRepo::new(pool.clone());
+        let slow = repo
+            .insert(NewJob {
+                timeout_minutes: 30,
+                ..new_job(build_id, "slow")
+            })
+            .await
+            .expect("slow");
+        let infinite = repo
+            .insert(NewJob {
+                timeout_minutes: 0, // 0 = 无限
+                ..new_job(build_id, "infinite")
+            })
+            .await
+            .expect("infinite");
+        let tiny = repo
+            .insert(NewJob {
+                timeout_minutes: 1,
+                ..new_job(build_id, "tiny")
+            })
+            .await
+            .expect("tiny");
+
+        // 全部进运行（从下发计时，started_at 即时刻 1_000）。
+        for j in [&slow, &infinite, &tiny] {
+            repo.transition(j.id, JobStatus::Running, None, None, 1_000)
+                .await
+                .expect("运行");
+        }
+        // 未到点：30s（tiny 的 1 分钟与 slow 的 30 分钟都未到）。
+        assert!(repo.timeout_due(31_000).await.expect("扫描").is_empty());
+        // 到点：tiny（1 分钟）超时；slow（30 分钟）未到；infinite 永不到点。
+        let due = repo.timeout_due(61_000).await.expect("扫描");
+        assert_eq!(due.len(), 1, "只有 tiny 超时");
+        assert_eq!(due[0].id, tiny.id);
+        assert_eq!(due[0].status, JobStatus::Running, "timeout_due 只列不迁移");
+        // 状态迁移到 timeout 终态（sched 调用侧动作）→ 重复扫描幂等（已终态）。
+        assert!(repo
+            .transition(tiny.id, JobStatus::Timeout, None, Some("job 超时"), 61_000)
+            .await
+            .expect("超时终态"));
+        assert!(repo.timeout_due(61_000).await.expect("再扫").is_empty());
+    }
+
+    #[tokio::test]
+    async fn orphan_grace_marks_unknown_jobs_failed() {
+        let (_dir, pool, build_id) = fixture().await;
+        let repo = JobRepo::new(pool.clone());
+        let orphan = repo.insert(new_job(build_id, "orphan")).await.expect("orphan");
+
+        repo.transition(orphan.id, JobStatus::Running, None, None, 1_000)
+            .await
+            .expect("运行");
+        repo.transition(orphan.id, JobStatus::Unknown, None, None, 2_000)
+            .await
+            .expect("离线转 unknown");
+
+        let unknowns = repo.unknown_jobs().await.expect("unknown 清单");
+        assert_eq!(unknowns.len(), 1);
+        assert_eq!(unknowns[0].unknown_at, Some(2_000), "unknown_at 计时起点可查");
+
+        // 宽限超时判败（调用侧裁决到点后经此落库）。
+        assert!(repo
+            .mark_orphan_failed(orphan.id, 2_000 + 10 * 60_000)
+            .await
+            .expect("判败"));
+        let failed = repo.get(orphan.id).await.expect("查").expect("应存在");
+        assert_eq!(failed.status, JobStatus::Failed);
+        assert!(failed.detail.as_deref().is_some(), "宽限超时 detail 记名");
+        // 终态吸收：已 failed 不可再判败。
+        assert!(!repo.mark_orphan_failed(orphan.id, 3_000_000).await.expect("再判败"));
+    }
+
+    #[tokio::test]
+    async fn agent_offline_marks_running_unknown_and_cancel_by_build() {
+        let (_dir, pool, build_id) = fixture().await;
+        let agents = crate::store::agents::AgentRepo::new(pool.clone());
+        let agent = agents
+            .create(crate::store::agents::NewAgent {
+                name: "linux-1".into(),
+                token_hash: "sisa-hash-sched-2".into(),
+                system_labels: "[]".into(),
+                custom_labels: "[]".into(),
+                max_concurrency: 2,
+                register_code_hash: "code-hash-sched-2".into(),
+            })
+            .await
+            .expect("建 Agent");
+        let repo = JobRepo::new(pool.clone());
+        let running = repo.insert(new_job(build_id, "running")).await.expect("running");
+        let queued = repo.insert(new_job(build_id, "queued")).await.expect("queued");
+        repo.dispatch(running.id, agent.id, 1_000).await.expect("下发 running");
+
+        // Agent 判离线：running → unknown、记 unknown_at；queued 不受影响。
+        assert_eq!(
+            repo.agent_offline_to_unknown(agent.id, 2_000).await.expect("转 unknown"),
+            1
+        );
+        assert_eq!(
+            repo.get(running.id).await.expect("查").expect("应存在").status,
+            JobStatus::Unknown
+        );
+        assert_eq!(
+            repo.get(queued.id).await.expect("查").expect("应存在").status,
+            JobStatus::Queued,
+            "排队任务不因 Agent 离线而变"
+        );
+
+        // 构建级取消：排队中移出（不落开始时刻），在途不受影响（经通道下发取消）。
+        assert_eq!(repo.cancel_queued_by_build(build_id, 3_000).await.expect("取消"), 1);
+        let queued_now = repo.get(queued.id).await.expect("查").expect("应存在");
+        assert_eq!(queued_now.status, JobStatus::Cancelled);
+        assert_eq!(queued_now.started_at, None, "排队中取消无开始时刻");
+        let in_flight = repo.in_flight_by_build(build_id).await.expect("在途");
+        assert_eq!(in_flight.len(), 1, "unknown 在途待通道取消");
+        assert_eq!(in_flight[0].id, running.id);
+
+        // 在途任务按 Agent 回收（重启丢任务候选）。
+        assert_eq!(
+            repo.in_flight_by_agent_to_queued(agent.id).await.expect("回收"),
+            1
+        );
+        let back = repo.get(running.id).await.expect("查").expect("应存在");
+        assert_eq!(back.status, JobStatus::Queued);
+        assert_eq!(back.agent_id, None, "回收清 agent");
     }
 }

@@ -372,6 +372,39 @@ impl AgentRepo {
         }
         Ok(None)
     }
+
+    /// 为一项 job 匹配全部候选 Agent（在线 + 未停用 + 有空槽 + 标签 AND
+    /// 全集命中；按名排序输出稳定——sched 匹配面）。`id` 传入时优先候选
+    /// （下发失败重试同一 Agent，避免 flutter）。返回有序 id 列表（可空——
+    /// 无匹配时 sched 据此标注缺失标签/等待原因）。
+    pub async fn match_candidates(
+        &self,
+        id: Option<i64>,
+        required: &[String],
+    ) -> Result<Vec<i64>, StoreError> {
+        let mut matched = Vec::new();
+        let mut preferred = None;
+        for agent in self.list().await? {
+            if !agent.online || agent.disabled {
+                continue;
+            }
+            if !self.has_slots(agent.id).await? {
+                continue;
+            }
+            if !Self::matches_tags(&agent.all_labels()?, required) {
+                continue;
+            }
+            if Some(agent.id) == id {
+                preferred = Some(agent.id);
+            } else {
+                matched.push(agent.id);
+            }
+        }
+        if let Some(id) = preferred {
+            matched.insert(0, id);
+        }
+        Ok(matched)
+    }
 }
 
 /// agents 行元组（列形态唯一收敛点，免逐查询散落 `Row::get`）。
@@ -961,5 +994,48 @@ mod tests {
             .await
             .expect("清 agents");
         assert_eq!(repo.match_job(&[]).await.expect("匹配"), None);
+    }
+
+    /// 票 B2c-T4：候选匹配面——`match_candidates` 返回全部候选（在线 + 空槽 +
+    /// 标签 AND），`id` 偏好优先；sched 下发失败重试同一 Agent 用。
+    #[tokio::test]
+    async fn match_candidates_returns_ordered_preferred_first() {
+        let (_dir, pool) = fixture().await;
+        let repo = AgentRepo::new(pool.clone());
+        let linux = repo
+            .create(new_agent("linux-1", r#"["sisyphus/os=linux"]"#, "[]"))
+            .await
+            .expect("linux");
+        let mac = repo
+            .create(new_agent("mac-1", r#"["sisyphus/os=macos"]"#, "[]"))
+            .await
+            .expect("mac");
+        repo.mark_online(linux.id, linux.system_labels.as_str(), None, 1_000)
+            .await
+            .expect("linux 上线");
+        repo.mark_online(mac.id, mac.system_labels.as_str(), None, 1_000)
+            .await
+            .expect("mac 上线");
+
+        let linux_req = vec!["sisyphus/os=linux".to_string()];
+        assert_eq!(
+            repo.match_candidates(None, &linux_req).await.expect("候选"),
+            vec![linux.id],
+            "只有 linux 命中"
+        );
+        // id 偏好：首候选优先（即使在线清单里排后）。
+        assert_eq!(
+            repo.match_candidates(Some(linux.id), &[]).await.expect("候选"),
+            vec![linux.id, mac.id],
+            "无标签约束：两者候选，偏好者排前"
+        );
+
+        // 离线/停用/无槽过滤照旧（候选集不包含不可调度者）。
+        repo.mark_offline(mac.id, 2_000).await.expect("mac 离线");
+        assert_eq!(
+            repo.match_candidates(None, &[]).await.expect("候选"),
+            vec![linux.id],
+            "离线 Agent 不在候选"
+        );
     }
 }

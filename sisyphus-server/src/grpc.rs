@@ -1,4 +1,4 @@
-//! Server 的 Agent 通道（gRPC，ADR-0007；票 B2c-T3 接线）。
+//! Server 的 Agent 通道（gRPC，ADR-0007；票 B2c-T3 通道认证 + B2c-T4 任务面）。
 //!
 //! - **通道认证**：握手（版本窗口，B1 语义保留）后校验 Agent token——
 //!   `Authorization: Bearer sisa_…`，SHA-256 查 agents 表 + 未停用
@@ -12,25 +12,39 @@
 //!   判离线（[`heartbeat_sweep`] 后台扫描 + 断连即离线）。心跳刷新
 //!   online/last_seen、整组替换系统标签（连接面事实）、落磁盘占用
 //!   （ADR-0019：卷级/缓存/工作区采样）。
-//! - **任务面**（JobSpec 下发/回执/状态/在途上报/取消）随 sched 批次
-//!   （B2c-T4）接线；本批收到非握手/心跳帧一律忽略（契约演进只加字段、
-//!   unknown 帧前瞻兼容），仅保留「复核 token 仍有效」的踢线语义。
+//! - **任务面**（票 B2c-T4，ADR-0008）：JobSpec 下发（[`JobDispatcher`] 的
+//!   生产实现 [`GrpcDispatcher`]——把调度匹配结果经本通道真实下发）、
+//!   JobAck（槽位占用/释放）、JobStatus（running/unknown/终态）、
+//!   JobReported（重连重建 + 补发挂起取消）、CancelBuild（build 级取消 /
+//!   fail-fast 级联）。上行任务面帧转发给调度循环（[`SchedulerHandle`]），
+//!   调度侧落库 + engine 推进。
+//! - **在线判定事件**：上线/离线发布 [`Event::AgentOnline`]/[`Event::AgentOffline`]
+//!   （sched 据此转 unknown/匹配重算；UI 在线态）。
+//! - **会话注册表**（[`SessionRegistry`]）：agent_id → 会话发送器，随连接
+//!   建立/断开维护——JobSpec/CancelBuild 的下发目的地。trait 缝隔离：
+//!   sched 只依赖 `JobDispatcher`，不依赖 tonic。
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use sisyphus_proto::agent::{
+    CancelBuild, ChannelMessage, DiskUsage, Handshake, Version,
     agent_channel_server::{AgentChannel, AgentChannelServer},
     channel_message::Kind,
-    ChannelMessage, DiskUsage, Handshake, Version,
 };
 use sisyphus_proto::version;
-use tokio::sync::mpsc;
+use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming, metadata::MetadataMap};
 
 use crate::api::AppState;
 use crate::auth::token_hash;
+use crate::engine::{ResolvedJobSpec, ResolvedStep, Vcs};
+use crate::events::Event;
+use crate::sched::{JobDispatcher, SchedError, SchedulerHandle};
 use crate::store::agents::{AgentDiskUsage, VolumeUsage};
+use crate::store::jobs::JobRow;
 use crate::store::now_ms;
 
 /// 心跳间隔语义（ADR-0007）：Agent 15s 一报。
@@ -49,22 +63,239 @@ const META_OS: &str = "x-sisyphus-os";
 const META_ARCH: &str = "x-sisyphus-arch";
 const META_CONTAINER: &str = "x-sisyphus-container";
 
+/// 每会话下行发送通道容量（调度下发 burst：阶段并行任务同时入池）。缓冲
+/// 满即背压——session_loop 等待，不丢下行帧。
+const SESSION_TX_CAPACITY: usize = 64;
+
 /// Server 侧版本（ADR-0010：与 Agent 同版本成对发布）。
 pub fn server_version() -> Version {
     version::VERSION
 }
 
-/// Agent 通道服务：持有组合根状态（认证面 + 心跳面共用 repo，与 REST
-/// 同装配）。
+/// Agent 通道服务：持有组合根状态（认证面 + 心跳面 + 任务面共用 repo，与
+/// REST 同装配）。
 pub struct AgentChannelService {
     state: AppState,
+    sessions: Arc<SessionRegistry>,
+    scheduler: SchedulerHandle,
 }
 
 impl AgentChannelService {
-    /// 以组合根状态构造。
-    pub fn new(state: AppState) -> Self {
-        Self { state }
+    /// 以组合根状态构造。`sessions` 为会话注册表（任务面下发目的地），
+    /// `scheduler` 为调度循环句柄（上行任务面帧转发）。
+    pub fn new(
+        state: AppState,
+        sessions: Arc<SessionRegistry>,
+        scheduler: SchedulerHandle,
+    ) -> Self {
+        Self {
+            state,
+            sessions,
+            scheduler,
+        }
     }
+}
+
+/// 在线 Agent 会话注册表：agent_id → 会话下行发送器。JobSpec/CancelBuild
+/// 的下发目的地（[`GrpcDispatcher`]）。连接建立注册、断开/踢线注销。
+#[derive(Default)]
+pub struct SessionRegistry {
+    inner: RwLock<HashMap<i64, mpsc::Sender<Result<ChannelMessage, Status>>>>,
+}
+
+impl SessionRegistry {
+    /// 新建注册表。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 注册会话（连接建立后）。重复注册（同 Agent 并发连接）覆盖旧会话——
+    /// 最晚连接优先（Agent 重连即旧会话作废）。
+    async fn register(&self, agent_id: i64, tx: mpsc::Sender<Result<ChannelMessage, Status>>) {
+        self.inner.write().await.insert(agent_id, tx);
+    }
+
+    /// 注销会话（断开/踢线）。
+    async fn unregister(&self, agent_id: i64) {
+        self.inner.write().await.remove(&agent_id);
+    }
+
+    /// 向 Agent 会话投递一帧下行消息。`Ok(true)` 已投递（发送器仍持有）；
+    /// `Ok(false)` 无会话或发送失败（对端关闭/通道满——Agent 离线或不可达）。
+    async fn send(&self, agent_id: i64, msg: ChannelMessage) -> Result<bool, SchedError> {
+        let sender = self.inner.read().await.get(&agent_id).cloned();
+        match sender {
+            Some(tx) => tx
+                .send(Ok(msg))
+                .await
+                .map(|_| true)
+                .map_err(|_| SchedError::Dispatch("Agent 会话已断开".into())),
+            None => Ok(false),
+        }
+    }
+}
+
+/// 生产下发端口：把调度匹配结果经真实通道会话下发（sched 的
+/// [`JobDispatcher`] trait 实现）。grpc 服务与调度循环共享同一个
+/// `SessionRegistry`。
+pub struct GrpcDispatcher {
+    sessions: Arc<SessionRegistry>,
+}
+
+impl GrpcDispatcher {
+    /// 以会话注册表构造（与 [`AgentChannelService`] 同源）。
+    pub fn new(sessions: Arc<SessionRegistry>) -> Self {
+        Self { sessions }
+    }
+}
+
+#[tonic::async_trait]
+impl JobDispatcher for GrpcDispatcher {
+    async fn dispatch_job(&self, agent_id: i64, job: &JobRow) -> Result<bool, SchedError> {
+        // JobSpec 组装：从 spec 快照映射到 proto（下发期字段 job_id/
+        // log_limit_bytes 在快照之外，此处补）。
+        let Some(spec_json) = &job.spec_json else {
+            return Err(SchedError::Dispatch("任务无 spec 快照".into()));
+        };
+        let spec: ResolvedJobSpec = serde_json::from_str(spec_json)
+            .map_err(|e| SchedError::Dispatch(format!("spec 快照损坏：{e}")))?;
+        let msg = ChannelMessage {
+            kind: Some(Kind::JobSpec(Box::new(job_spec_message(job, &spec)))),
+        };
+        self.sessions.send(agent_id, msg).await
+    }
+
+    async fn cancel_job(
+        &self,
+        agent_id: i64,
+        build_id: i64,
+        job_id: i64,
+    ) -> Result<(), SchedError> {
+        let msg = ChannelMessage {
+            kind: Some(Kind::Cancel(CancelBuild {
+                build_id: build_id.to_string(),
+                job_id: job_id.to_string(),
+            })),
+        };
+        self.sessions.send(agent_id, msg).await?;
+        Ok(())
+    }
+}
+
+/// ResolvedJobSpec → proto JobSpec（ADR-0009：Agent 拿到即执行，对 Pipeline
+/// 定义一无所知）。`job_id` 为任务行 id（JobStatus/JobAck 的寻径键）。
+pub fn job_spec_message(job: &JobRow, spec: &ResolvedJobSpec) -> sisyphus_proto::agent::JobSpec {
+    use sisyphus_proto::agent::{
+        ArtifactDownload as PDownload, ArtifactUpload as PUpload, CacheSpec as PCache,
+        CheckoutStep, ContainerEnv, ExecutionEnv as PExecEnv, JobStep, ShellStep,
+    };
+    let env = spec
+        .env
+        .iter()
+        .map(|e| (e.name.clone(), e.value.clone()))
+        .collect();
+    let steps = spec
+        .steps
+        .iter()
+        .map(|step| JobStep {
+            name: match step {
+                ResolvedStep::Shell { seq, .. } | ResolvedStep::Checkout { seq, .. } => {
+                    format!("step-{seq}")
+                }
+            },
+            seq: match step {
+                ResolvedStep::Shell { seq, .. } | ResolvedStep::Checkout { seq, .. } => *seq,
+            },
+            kind: match step {
+                ResolvedStep::Shell { command, .. } => {
+                    Some(sisyphus_proto::agent::job_step::Kind::Shell(ShellStep {
+                        command: command.clone(),
+                    }))
+                }
+                ResolvedStep::Checkout {
+                    scm, submodules, ..
+                } => Some(sisyphus_proto::agent::job_step::Kind::Checkout(
+                    CheckoutStep {
+                        vcs: match scm.vcs {
+                            Vcs::Git => sisyphus_proto::agent::VcsType::VcsGit as i32,
+                            Vcs::Svn => sisyphus_proto::agent::VcsType::VcsSvn as i32,
+                        },
+                        repo_url: scm.repo_url.clone(),
+                        r#ref: scm.branch.clone(),
+                        commit: scm.commit.clone(),
+                        submodules: *submodules,
+                    },
+                )),
+            },
+        })
+        .collect();
+    let exec_env = match &spec.exec_env {
+        sisyphus_model::pipeline::ExecutionEnv::Host => Some(PExecEnv {
+            kind: Some(sisyphus_proto::agent::execution_env::Kind::Host(
+                sisyphus_proto::agent::HostEnv {},
+            )),
+        }),
+        sisyphus_model::pipeline::ExecutionEnv::Container { image } => Some(PExecEnv {
+            kind: Some(sisyphus_proto::agent::execution_env::Kind::Container(
+                ContainerEnv {
+                    image: image.clone(),
+                },
+            )),
+        }),
+    };
+    sisyphus_proto::agent::JobSpec {
+        job_id: job.id.to_string(),
+        pipeline_name: spec.pipeline_name.clone(),
+        job_name: spec.job_name.clone(),
+        build_number: spec.build_number,
+        attempt: spec.attempt,
+        log_limit_bytes: 0, // 默认 50MB 由 Agent 侧裁决（ADR-0013）
+        steps,
+        env,
+        exec_env,
+        timeout_minutes: spec.timeout_minutes,
+        uploads: spec
+            .artifact_uploads
+            .iter()
+            .map(|u| PUpload {
+                name: u.name.clone(),
+                path: u.path.clone(),
+            })
+            .collect(),
+        downloads: spec
+            .artifact_downloads
+            .iter()
+            .map(|d| PDownload {
+                job_id: d.job.clone(),
+                name: d.name.clone(),
+                path: d.path.clone(),
+            })
+            .collect(),
+        caches: spec
+            .caches
+            .iter()
+            .map(|c| PCache {
+                key: c.key.clone(),
+                paths: c.paths.clone(),
+                files: c.files.clone(),
+            })
+            .collect(),
+        secrets: spec.secrets.clone(),
+        scm_credential: None, // ADR-0015：SCM 凭据递送随 runner 批次
+        labels: spec.labels.clone(),
+        retry_count: spec.retry_count as i32,
+        allow_failure: spec.allow_failure,
+    }
+}
+
+/// 把 AgentChannel 服务挂到 tonic 路由上（注入组合根状态 + 会话注册表 +
+/// 调度句柄）。
+pub fn service(
+    state: AppState,
+    sessions: Arc<SessionRegistry>,
+    scheduler: SchedulerHandle,
+) -> AgentChannelServer<AgentChannelService> {
+    AgentChannelServer::new(AgentChannelService::new(state, sessions, scheduler))
 }
 
 #[tonic::async_trait]
@@ -91,9 +322,8 @@ impl AgentChannel for AgentChannelService {
                 break;
             }
         }
-        let agent_version = agent_version.ok_or_else(|| {
-            Status::invalid_argument("首帧必须是握手（含 Agent 版本号）")
-        })?;
+        let agent_version = agent_version
+            .ok_or_else(|| Status::invalid_argument("首帧必须是握手（含 Agent 版本号）"))?;
 
         // 版本窗口（ADR-0010/0017）：Agent 过新直接拒连。
         if version::peer_too_new(&agent_version, &server_version()) {
@@ -129,15 +359,26 @@ impl AgentChannel for AgentChannelService {
 
         tracing::info!(agent = %agent.name, "agent connected（通道认证通过）");
 
-        let (tx, rx) = mpsc::channel(16);
-        // 会话任务：回发握手确认 → 逐帧处理（心跳落库 + 停用踢线复核）；
-        // 对端关流/断开或停用即退出（下线由 45s 扫描兜底，通道断开不抢跑）。
+        let (tx, rx) = mpsc::channel(SESSION_TX_CAPACITY);
+        // 会话注册：JobSpec/CancelBuild 的下发目的地（重连覆盖旧会话）。
+        self.sessions.register(agent.id, tx.clone()).await;
+        // 在线事件（sched 据此匹配等待中的任务）。
+        self.state.bus.publish(Event::AgentOnline {
+            agent_id: agent.id,
+            name: agent.name.clone(),
+        });
+
+        // 会话任务：回发握手确认 → 逐帧处理（心跳落库 + 停用踢线复核 +
+        // 任务面转发）；对端关流/断开或停用即退出（下线由 45s 扫描兜底，
+        // 通道断开不抢跑）。
         tokio::spawn(session_loop(
             self.state.clone(),
             agent.name.clone(),
             agent.id,
             token_hash,
             labels_json,
+            self.sessions.clone(),
+            self.scheduler.clone(),
             ChannelMessage {
                 kind: Some(Kind::Handshake(Handshake {
                     agent_version: Some(server_version()),
@@ -153,8 +394,9 @@ impl AgentChannel for AgentChannelService {
 }
 
 /// 会话循环（连接生命周期）：回发握手确认，此后逐帧处理。心跳帧落
-/// 在线/标签/磁盘占用（停用不生效即断开）；其余帧只复核 token 仍有效
-/// （停用/吊销的 Agent 下一请求即断开）。任务面帧的消费随 sched 批次。
+/// 在线/标签/磁盘占用（停用不生效即断开）；任务面帧（JobAck/JobStatus/
+/// JobReported）转发调度循环；其余帧只复核 token 仍有效（停用/吊销的
+/// Agent 下一请求即断开）。
 #[allow(clippy::too_many_arguments)]
 async fn session_loop(
     state: AppState,
@@ -162,11 +404,14 @@ async fn session_loop(
     agent_id: i64,
     token_hash: String,
     labels_json: String,
+    sessions: Arc<SessionRegistry>,
+    scheduler: SchedulerHandle,
     handshake_reply: ChannelMessage,
     mut inbound: Streaming<ChannelMessage>,
     tx: mpsc::Sender<Result<ChannelMessage, Status>>,
 ) {
     if tx.send(Ok(handshake_reply)).await.is_err() {
+        sessions.unregister(agent_id).await;
         return; // 对端已断开，会话无意义
     }
 
@@ -198,10 +443,39 @@ async fn session_loop(
                     break;
                 }
             }
+            Some(Kind::JobAck(ack)) => {
+                // 任务回执：槽位占用确认 / 拒绝释放（调度侧落库裁决）。
+                let job_id = ack.job_id.parse().unwrap_or(0);
+                if let Err(e) = scheduler
+                    .on_job_ack(agent_id, job_id, ack.accepted, ack.error)
+                    .await
+                {
+                    tracing::warn!(agent = %agent, error = %e, "JobAck 处理失败");
+                }
+            }
+            Some(Kind::JobStatus(status)) => {
+                // 任务状态上报：running/unknown/终态 → 调度落库 + engine 推进。
+                let job_id = status.job_id.parse().unwrap_or(0);
+                // 契约未知阶段（未来 Server 的新字段）：忽略不上报（旧 Server
+                // 前瞻兼容，不误标 unknown）。
+                if let Some(phase) = map_job_phase(status.phase)
+                    && let Err(e) = scheduler
+                        .on_job_status(agent_id, job_id, phase, status.exit_code, status.detail)
+                        .await
+                {
+                    tracing::warn!(agent = %agent, error = %e, "JobStatus 处理失败");
+                }
+            }
+            Some(Kind::JobReported(reported)) => {
+                // 在途任务上报：重连重建调度状态 + 补发挂起取消。
+                if let Err(e) = scheduler.on_job_reported(agent_id, reported.job_ids).await {
+                    tracing::warn!(agent = %agent, error = %e, "JobReported 处理失败");
+                }
+            }
             _ => {
-                // 任务面消息（回执/状态/在途上报）随 sched 批次消费；本批
-                // 保留「下一请求即拒」的踢线复核。查库失败（瞬态 IO）不断
-                // 健康会话——只有「明确查到且已停用/不存在」才踢线。
+                // 非任务面帧（升级/工作区/缓存/未知）：只做「下一请求即拒」
+                // 的踢线复核。查库失败（瞬态 IO）不断健康会话——只有「明确
+                // 查到且已停用/不存在」才踢线。
                 match state.agents.find_active_by_hash(&token_hash).await {
                     Ok(None) => {
                         tracing::info!(agent = %agent, "agent 已停用/吊销：断开会话");
@@ -214,6 +488,23 @@ async fn session_loop(
                 }
             }
         }
+    }
+    sessions.unregister(agent_id).await;
+}
+
+/// proto JobPhase → 任务状态。`None` = 契约未知阶段（契约演进只加字段，
+/// 旧 Server 忽略新阶段——不落库、不误标 unknown、不启动宽限计时）。
+fn map_job_phase(phase: i32) -> Option<crate::store::jobs::JobStatus> {
+    use sisyphus_proto::agent::JobPhase as P;
+    match P::try_from(phase) {
+        Ok(P::JobRunning) => Some(crate::store::jobs::JobStatus::Running),
+        Ok(P::JobUnknown) => Some(crate::store::jobs::JobStatus::Unknown),
+        Ok(P::JobSucceeded) => Some(crate::store::jobs::JobStatus::Succeeded),
+        Ok(P::JobFailed) => Some(crate::store::jobs::JobStatus::Failed),
+        Ok(P::JobCancelled) => Some(crate::store::jobs::JobStatus::Cancelled),
+        Ok(P::JobTimeout) => Some(crate::store::jobs::JobStatus::Timeout),
+        Ok(P::JobAborted) => Some(crate::store::jobs::JobStatus::Aborted),
+        _ => None, // 未知阶段：忽略（契约演进只加字段，旧 Server 前瞻兼容）
     }
 }
 
@@ -247,6 +538,11 @@ pub async fn heartbeat_sweep_once(state: &AppState) {
                 tracing::warn!(agent = %agent.name, error = %e, "离线落库失败");
             } else {
                 tracing::info!(agent = %agent.name, "agent 心跳超时判离线");
+                // 离线事件（sched 据此转 unknown + 匹配重算）。
+                state.bus.publish(Event::AgentOffline {
+                    agent_id: agent.id,
+                    name: agent.name.clone(),
+                });
             }
         }
     }
@@ -317,11 +613,6 @@ fn disk_usage_json(disk: DiskUsage) -> String {
         workspace_bytes: disk.workspace_bytes,
     };
     serde_json::to_string(&usage).expect("磁盘占用 JSON 序列化恒可成功（纯 i64/string）")
-}
-
-/// 把 AgentChannel 服务挂到 tonic 路由上（注入组合根状态）。
-pub fn service(state: AppState) -> AgentChannelServer<AgentChannelService> {
-    AgentChannelServer::new(AgentChannelService::new(state))
 }
 
 #[cfg(test)]

@@ -390,7 +390,8 @@ impl BuildRepo {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "UPDATE jobs
-             SET status = 'cancelled', finished_at = ?
+             SET status = 'cancelled', finished_at = ?,
+                 unknown_at = NULL, waiting_detail = NULL
              WHERE build_id = ? AND stage_index = ?
                AND status IN ('queued', 'running', 'unknown')",
         )
@@ -401,7 +402,8 @@ impl BuildRepo {
         .await?;
         sqlx::query(
             "UPDATE jobs
-             SET status = 'skipped', finished_at = ?
+             SET status = 'skipped', finished_at = ?,
+                 unknown_at = NULL, waiting_detail = NULL
              WHERE build_id = ? AND stage_index > ?
                AND status IN ('queued', 'running', 'unknown')",
         )
@@ -434,6 +436,19 @@ impl BuildRepo {
         .fetch_optional(&self.pool)
         .await?;
         row.map(BuildRow::from_tuple).transpose()
+    }
+
+    /// 全部非终态构建（queued/running——启动重建的 drive 输入面，ADR-0008：
+    /// 重启从库重建调度状态）。
+    pub async fn non_terminal(&self) -> Result<Vec<BuildRow>, StoreError> {
+        let rows = sqlx::query_as::<_, BuildTuple>(
+            "SELECT id, project_id, pipeline_name, number, status, trigger, trigger_detail,
+                    attempt, snapshot, started_at, finished_at, cancelled_at, updated_at
+             FROM builds WHERE status IN ('queued', 'running') ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(BuildRow::from_tuple).collect()
     }
 
     /// 按 (project, number) 取构建；不存在返回 `None`（REST 详情寻径）。

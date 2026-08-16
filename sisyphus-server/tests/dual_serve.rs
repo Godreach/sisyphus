@@ -9,6 +9,7 @@ use sisyphus_proto::agent::{
     channel_message::Kind,
 };
 use sisyphus_server::{api, grpc, store};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
@@ -52,6 +53,8 @@ async fn rest_and_grpc_serve_side_by_side() {
 
     let grpc_state = state.clone();
     let check_state = state.clone();
+    let sessions = Arc::new(grpc::SessionRegistry::new());
+    let scheduler = sisyphus_server::sched::SchedulerHandle::discard();
     let rest = tokio::spawn(async move {
         axum::serve(rest_listener, api::router(state, web_override_dir))
             .await
@@ -59,7 +62,7 @@ async fn rest_and_grpc_serve_side_by_side() {
     });
     let grpc = tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(grpc::service(grpc_state))
+            .add_service(grpc::service(grpc_state, sessions, scheduler))
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
                 grpc_listener,
             ))
