@@ -80,6 +80,12 @@ impl ApiError {
         )
     }
 
+    /// 403：已认证但权限不足（授权 extractor 档位判定、全局资源 admin 专属，
+    /// 票 B2b-T5）；message 由调用侧给足语境（哪类操作、需要什么档）。
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, "FORBIDDEN", message, None)
+    }
+
     /// 422：输入校验失败，错误清单整组透传（Spec B2a §4）。
     pub fn validation(message: impl Into<String>, issues: Vec<ValidationIssue>) -> Self {
         Self::new(

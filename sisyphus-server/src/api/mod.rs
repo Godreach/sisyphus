@@ -1,10 +1,12 @@
-//! REST API 组合根（ADR-0005/0010；票 B2a-T3/T4、B2b-T1/T2/T3）。
+//! REST API 组合根（ADR-0005/0010；票 B2a-T3/T4、B2b-T1/T2/T3/T5）。
 //!
 //! - 业务端点全部挂 `/api/v1/` 前缀，统一 JSON 错误形态（[`error`]）。
 //! - `/api/v1` 受保护段全局面挂两层中间件：认证（[`auth::require_auth`]，
 //!   401，票 B2b-T1/T3：cookie 会话与 Bearer PAT 双通道）在外层先跑；
 //!   CSRF 防护（[`csrf::csrf_protect`]，403，票 B2b-T2）在其内层——只拦
 //!   「已认证且以 cookie 认证」的非安全方法请求（Bearer 天然免疫）。
+//!   授权（404/403）不做全局中间件：角色是「项目 × 用户」函数，由各端点
+//!   声明 [`policy`] 的 extractor 裁决（票 B2b-T5；矩阵本体在 [`crate::auth`]）。
 //!   放行清单仅 login、setup（healthz 与静态资源面不在 `/api/v1` 下，
 //!   天然不拦）。未匹配路由不走中间件，维持 JSON 404 兜底。
 //! - 存储依赖经 [`AppState`] 注入（池 → repo → handler，Spec B2a §6 组合根），
@@ -21,9 +23,12 @@ pub mod csrf;
 pub mod docs;
 pub mod error;
 pub mod health;
+pub mod members;
 pub mod pipelines;
+pub mod policy;
 pub mod projects;
 pub mod tokens;
+pub mod users;
 
 mod web;
 
@@ -41,6 +46,7 @@ pub use docs::ApiDoc;
 
 use crate::api::error::ApiError;
 use crate::auth::LoginRateLimiter;
+use crate::store::members::MemberRepo;
 use crate::store::pipelines::PipelineRepo;
 use crate::store::projects::ProjectRepo;
 use crate::store::sessions::SessionRepo;
@@ -60,6 +66,8 @@ pub struct AppState {
     pub sessions: SessionRepo,
     /// PAT repo（认证面 + 管理端点，票 B2b-T3）。
     pub pats: PatRepo,
+    /// 项目成员 repo（授权面 + 成员管理端点，票 B2b-T5）。
+    pub members: MemberRepo,
     /// 登录限流器（进程内状态：per-IP / per-username 双键，重启即清，
     /// 票 B2b-T2）。
     pub login_limiter: LoginRateLimiter,
@@ -73,7 +81,8 @@ impl AppState {
             pipelines: PipelineRepo::new(pool.clone()),
             users: UserRepo::new(pool.clone()),
             sessions: SessionRepo::new(pool.clone()),
-            pats: PatRepo::new(pool),
+            pats: PatRepo::new(pool.clone()),
+            members: MemberRepo::new(pool),
             login_limiter: LoginRateLimiter::new(),
         }
     }
@@ -97,8 +106,13 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route("/auth/me", get(auth::me))
         .route("/auth/tokens", get(tokens::list).post(tokens::create))
         .route("/auth/tokens/{id}", delete(tokens::revoke))
+        .route("/users/directory", get(users::directory))
         .route("/projects", get(projects::list).post(projects::create))
         .route("/projects/{name}", get(projects::get_one))
+        .route(
+            "/projects/{name}/members",
+            get(members::list).put(members::replace),
+        )
         .route(
             "/projects/{name}/pipelines/{pipeline}",
             get(pipelines::get_definition).put(pipelines::put_definition),

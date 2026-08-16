@@ -316,11 +316,11 @@
         "tags": [
           "projects"
         ],
-        "summary": "项目清单。",
+        "summary": "项目清单（按可见性过滤：全局 admin 全量、普通用户只列有角色的项目，\n票 B2b-T5）。",
         "operationId": "list",
         "responses": {
           "200": {
-            "description": "全部项目（按名排序）",
+            "description": "调用者可见的项目（全局 admin 全量、普通用户仅有角色的项目；按名排序）",
             "content": {
               "application/json": {
                 "schema": {
@@ -331,6 +331,16 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       },
@@ -338,7 +348,7 @@
         "tags": [
           "projects"
         ],
-        "summary": "创建项目。",
+        "summary": "创建项目（全局管理员专属，票 B2b-T5：全局资源只认 `is_admin`）。",
         "operationId": "create",
         "requestBody": {
           "content": {
@@ -357,6 +367,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ProjectResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非全局管理员（建项目为全局资源）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -389,7 +419,7 @@
         "tags": [
           "projects"
         ],
-        "summary": "按名取项目。",
+        "summary": "按名取项目（viewer 档声明：无角色与不存在同形 404，票 B2b-T5）。",
         "operationId": "get_one",
         "parameters": [
           {
@@ -413,8 +443,169 @@
               }
             }
           },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
-            "description": "项目不存在",
+            "description": "项目不存在或对调用者不可见（不泄露存在性）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}/members": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "查看项目成员（项目 admin 档；全局 admin 的隐含成员关系不在此列，\nADR-0014：避免噪声，仍可显式分配以显式化）。",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成员清单（按用户名排序）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MemberResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "项目权限不足（成员管理需项目 admin 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "整组分配项目成员（PUT 语义：提交清单即完整状态，未列入者移除；\n角色变更即时生效）。",
+        "operationId": "replace",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/MemberAssignment"
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已分配，返回落定后的成员清单",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MemberResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "项目权限不足（成员管理需项目 admin 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（用户名空白 / 重复 / 不存在）",
             "content": {
               "application/json": {
                 "schema": {
@@ -431,7 +622,7 @@
         "tags": [
           "pipelines"
         ],
-        "summary": "读 pipeline 定义。",
+        "summary": "读 pipeline 定义（viewer 档：无角色与项目不存在同形 404，票 B2b-T5）。",
         "operationId": "get_definition",
         "parameters": [
           {
@@ -464,8 +655,18 @@
               }
             }
           },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
-            "description": "项目或 pipeline 不存在",
+            "description": "项目或 pipeline 不存在（或项目不可见）",
             "content": {
               "application/json": {
                 "schema": {
@@ -480,7 +681,7 @@
         "tags": [
           "pipelines"
         ],
-        "summary": "保存 pipeline 定义（upsert：首存 revision=1，续存 +1）。",
+        "summary": "保存 pipeline 定义（项目 admin 档，票 B2b-T5；upsert：首存 revision=1，\n续存 +1；操作人为认证用户实名，票 B2b-T1）。",
         "operationId": "put_definition",
         "parameters": [
           {
@@ -523,8 +724,28 @@
               }
             }
           },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "项目权限不足（保存定义需项目 admin 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
-            "description": "项目不存在",
+            "description": "项目不存在或不可见（不泄露存在性）",
             "content": {
               "application/json": {
                 "schema": {
@@ -535,6 +756,50 @@
           },
           "422": {
             "description": "model 校验失败，错误清单整组透传",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/users/directory": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "最小用户目录（项目 admin 档：全局 admin 或任意项目的 admin；仅活跃\n用户，排除已禁用）。",
+        "operationId": "directory",
+        "responses": {
+          "200": {
+            "description": "用户目录（仅 id + 用户名，按用户名排序；排除已禁用）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DirectoryEntryResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非项目或全局 admin（viewer / runner / 无角色不可读）",
             "content": {
               "application/json": {
                 "schema": {
@@ -677,6 +942,25 @@
           }
         }
       },
+      "DirectoryEntryResponse": {
+        "type": "object",
+        "description": "用户目录项（最小形态：仅 id + 用户名）。",
+        "required": [
+          "id",
+          "username"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "用户 id。"
+          },
+          "username": {
+            "type": "string",
+            "description": "用户名。"
+          }
+        }
+      },
       "ErrorBody": {
         "type": "object",
         "description": "统一错误响应体。",
@@ -722,6 +1006,48 @@
           "is_admin": {
             "type": "boolean",
             "description": "是否全局管理员。"
+          },
+          "username": {
+            "type": "string",
+            "description": "用户名。"
+          }
+        }
+      },
+      "MemberAssignment": {
+        "type": "object",
+        "description": "PUT 成员清单的条目：用户名 + 角色。",
+        "required": [
+          "username",
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/RoleDto",
+            "description": "分配的角色。"
+          },
+          "username": {
+            "type": "string",
+            "description": "用户名（须已存在；目录端点 `GET /users/directory` 供下拉）。"
+          }
+        }
+      },
+      "MemberResponse": {
+        "type": "object",
+        "description": "成员清单项（GET 响应 / PUT 后回读共用）。",
+        "required": [
+          "user_id",
+          "username",
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/RoleDto",
+            "description": "项目角色。"
+          },
+          "user_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "用户 id。"
           },
           "username": {
             "type": "string",
@@ -811,6 +1137,15 @@
             "description": "最后更新时间（Unix 毫秒）。"
           }
         }
+      },
+      "RoleDto": {
+        "type": "string",
+        "description": "角色的 API 形态（`viewer` / `runner` / `admin`；域类型 [`Role`] 落库文本\n同形，转换零成本）。",
+        "enum": [
+          "viewer",
+          "runner",
+          "admin"
+        ]
       },
       "SaveDefinitionResponse": {
         "type": "object",
@@ -910,11 +1245,15 @@
     },
     {
       "name": "projects",
-      "description": "项目管理（v1：list / create / get）"
+      "description": "项目管理（v1：list / create / get；成员三档角色分配，票 B2b-T5）"
     },
     {
       "name": "pipelines",
       "description": "Pipeline 定义读写（model 校验 + revision 语义）"
+    },
+    {
+      "name": "users",
+      "description": "用户目录（项目 admin 的最小只读清单，票 B2b-T5）"
     }
   ]
 }

@@ -1,18 +1,22 @@
-//! 项目端点（票 B2a-T4）：list / create / get。
+//! 项目端点（票 B2a-T4；B2b-T5 授权 retrofit）：list（按可见性过滤）/
+//! create（全局 admin）/ get（viewer 档）。
 //!
 //! update/delete 及其级联语义（pipeline 删除对构建历史的影响）归后续批次
-//! 裁定，不预开端点。认证由 `/api/v1` 全局中间件统一把关（票 B2b-T1），
-//! 项目级授权（403）随后续批次以端点 extractor 补。
+//! 裁定，不预开端点。认证（401）由 `/api/v1` 全局中间件统一把关；项目级
+//! 授权（404/403）由 [`super::policy`] 的端点 extractor 声明（矩阵本体在
+//! [`crate::auth`]，票 B2b-T5）。
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::AppState;
+use super::auth::AuthContext;
 use super::error::{ApiError, ErrorBody, ValidationIssue, parse_body};
+use super::policy::RequireViewer;
 use crate::store::projects::{NewProject, Project, ScmType};
 
 /// 仓库类型（API 形态；`git` / `svn`）。
@@ -89,21 +93,29 @@ impl From<Project> for ProjectResponse {
     }
 }
 
-/// 项目清单。
+/// 项目清单（按可见性过滤：全局 admin 全量、普通用户只列有角色的项目，
+/// 票 B2b-T5）。
 #[utoipa::path(
     get,
     path = "/api/v1/projects",
     tag = "projects",
     responses(
-        (status = 200, description = "全部项目（按名排序）", body = [ProjectResponse]),
+        (status = 200, description = "调用者可见的项目（全局 admin 全量、普通用户仅有角色的项目；按名排序）", body = [ProjectResponse]),
+        (status = 401, description = "未认证", body = ErrorBody),
     )
 )]
-pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<ProjectResponse>>, ApiError> {
-    let projects = state.projects.list().await?;
+pub async fn list(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthContext>,
+) -> Result<Json<Vec<ProjectResponse>>, ApiError> {
+    let projects = state
+        .projects
+        .list_visible(auth.is_admin, auth.user_id)
+        .await?;
     Ok(Json(projects.into_iter().map(Into::into).collect()))
 }
 
-/// 创建项目。
+/// 创建项目（全局管理员专属，票 B2b-T5：全局资源只认 `is_admin`）。
 #[utoipa::path(
     post,
     path = "/api/v1/projects",
@@ -111,14 +123,20 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<ProjectRespo
     request_body = CreateProjectRequest,
     responses(
         (status = 201, description = "已创建", body = ProjectResponse),
+        (status = 401, description = "未认证", body = ErrorBody),
+        (status = 403, description = "非全局管理员（建项目为全局资源）", body = ErrorBody),
         (status = 409, description = "项目名已存在", body = ErrorBody),
         (status = 422, description = "输入校验失败（错误清单整组透传）", body = ErrorBody),
     )
 )]
 pub async fn create(
     State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthContext>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<ProjectResponse>), ApiError> {
+    if !auth.is_admin {
+        return Err(ApiError::forbidden("创建项目为全局管理员专属操作"));
+    }
     let req: CreateProjectRequest = parse_body(&body)?;
     let issues = validate_create(&req);
     if !issues.is_empty() {
@@ -140,7 +158,7 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(project.into())))
 }
 
-/// 按名取项目。
+/// 按名取项目（viewer 档声明：无角色与不存在同形 404，票 B2b-T5）。
 #[utoipa::path(
     get,
     path = "/api/v1/projects/{name}",
@@ -148,19 +166,14 @@ pub async fn create(
     params(("name" = String, Path, description = "项目名")),
     responses(
         (status = 200, description = "项目", body = ProjectResponse),
-        (status = 404, description = "项目不存在", body = ErrorBody),
+        (status = 401, description = "未认证", body = ErrorBody),
+        (status = 404, description = "项目不存在或对调用者不可见（不泄露存在性）", body = ErrorBody),
     )
 )]
 pub async fn get_one(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
+    RequireViewer(access): RequireViewer,
 ) -> Result<Json<ProjectResponse>, ApiError> {
-    state
-        .projects
-        .get_by_name(&name)
-        .await?
-        .map(|p| Json(p.into()))
-        .ok_or_else(|| ApiError::resource_not_found(format!("项目 {name} 不存在")))
+    Ok(Json(access.project.into()))
 }
 
 /// 创建项目的字段校验（轻量输入面；pipeline 定义的重校验在 model 单一事实源）。

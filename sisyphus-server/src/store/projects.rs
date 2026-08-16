@@ -93,6 +93,30 @@ impl ProjectRepo {
         rows.into_iter().map(Project::from_row).collect()
     }
 
+    /// 按可见性列项目（票 B2b-T5）：全局 admin 全量；普通用户只列自己有
+    /// 角色的项目（无角色项目不可见，单查亦 404——存在性不外泄）。
+    /// 按名排序与 [`Self::list`] 一致。
+    pub async fn list_visible(
+        &self,
+        is_admin: bool,
+        user_id: i64,
+    ) -> Result<Vec<Project>, StoreError> {
+        if is_admin {
+            return self.list().await;
+        }
+        let rows = sqlx::query_as::<_, (i64, String, String, String, Option<String>, i64, i64)>(
+            "SELECT p.id, p.name, p.scm_type, p.scm_url, p.default_branch,
+                    p.created_at, p.updated_at
+             FROM projects p JOIN project_members m ON m.project_id = p.id
+             WHERE m.user_id = ?
+             ORDER BY p.name",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(Project::from_row).collect()
+    }
+
     /// 创建项目；项目名已存在返回 [`StoreError::Unique`]。
     pub async fn create(&self, input: NewProject) -> Result<Project, StoreError> {
         let now = now_ms();

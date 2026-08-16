@@ -6,9 +6,11 @@ use utoipa::OpenApi;
 use super::auth;
 use super::error::{ErrorBody, ValidationIssue};
 use super::health;
+use super::members;
 use super::pipelines;
 use super::projects;
 use super::tokens;
+use super::users;
 
 /// Server REST API 契约。
 ///
@@ -35,8 +37,11 @@ use super::tokens;
         projects::list,
         projects::create,
         projects::get_one,
+        members::list,
+        members::replace,
         pipelines::get_definition,
         pipelines::put_definition,
+        users::directory,
     ),
     components(schemas(
         health::Healthz,
@@ -50,15 +55,20 @@ use super::tokens;
         projects::ScmTypeDto,
         projects::CreateProjectRequest,
         projects::ProjectResponse,
+        members::RoleDto,
+        members::MemberAssignment,
+        members::MemberResponse,
         pipelines::PipelineDefinitionPayload,
         pipelines::PipelineDefinitionResponse,
         pipelines::SaveDefinitionResponse,
+        users::DirectoryEntryResponse,
     )),
     tags(
         (name = "infra", description = "探针与基础设施端点"),
         (name = "auth", description = "认证与会话（setup wizard / login / logout / me）与 PAT（Bearer 通道，票 B2b-T3）"),
-        (name = "projects", description = "项目管理（v1：list / create / get）"),
+        (name = "projects", description = "项目管理（v1：list / create / get；成员三档角色分配，票 B2b-T5）"),
         (name = "pipelines", description = "Pipeline 定义读写（model 校验 + revision 语义）"),
+        (name = "users", description = "用户目录（项目 admin 的最小只读清单，票 B2b-T5）"),
     )
 )]
 pub struct ApiDoc;

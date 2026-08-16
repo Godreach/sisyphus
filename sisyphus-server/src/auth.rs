@@ -1,9 +1,8 @@
-//! 认证域逻辑（ADR-0014，票 B2b-T1/T2/T3）：argon2id 密码哈希、session id
-//! 原语、登录限流器与 API token 基座。
+//! 认证域逻辑（ADR-0014，票 B2b-T1/T2/T3/T5）：argon2id 密码哈希、session id
+//! 原语、登录限流器、API token 基座与项目三档角色权限矩阵（policy）。
 //!
-//! 本模块只承载纯逻辑（可单测、不依赖 axum）；REST 面（端点与认证中间件）
-//! 在 [`crate::api::auth`]。后续批次（policy）在同一模块扩面
-//! （ADR-0009 auth 模块职责）。
+//! 本模块只承载纯逻辑（可单测、不依赖 axum）；REST 面（端点与认证中间件、
+//! 授权 extractor）在 [`crate::api::auth`] 与 [`crate::api::policy`]。
 //!
 //! - 密码：argon2id，OWASP 参数 m=19MiB/t=2/p=1（`19_456` KiB）；落库形态
 //!   为 PHC 字符串（自带参数与盐，校验侧无需另存参数）。哈希/校验是
@@ -29,6 +28,8 @@ use base64ct::Base64UrlUnpadded;
 use base64ct::Encoding;
 use sha2::Digest;
 use sha2::Sha256;
+
+use crate::store::StoreError;
 
 /// 会话 cookie 名（固定，ADR-0014）。
 pub const SESSION_COOKIE_NAME: &str = "sisyphus_session";
@@ -169,6 +170,83 @@ pub fn token_family(token: &str) -> Option<TokenFamily> {
 
 /// 登录限流的失败阈值：连续 5 次失败进入冷却（ADR-0014）。
 pub const LOGIN_FAILURE_THRESHOLD: u32 = 5;
+
+/// 项目成员三档角色（ADR-0014 权限矩阵的档位，票 B2b-T5）。
+///
+/// 档位有序：viewer（看）< runner（跑）< admin（改 + 管理）。落库文本为
+/// 小写单词（schema CHECK 约束取值域）；角色是「项目 × 用户」的函数，
+/// 全局 admin 不落成员表、由授权层视作全部项目的 [`Role::Admin`]
+/// （ADR-0014：隐含权限，成员列表不显示）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Role {
+    /// 只读：查看项目 / 定义 / 构建 / 日志 / 产物，不可改。
+    Viewer,
+    /// 值班救火：viewer 之上可触发 / 取消 / 重跑（端点随 engine 批次），
+    /// 不可改定义。
+    Runner,
+    /// 项目管家：runner 之上可改定义、配触发器 / 通知 / 机密、管成员。
+    Admin,
+}
+
+impl Role {
+    /// 落库 / API 文本（schema CHECK 约束的取值域）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Viewer => "viewer",
+            Self::Runner => "runner",
+            Self::Admin => "admin",
+        }
+    }
+
+    /// 从落库文本解析（schema 已约束取值域，未知值视为库损坏）。
+    pub fn parse(s: &str) -> Result<Self, StoreError> {
+        match s {
+            "viewer" => Ok(Self::Viewer),
+            "runner" => Ok(Self::Runner),
+            "admin" => Ok(Self::Admin),
+            other => Err(StoreError::Db(sqlx::Error::ColumnDecode {
+                index: "role".into(),
+                source: format!("未知角色：{other}").into(),
+            })),
+        }
+    }
+}
+
+/// 端点声明的动作档位（ADR-0014 权限矩阵的行入口，票 B2b-T5）。
+///
+/// 矩阵本体收口在 [`Permission::min_role`]：动作 → 放行它的最低角色，
+/// 单点集中（端点经授权 extractor 只声明动作，不实现判定）。Run 档端点
+/// （触发 / 取消 / 重跑）随 engine 批次接线。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Permission {
+    /// 查看项目 / 定义 / 构建 / 日志 / 产物列表 / 下载产物。
+    View,
+    /// 触发 / 取消 / 重跑构建（engine 批次端点）。
+    #[allow(dead_code)] // 矩阵单点完整先行；消费端点随 engine 批次落地
+    Run,
+    /// pipeline 编辑保存、触发器 / 通知 / 项目设置、成员管理、机密管理、
+    /// 工作区清理与缓存手动删除。
+    Manage,
+}
+
+impl Permission {
+    /// 权限矩阵本体（单点）：该动作放行的最低角色。变更档位只改这里。
+    pub fn min_role(self) -> Role {
+        match self {
+            Self::View => Role::Viewer,
+            Self::Run => Role::Runner,
+            Self::Manage => Role::Admin,
+        }
+    }
+}
+
+impl Role {
+    /// 矩阵判定：本角色是否满足端点声明的动作档位。
+    pub fn satisfies(self, permission: Permission) -> bool {
+        self >= permission.min_role()
+    }
+}
+
 /// 冷却起始时长（第 1 次触发）。
 const LOGIN_COOLDOWN_BASE_MS: i64 = 60 * 1000;
 /// 冷却时长封顶（连续触发翻倍递增、封顶 15 分钟，ADR-0014）。
@@ -369,6 +447,37 @@ mod tests {
         for foreign in ["ghp_deadbeef", "sis-deadbeef", "sisadbeef", "", "bearer"] {
             assert_eq!(token_family(foreign), None, "{foreign} 不应识别为任何族");
         }
+    }
+
+    /// ADR-0014 三档矩阵全集：viewer 看、runner 看 + 跑、admin 全量；
+    /// 不满足的动作一律 false（档位判定无双判据）。
+    #[test]
+    fn role_permission_matrix_matches_adr_0014() {
+        use Permission::{Manage, Run, View};
+
+        assert!(Role::Viewer.satisfies(View));
+        assert!(!Role::Viewer.satisfies(Run));
+        assert!(!Role::Viewer.satisfies(Manage));
+
+        assert!(Role::Runner.satisfies(View));
+        assert!(Role::Runner.satisfies(Run));
+        assert!(!Role::Runner.satisfies(Manage));
+
+        assert!(Role::Admin.satisfies(View));
+        assert!(Role::Admin.satisfies(Run));
+        assert!(Role::Admin.satisfies(Manage));
+
+        // 档位有序（矩阵的推导基础）：viewer < runner < admin。
+        assert!(Role::Viewer < Role::Runner && Role::Runner < Role::Admin);
+    }
+
+    #[test]
+    fn role_round_trips_storage_text_and_rejects_unknown() {
+        for role in [Role::Viewer, Role::Runner, Role::Admin] {
+            assert_eq!(Role::parse(role.as_str()).expect("合法取值域"), role);
+        }
+        assert!(Role::parse("owner").is_err(), "未知角色应视为库损坏");
+        assert_eq!(Role::Admin.as_str(), "admin");
     }
 
     /// 假时钟基点（任意值；限流器只做时间差运算）。

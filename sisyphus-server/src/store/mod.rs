@@ -6,6 +6,7 @@
 //! 读写；trait 缝（[`LogStore`](traits::LogStore) / [`ArtifactStore`](traits::ArtifactStore)）
 //! 只定形不实现，随消费批次落同一缝。
 
+pub mod members;
 pub mod pipelines;
 pub mod projects;
 pub mod sessions;
@@ -237,7 +238,13 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .expect("读表清单");
-        for expected in ["pipelines", "projects", "users", "sessions"] {
+        for expected in [
+            "pipelines",
+            "projects",
+            "users",
+            "sessions",
+            "project_members",
+        ] {
             assert!(
                 tables.iter().any(|t| t == expected),
                 "缺表 {expected}：{tables:?}"
@@ -281,6 +288,7 @@ mod tests {
             "DROP TABLE users",
             "DROP TABLE sessions",
             "DROP TABLE personal_access_tokens",
+            "DROP TABLE project_members",
         ] {
             sqlx::raw_sql(stmt)
                 .execute(&pool)

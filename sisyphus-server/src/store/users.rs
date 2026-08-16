@@ -110,6 +110,17 @@ impl UserRepo {
         .map(User::from_row)
         .transpose()
     }
+
+    /// 最小用户目录（票 B2b-T5）：仅 id + 用户名，供成员分配下拉。排除
+    /// 已禁用用户（无认证面，分配角色无意义）；密码哈希等列不出库。
+    pub async fn list_directory(&self) -> Result<Vec<(i64, String)>, StoreError> {
+        let rows = sqlx::query_as::<_, (i64, String)>(
+            "SELECT id, username FROM users WHERE disabled = 0 ORDER BY username",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
 }
 
 impl User {

@@ -1,9 +1,11 @@
-//! Pipeline 定义端点（票 B2a-T4）：GET（定义 + revision + 操作人/时间）与
-//! PUT（model 校验失败 422 + 错误清单整组透传；成功返回新 revision）。
+//! Pipeline 定义端点（票 B2a-T4；B2b-T5 授权 retrofit）：GET viewer 档
+//! （定义 + revision + 操作人/时间）与 PUT 项目 admin 档（model 校验失败
+//! 422 + 错误清单整组透传；成功返回新 revision，操作人为认证用户实名）。
 //!
 //! 定义以 sisyphus-model 的 JSON 形态往返、原样落库读回（schema 不解析
 //! 定义内部，ADR-0009）；OpenAPI 侧 schema 事实源在 model，此处声明为
-//! 自由 object，TS 类型随后续批次从 model 生成。
+//! 自由 object，TS 类型随后续批次从 model 生成。项目存在性与档位由
+//! [`super::policy`] extractor 先行裁决（无角色 404 / 档位不足 403）。
 
 use axum::Json;
 use axum::body::Bytes;
@@ -13,6 +15,7 @@ use utoipa::ToSchema;
 
 use super::AppState;
 use super::error::{ApiError, ErrorBody, parse_body};
+use super::policy::{RequireAdmin, RequireViewer};
 use sisyphus_model::pipeline::Pipeline;
 
 /// PUT 请求体：Pipeline 定义（sisyphus-model JSON 形态）。
@@ -47,7 +50,7 @@ pub struct SaveDefinitionResponse {
     pub updated_at: i64,
 }
 
-/// 读 pipeline 定义。
+/// 读 pipeline 定义（viewer 档：无角色与项目不存在同形 404，票 B2b-T5）。
 #[utoipa::path(
     get,
     path = "/api/v1/projects/{name}/pipelines/{pipeline}",
@@ -58,11 +61,13 @@ pub struct SaveDefinitionResponse {
     ),
     responses(
         (status = 200, description = "当前定义与修订版本", body = PipelineDefinitionResponse),
-        (status = 404, description = "项目或 pipeline 不存在", body = ErrorBody),
+        (status = 401, description = "未认证", body = ErrorBody),
+        (status = 404, description = "项目或 pipeline 不存在（或项目不可见）", body = ErrorBody),
     )
 )]
 pub async fn get_definition(
     State(state): State<AppState>,
+    RequireViewer(_access): RequireViewer,
     Path((name, pipeline)): Path<(String, String)>,
 ) -> Result<Json<PipelineDefinitionResponse>, ApiError> {
     let stored = state
@@ -82,7 +87,8 @@ pub async fn get_definition(
     }))
 }
 
-/// 保存 pipeline 定义（upsert：首存 revision=1，续存 +1）。
+/// 保存 pipeline 定义（项目 admin 档，票 B2b-T5；upsert：首存 revision=1，
+/// 续存 +1；操作人为认证用户实名，票 B2b-T1）。
 #[utoipa::path(
     put,
     path = "/api/v1/projects/{name}/pipelines/{pipeline}",
@@ -94,14 +100,17 @@ pub async fn get_definition(
     ),
     responses(
         (status = 200, description = "已保存，返回新修订版本", body = SaveDefinitionResponse),
-        (status = 404, description = "项目不存在", body = ErrorBody),
+        (status = 401, description = "未认证", body = ErrorBody),
+        (status = 403, description = "项目权限不足（保存定义需项目 admin 档）", body = ErrorBody),
+        (status = 404, description = "项目不存在或不可见（不泄露存在性）", body = ErrorBody),
         (status = 422, description = "model 校验失败，错误清单整组透传", body = ErrorBody),
     )
 )]
 pub async fn put_definition(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<super::auth::AuthContext>,
-    Path((name, pipeline)): Path<(String, String)>,
+    RequireAdmin(access): RequireAdmin,
+    Path((_project_name, pipeline)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<Json<SaveDefinitionResponse>, ApiError> {
     // 先落 model 类型：形态错也是校验失败（统一 422 形态，不走 axum 默认拒绝）。
@@ -109,7 +118,7 @@ pub async fn put_definition(
     // 操作人实名：认证中间件注入的登录用户名（票 B2b-T1）。
     let revision = state
         .pipelines
-        .save(&name, &pipeline, &definition, &auth.username)
+        .save(&access.project.name, &pipeline, &definition, &auth.username)
         .await?;
     Ok(Json(SaveDefinitionResponse {
         revision: revision.number,
