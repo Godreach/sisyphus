@@ -91,11 +91,16 @@ async fn main() {
     );
 
     // 并行 serve：expect 收在各自 async 块内——任一出错即 panic 带崩整个
-    // 进程，不带病运行半个服务。
+    // 进程，不带病运行半个服务。REST 侧带连接信息（login 限流的 per-IP
+    // 键取直连地址，票 B2b-T2）。
     let rest = async {
-        axum::serve(rest_listener, api::router(state, web_override_dir))
-            .await
-            .expect("REST serve");
+        axum::serve(
+            rest_listener,
+            api::router(state, web_override_dir)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("REST serve");
     };
     let grpc = async {
         tonic::transport::Server::builder()

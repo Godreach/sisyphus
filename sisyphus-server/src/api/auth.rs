@@ -1,5 +1,6 @@
-//! 认证端点与中间件（票 B2b-T1，ADR-0014）：setup wizard / login / logout /
-//! me，以及挂在 `/api/v1` 受保护段全局面的会话认证中间件。
+//! 认证端点与中间件（票 B2b-T1/T2，ADR-0014）：setup wizard / login /
+//! logout / me、挂在 `/api/v1` 受保护段全局面的会话认证中间件，以及
+//! login 上的进程内限流（per-IP + per-username）。
 //!
 //! - 认证（401）是全局 middleware：cookie 里的 session id → SHA-256 查行 →
 //!   未过期 → 用户未禁用，通过即顺延 7 天（滑动过期）并把
@@ -8,10 +9,12 @@
 //!   中间件（healthz 与静态资源面不在 `/api/v1` 下，天然不拦）；setup 的
 //!   「空库限定」由 handler 裁决——用户表非空一律 404，不暴露实例状态。
 //! - cookie：HttpOnly + SameSite=Lax + Path=/，v1 不设 Secure（跨公网走 TLS
-//!   的立场随部署文档，ADR-0014）。授权（403）与 CSRF/PAT 随后续批次。
+//!   的立场随部署文档，ADR-0014）。CSRF 面在 [`super::csrf`]（B2b-T2）；
+//!   授权（403 extractor）与 PAT 随后续批次。
 
 use axum::Json;
 use axum::body::Bytes;
+use axum::extract::ConnectInfo;
 use axum::extract::Request;
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -21,6 +24,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde::Serialize;
+use std::net::SocketAddr;
 use utoipa::ToSchema;
 
 use super::AppState;
@@ -102,6 +106,10 @@ pub async fn setup(
 }
 
 /// 登录：用户名密码换取会话 cookie。
+///
+/// 登录限流（票 B2b-T2，ADR-0014）：per-IP（直连地址，v1 不信任
+/// X-Forwarded-For，反代场景写进部署文档）与 per-username 双键独立计数，
+/// 任一键冷却中即 429；失败对双键各记一次，成功对双键清零。
 #[utoipa::path(
     post,
     path = "/api/v1/auth/login",
@@ -111,26 +119,46 @@ pub async fn setup(
         (status = 200, description = "登录成功，Set-Cookie 下发会话（HttpOnly + SameSite=Lax + Path=/）", body = MeResponse),
         (status = 401, description = "用户名或密码错误（不区分两者）", body = ErrorBody),
         (status = 422, description = "请求体不是合法 JSON 或形态不符", body = ErrorBody),
+        (status = 429, description = "登录尝试过于频繁（per-IP / per-username 连续 5 败进入冷却，随连续触发递增、封顶 15 分钟）", body = ErrorBody),
     )
 )]
-pub async fn login(State(state): State<AppState>, body: Bytes) -> Result<Response, ApiError> {
+pub async fn login(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
     let req: CredentialsRequest = parse_body(&body)?;
+    let ip = addr.ip().to_string();
+    let username = req.username.trim().to_string();
 
-    let user = match state.users.get_by_username(req.username.trim()).await? {
+    // 限流双键：直连 IP 与用户名（用户名 trim 后与查找同形）。任一冷却
+    // 中即 429——正确密码也不放行（暴破拖慢是本面的唯一目标）。
+    let now = now_ms();
+    if let Some(retry_after_ms) = state.login_limiter.check_login(&ip, &username, now) {
+        return Ok(rate_limited(retry_after_ms));
+    }
+
+    let user = match state.users.get_by_username(&username).await? {
         Some(user) => user,
         None => {
             // 防用户枚举的时间侧信道：用户不存在时也跑一次真哈希校验，
             // 与「用户在、密码错」分支耗时一致（响应形态本就一致）。
             verify_password(&req.password, &dummy_hash().await).await;
+            state
+                .login_limiter
+                .record_login_failure(&ip, &username, now);
             return Err(ApiError::unauthorized());
         }
     };
     if user.disabled || !verify_password(&req.password, &user.password_hash).await {
+        state
+            .login_limiter
+            .record_login_failure(&ip, &username, now);
         return Err(ApiError::unauthorized());
     }
+    state.login_limiter.record_login_success(&ip, &username);
 
     // 建会话：撞主键（概率上不可达）换 id 重试。
-    let now = now_ms();
     let mut session_id = None;
     for _ in 0..SESSION_ID_ATTEMPTS {
         let id = generate_session_id();
@@ -265,8 +293,9 @@ fn validate_credentials(req: &CredentialsRequest) -> Result<(), ApiError> {
     }
 }
 
-/// 从 Cookie 头取指定名的值（值域为 base64url，`split_once('=')` 即安全）。
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+/// 从 Cookie 头取指定名的值（值域为 base64url，`split_once('=')` 即安全；
+/// csrf 中间件共用）。
+pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(header::COOKIE)?
         .to_str()
@@ -290,6 +319,16 @@ fn set_session_cookie(resp: &mut Response, session_id: &str) {
 fn clear_session_cookie(resp: &mut Response) {
     let cookie = format!("{SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
     insert_set_cookie(resp, &cookie);
+}
+
+/// 登录限流 429：统一错误形态（detail 携带剩余毫秒）+ 标准 `Retry-After`
+/// 头（秒，向上取整、至少 1）。
+fn rate_limited(retry_after_ms: i64) -> Response {
+    let mut resp = ApiError::too_many_requests(retry_after_ms).into_response();
+    let secs = ((retry_after_ms + 999) / 1000).max(1).to_string();
+    resp.headers_mut()
+        .insert(header::RETRY_AFTER, secs.parse().expect("秒数为合法头值"));
+    resp
 }
 
 fn insert_set_cookie(resp: &mut Response, cookie: &str) {

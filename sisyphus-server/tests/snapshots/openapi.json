@@ -19,6 +19,7 @@
           "auth"
         ],
         "summary": "登录：用户名密码换取会话 cookie。",
+        "description": "登录限流（票 B2b-T2，ADR-0014）：per-IP（直连地址，v1 不信任\nX-Forwarded-For，反代场景写进部署文档）与 per-username 双键独立计数，\n任一键冷却中即 429；失败对双键各记一次，成功对双键清零。",
         "operationId": "login",
         "requestBody": {
           "content": {
@@ -53,6 +54,16 @@
           },
           "422": {
             "description": "请求体不是合法 JSON 或形态不符",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "登录尝试过于频繁（per-IP / per-username 连续 5 败进入冷却，随连续触发递增、封顶 15 分钟）",
             "content": {
               "application/json": {
                 "schema": {

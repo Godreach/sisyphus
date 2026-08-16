@@ -5,12 +5,17 @@
 //!
 //! B2b-T1 起附认证辅助：`setup_and_login` 走 setup wizard + login 换会话
 //! cookie；`test_app_at` 在同一数据目录重开装配（Server 重启缝）。
+//! B2b-T2 起：oneshot 请求默认注入 ConnectInfo 直连地址（login 限流的
+//! per-IP 键）；带 cookie 的请求默认附 `Sec-Fetch-Site: same-origin`
+//! （模拟同源 SPA——cookie 认证的非安全方法请求过 CSRF 面需要同源凭证；
+//! CSRF/限流面用例经 `custom_req` 全自定义）。
 //!
 //! 各测试二进制只消费本模块的子集（rest_api / auth_rest / static_web 各取
 //! 所需），未消费项的 dead_code 告警在此统一豁免。
 
 #![allow(dead_code)]
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use axum::body::Body;
@@ -22,6 +27,10 @@ use sisyphus_server::config::WEB_DIR;
 use sisyphus_server::store;
 use sqlx::SqlitePool;
 use tower::ServiceExt;
+
+/// oneshot 请求的默认直连地址（无真实连接，经扩展注入；限流用例经
+/// `custom_req` 换地址驱动 per-IP 键）。
+const DEFAULT_PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 52000);
 
 /// 进程内测试装配：TempDir 随结构体存活，测试结束才连同库文件一起清理。
 pub struct TestApp {
@@ -90,12 +99,14 @@ pub fn cookie_of(resp: &Response) -> Option<String> {
         .map(|kv| kv.trim().to_string())
 }
 
-/// 进程内请求。
+/// 进程内请求（默认直连地址、无附加头）。
 pub async fn req(app: &TestApp, method: &str, path: &str, body: Option<String>) -> Response {
-    req_with_cookie(app, method, path, body, None).await
+    custom_req(app, method, path, body, None, &[], DEFAULT_PEER).await
 }
 
-/// 带 cookie 的进程内请求（认证面用例）。
+/// 带 cookie 的进程内请求（认证面用例）：默认附 `Sec-Fetch-Site:
+/// same-origin`，模拟同源 SPA——cookie 认证的非安全方法请求自 B2b-T2
+/// 起须过 CSRF 面，不带同源凭证会 403。
 pub async fn req_with_cookie(
     app: &TestApp,
     method: &str,
@@ -103,12 +114,37 @@ pub async fn req_with_cookie(
     body: Option<String>,
     cookie: Option<&str>,
 ) -> Response {
-    let mut builder = Request::builder().method(method).uri(path);
+    let headers = match cookie {
+        Some(_) => vec![("sec-fetch-site", "same-origin".to_string())],
+        None => Vec::new(),
+    };
+    custom_req(app, method, path, body, cookie, &headers, DEFAULT_PEER).await
+}
+
+/// 全自定义进程内请求（CSRF / 限流用例）：任意直连地址（login 限流的
+/// per-IP 键）+ 任意附加头（Origin / Sec-Fetch-Site / Host /
+/// Authorization）。不隐含任何同源凭证——由调用侧显式给。
+pub async fn custom_req(
+    app: &TestApp,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+    cookie: Option<&str>,
+    headers: &[(&str, String)],
+    peer: SocketAddr,
+) -> Response {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .extension(axum::extract::ConnectInfo(peer));
     if body.is_some() {
         builder = builder.header(header::CONTENT_TYPE, "application/json");
     }
     if let Some(cookie) = cookie {
         builder = builder.header(header::COOKIE, cookie);
+    }
+    for (name, value) in headers {
+        builder = builder.header(*name, value.as_str());
     }
     let body = Body::from(body.unwrap_or_default());
     app.router

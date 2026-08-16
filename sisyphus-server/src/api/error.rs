@@ -90,6 +90,28 @@ impl ApiError {
         )
     }
 
+    /// 403：CSRF 拒绝（cookie 认证的非安全方法请求跨源/缺同源凭证，
+    /// 票 B2b-T2，ADR-0014）。
+    pub fn csrf_rejected() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "CSRF_REJECTED",
+            "跨站请求被拒绝（CSRF 防护：需同源 Origin 或 Sec-Fetch-Site）",
+            None,
+        )
+    }
+
+    /// 429：登录限流冷却中（票 B2b-T2，ADR-0014）；detail 携带剩余毫秒，
+    /// 调用侧再补 `Retry-After` 头。
+    pub fn too_many_requests(retry_after_ms: i64) -> Self {
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMITED",
+            "登录尝试过于频繁，请稍后再试",
+            Some(serde_json::json!({ "retry_after_ms": retry_after_ms })),
+        )
+    }
+
     /// 409：状态冲突（唯一键、并发写等）。
     pub fn conflict(what: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, "CONFLICT", what, None)
