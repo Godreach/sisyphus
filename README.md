@@ -57,6 +57,7 @@ gRPC 通道（proto = Agent/Server 唯一共享契约；Server 下发已解析�
 - GitHub Releases：6 目标 × server/agent 分开压缩包 + sha256 校验和；官方 Docker 镜像仅 Server（双架构、非 root、`/data` 卷）。
 - Server 与 Agent 同版本号成对发布；升级顺序 Server 先升，兼容窗口 N-1。
 - 单一 `--data-dir`（内含 SQLite 与产物存储），首次启动生成带注释的 `config.toml`；启动自动前向迁移，迁移前自动备份 db。
+- **机密存储的防护边界（ADR-0015）**：机密值以主密钥文件（`<data-dir>/master.key`，首启自动生成、0600，路径可经 config `[auth] master_key_path` 改到独立卷）+ XChaCha20-Poly1305 加密落库。该机制防「DB 文件/备份单独泄露」（库/备份脱离数据目录读不出明文）；**数据目录整体失守（含密钥文件）无解**，同机 root 亦不防——密钥文件须留在可信卷上。跨公网部署必须 TLS（v1 会话 cookie 不设 Secure，理由同上）。
 
 ## 开发
 
@@ -88,7 +89,7 @@ UPDATE_SNAPSHOTS=1 cargo test -p sisyphus-server    # 重写快照
 
 ## 项目状态
 
-实现进行中：B1 骨架（workspace 四 crate、proto 契约、model 保存校验、Agent 握手闭环、CI）与 Spec B2a 存储与 API 底座（配置合并、SQLite 池+迁移+备份、REST/gRPC 双服务、pipeline 定义读写闭环、内嵌静态资源）已落地。设计基线：21 篇 ADR + [CONTEXT.md](CONTEXT.md) 词汇表（见 [docs/adr/](docs/adr/)）。
+实现进行中：B1 骨架（workspace 四 crate、proto 契约、model 保存校验、Agent 握手闭环、CI）与 Spec B2a 存储与 API 底座（配置合并、SQLite 池+迁移+备份、REST/gRPC 双服务、pipeline 定义读写闭环、内嵌静态资源）、Spec B2b 认证与用户体系（setup wizard、登录会话、登录限流、CSRF、PAT、三档角色、用户管理与注册开关）与项目机密服务端面（主密钥文件 + XChaCha20 加密落库 + 机密 CRUD：值只写不读）已落地——`/api/v1` 全面要求认证，未认证仅 login/setup/register 与静态资源可达。设计基线：21 篇 ADR + [CONTEXT.md](CONTEXT.md) 词汇表（见 [docs/adr/](docs/adr/)）。
 
 ## License
 

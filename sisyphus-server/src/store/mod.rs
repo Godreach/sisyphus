@@ -9,6 +9,7 @@
 pub mod members;
 pub mod pipelines;
 pub mod projects;
+pub mod secrets;
 pub mod sessions;
 pub mod tokens;
 pub mod users;
@@ -243,7 +244,9 @@ mod tests {
             "projects",
             "users",
             "sessions",
+            "personal_access_tokens",
             "project_members",
+            "secrets",
         ] {
             assert!(
                 tables.iter().any(|t| t == expected),
@@ -289,6 +292,7 @@ mod tests {
             "DROP TABLE sessions",
             "DROP TABLE personal_access_tokens",
             "DROP TABLE project_members",
+            "DROP TABLE secrets",
         ] {
             sqlx::raw_sql(stmt)
                 .execute(&pool)

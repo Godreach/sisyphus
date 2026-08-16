@@ -30,6 +30,7 @@ pub mod members;
 pub mod pipelines;
 pub mod policy;
 pub mod projects;
+pub mod secrets;
 pub mod tokens;
 pub mod users;
 
@@ -49,9 +50,11 @@ pub use docs::ApiDoc;
 
 use crate::api::error::ApiError;
 use crate::auth::LoginRateLimiter;
+use crate::secrets::MasterKey;
 use crate::store::members::MemberRepo;
 use crate::store::pipelines::PipelineRepo;
 use crate::store::projects::ProjectRepo;
+use crate::store::secrets::SecretRepo;
 use crate::store::sessions::SessionRepo;
 use crate::store::tokens::PatRepo;
 use crate::store::users::UserRepo;
@@ -71,6 +74,12 @@ pub struct AppState {
     pub pats: PatRepo,
     /// 项目成员 repo（授权面 + 成员管理端点，票 B2b-T5）。
     pub members: MemberRepo,
+    /// 项目机密 repo（票 B2b-T6：建/覆写/列名/删，值只写不读）。
+    pub secrets: SecretRepo,
+    /// 主密钥（票 B2b-T6，ADR-0015）：首启由启动路径经
+    /// [`crate::secrets::ensure_master_key`] 生成/读回后注入，机密写入路径
+    /// 加密用。
+    pub master_key: MasterKey,
     /// 登录限流器（进程内状态：per-IP / per-username 双键，重启即清，
     /// 票 B2b-T2）。
     pub login_limiter: LoginRateLimiter,
@@ -82,15 +91,18 @@ pub struct AppState {
 impl AppState {
     /// 由连接池装配（组合根：开池+迁移在 [`crate::store::bootstrap`]）。
     /// `registration_enabled` 来自合并后的启动配置（CLI > env > toml >
-    /// 默认，ADR-0010）。
-    pub fn new(pool: SqlitePool, registration_enabled: bool) -> Self {
+    /// 默认，ADR-0010）；`master_key` 为机密加密主密钥（ADR-0015，票
+    /// B2b-T6：启动路径已生成/读回密钥文件）。
+    pub fn new(pool: SqlitePool, registration_enabled: bool, master_key: MasterKey) -> Self {
         Self {
             projects: ProjectRepo::new(pool.clone()),
             pipelines: PipelineRepo::new(pool.clone()),
             users: UserRepo::new(pool.clone()),
             sessions: SessionRepo::new(pool.clone()),
             pats: PatRepo::new(pool.clone()),
-            members: MemberRepo::new(pool),
+            members: MemberRepo::new(pool.clone()),
+            secrets: SecretRepo::new(pool.clone()),
+            master_key,
             login_limiter: LoginRateLimiter::new(),
             registration_enabled,
         }
@@ -127,6 +139,14 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route(
             "/projects/{name}/members",
             get(members::list).put(members::replace),
+        )
+        .route(
+            "/projects/{name}/secrets",
+            get(secrets::list_secrets),
+        )
+        .route(
+            "/projects/{name}/secrets/{secret}",
+            put(secrets::put_secret).delete(secrets::delete_secret),
         )
         .route(
             "/projects/{name}/pipelines/{pipeline}",

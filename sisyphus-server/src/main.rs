@@ -33,6 +33,10 @@ struct Args {
     /// 管理员建立）
     #[arg(long)]
     registration_enabled: Option<bool>,
+    /// 主密钥文件路径（CLI 覆盖层，默认 <data-dir>/master.key：首启自动生成，
+    /// 可改到独立卷；相对路径按相对数据目录解析）
+    #[arg(long)]
+    master_key_path: Option<String>,
 }
 
 impl From<&Args> for Overrides {
@@ -43,6 +47,7 @@ impl From<&Args> for Overrides {
             log_level: args.log_level.clone(),
             log_format: args.log_format.clone(),
             registration_enabled: args.registration_enabled.map(|b| b.to_string()),
+            master_key_path: args.master_key_path.clone(),
         }
     }
 }
@@ -72,9 +77,22 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    // 主密钥文件（票 B2b-T6，ADR-0015）：首启自动生成、已有文件不重生成；
+    // 路径经 config 可改到独立卷。机密加密链的唯一锚点，启动失败即退出
+    // （不带病运行——静默换钥 = 全部机密不可解）。
+    let master_key = match sisyphus_server::secrets::ensure_master_key(&config.master_key_path) {
+        Ok(key) => key,
+        Err(e) => {
+            tracing::error!(
+                path = %config.master_key_path.display(),
+                "主密钥初始化失败：{e}",
+            );
+            std::process::exit(2);
+        }
+    };
     // REST 组合根（B2a-T4）：池注入 repo，端点面见 api::router；注册开关
-    // 随配置注入（票 B2b-T4）。
-    let state = api::AppState::new(pool.clone(), config.registration_enabled);
+    // 随配置注入（票 B2b-T4）、主密钥随配置注入（票 B2b-T6）。
+    let state = api::AppState::new(pool.clone(), config.registration_enabled, master_key);
     // 静态资源本地覆盖目录（B2a-T5）：数据目录 web/ 子目录，不存在即纯内嵌。
     let web_override_dir = config.data_dir.join(sisyphus_server::config::WEB_DIR);
 

@@ -9,6 +9,7 @@ use super::health;
 use super::members;
 use super::pipelines;
 use super::projects;
+use super::secrets;
 use super::tokens;
 use super::users;
 
@@ -41,6 +42,9 @@ use super::users;
         projects::get_one,
         members::list,
         members::replace,
+        secrets::list_secrets,
+        secrets::put_secret,
+        secrets::delete_secret,
         pipelines::get_definition,
         pipelines::put_definition,
         users::list,
@@ -65,6 +69,8 @@ use super::users;
         members::RoleDto,
         members::MemberAssignment,
         members::MemberResponse,
+        secrets::PutSecretRequest,
+        secrets::SecretNameResponse,
         pipelines::PipelineDefinitionPayload,
         pipelines::PipelineDefinitionResponse,
         pipelines::SaveDefinitionResponse,
@@ -78,6 +84,7 @@ use super::users;
         (name = "infra", description = "探针与基础设施端点"),
         (name = "auth", description = "认证与会话（setup wizard / register / login / logout / me / 自助改密）与 PAT（Bearer 通道，票 B2b-T3）"),
         (name = "projects", description = "项目管理（v1：list / create / get；成员三档角色分配，票 B2b-T5）"),
+        (name = "secrets", description = "项目机密（票 B2b-T6：值只写不读——建/覆写、仅名清单、删；viewer/runner 连名不可见，项目 admin 档）"),
         (name = "pipelines", description = "Pipeline 定义读写（model 校验 + revision 语义）"),
         (name = "users", description = "用户管理（全局 admin：建/列/禁用/重置，票 B2b-T4）与用户目录（项目 admin 的最小只读清单，票 B2b-T5）"),
     )

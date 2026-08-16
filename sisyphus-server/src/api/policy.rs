@@ -28,13 +28,18 @@ use crate::auth::{Permission, Role};
 use crate::store::projects::Project;
 
 /// 授权通过的产物：已解析的项目行（handler 免二次查询）+ 调用者在该项目的
-/// 有效角色（全局 admin 无成员行也是 [`Role::Admin`]）。
+/// 有效角色（全局 admin 无成员行也是 [`Role::Admin`]）+ 操作人实名
+/// （认证用户名的「操作人」语义，票 B2b-T5；机密 updated_by / 审计 actor
+/// 消费）。
 #[derive(Debug, Clone)]
 pub struct ProjectAccess {
     /// 项目行（extractor 已查库裁决存在性与可见性）。
     pub project: Project,
     /// 有效角色（显式成员角色，或全局 admin 的隐含 admin）。
     pub role: Role,
+    /// 操作人实名（认证用户名；历史字段永不悬空，与 pipeline operator
+    /// 同纪律）。
+    pub operator: String,
 }
 
 /// 声明 viewer 档位（[`Permission::View`]）：查看项目 / 定义 / 构建。
@@ -138,7 +143,11 @@ async fn resolve(
             permission.min_role().as_str()
         )));
     }
-    Ok(ProjectAccess { project, role })
+    Ok(ProjectAccess {
+        project,
+        role,
+        operator: auth.username,
+    })
 }
 
 /// 动作的人读名（403 message 用；与矩阵同处演进）。

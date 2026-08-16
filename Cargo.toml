@@ -58,6 +58,9 @@ base64ct = "1"
 # argon2 盐与 session id 的 OS 随机源（rand_core 0.6 与 password-hash 同线；
 # 需自带 getrandom feature——password-hash 的再导出未启用它）
 rand_core = { version = "0.6", features = ["getrandom"] }
+# 机密值加密（ADR-0015）：XChaCha20-Poly1305——纯 Rust、无 AES 硬件依赖、
+# 192 位随机 nonce 免 nonce 管理重用风险（RustCrypto 系，与 argon2 同族）
+chacha20poly1305 = "0.10"
 
 [workspace.lints.rust]
 # unsafe 降为 warn：vendored protoc 的 build.rs 需 set_var（1.97 起为 unsafe），

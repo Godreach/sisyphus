@@ -69,9 +69,14 @@ pub async fn test_app_at(data_dir: &Path) -> TestApp {
 pub async fn test_app_at_with(data_dir: &Path, registration_enabled: bool) -> TestApp {
     let pool = store::bootstrap(data_dir).await.expect("bootstrap");
     let web = data_dir.join(WEB_DIR);
+    // 主密钥按生产首启语义生成/读回（与二进制 main 同装配，票 B2b-T6）。
+    let master_key = sisyphus_server::secrets::ensure_master_key(
+        &data_dir.join(sisyphus_server::config::MASTER_KEY_FILE_NAME),
+    )
+    .expect("测试主密钥");
     TestApp {
         router: router(
-            AppState::new(pool.clone(), registration_enabled),
+            AppState::new(pool.clone(), registration_enabled, master_key),
             web.clone(),
         ),
         pool,

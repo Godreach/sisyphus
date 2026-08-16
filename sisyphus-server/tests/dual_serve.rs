@@ -17,7 +17,11 @@ async fn rest_and_grpc_serve_side_by_side() {
     // （池经 store::bootstrap），gRPC 走 grpc::service()。
     let dir = tempfile::tempdir().expect("临时数据目录");
     let pool = store::bootstrap(dir.path()).await.expect("bootstrap");
-    let state = api::AppState::new(pool, false);
+    let master_key = sisyphus_server::secrets::ensure_master_key(
+        &dir.path().join(sisyphus_server::config::MASTER_KEY_FILE_NAME),
+    )
+    .expect("测试主密钥");
+    let state = api::AppState::new(pool, false, master_key);
     let web_override_dir = dir.path().join(sisyphus_server::config::WEB_DIR);
 
     let rest_listener = tokio::net::TcpListener::bind("127.0.0.1:0")

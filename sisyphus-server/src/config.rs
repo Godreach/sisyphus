@@ -1,7 +1,7 @@
 //! Server 启动配置：CLI flag > `SISYPHUS_` 前缀环境变量 > config.toml > 内置默认
 //! （ADR-0010）；日志级别与格式语义按 ADR-0019。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -20,6 +20,9 @@ pub const DEFAULT_REGISTRATION_ENABLED: bool = false;
 pub const CONFIG_FILE_NAME: &str = "config.toml";
 /// 数据目录内的 SQLite 数据库文件名（ADR-0010）。
 pub const DB_FILE_NAME: &str = "sisyphus.db";
+/// 数据目录内的主密钥文件名（ADR-0015：默认落数据目录，路径可经 config
+/// 改到独立卷；首启自动生成 32 字节随机文件）。
+pub const MASTER_KEY_FILE_NAME: &str = "master.key";
 /// 数据目录内的产物存储子目录名（ADR-0004）。
 pub const ARTIFACTS_DIR: &str = "artifacts";
 /// 数据目录内的迁移前备份子目录名（ADR-0010）。
@@ -53,6 +56,9 @@ pub struct Config {
     pub log_format: LogFormat,
     /// 用户自注册开关（register 端点的门；默认关，票 B2b-T4）。
     pub registration_enabled: bool,
+    /// 主密钥文件路径（ADR-0015：默认数据目录内 `master.key`，可经 config
+    /// 改到独立卷；首启自动生成、已有文件不重生成，票 B2b-T6）。
+    pub master_key_path: PathBuf,
 }
 
 /// 同一形态的覆盖层：CLI flag 与 `SISYPHUS_` 环境变量都归约为它。
@@ -68,6 +74,8 @@ pub struct Overrides {
     pub log_format: Option<String>,
     /// 注册开关覆盖（文本形态与各层统一，布尔语义在 merge 缝收口）。
     pub registration_enabled: Option<String>,
+    /// 主密钥文件路径覆盖（文本形态；相对路径按相对数据目录解析）。
+    pub master_key_path: Option<String>,
 }
 
 /// config.toml 文件层。
@@ -105,12 +113,15 @@ pub struct LogFile {
     pub format: Option<String>,
 }
 
-/// `[auth]` 段（票 B2b-T4 起有了认证相关文件配置）。
+/// `[auth]` 段（票 B2b-T4 起有了认证相关文件配置；票 B2b-T6 增机密键）。
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthFile {
     /// 用户自注册开关（默认关：register 403，内网由全局 admin 建号）。
     pub registration_enabled: Option<bool>,
+    /// 主密钥文件路径（相对路径按相对数据目录解析；默认数据目录内
+    /// `master.key`，ADR-0015：可改到独立卷做运维纵深）。
+    pub master_key_path: Option<PathBuf>,
 }
 
 /// 配置加载/合并错误。
@@ -171,6 +182,10 @@ format = "json"
 # 用户自注册开关（默认 false = 关闭：POST /auth/register 一律 403，账号由全局管理员建立；
 # true 时用户可自注册非管理员账号。修改后重启生效）
 registration_enabled = false
+# 主密钥文件路径（默认 <data-dir>/master.key；首启自动生成 32 字节随机文件、已有不重生成。
+# 防「DB 文件/备份单独泄露」的最后一环：可改到独立卷做运维纵深——数据目录整体失守
+# （含密钥文件）无解。相对路径按相对数据目录解析，修改后重启生效）
+# master_key_path = "/secure/volume/master.key"
 "#
 }
 
@@ -220,6 +235,7 @@ impl Overrides {
             log_level: get("SISYPHUS_LOG_LEVEL"),
             log_format: get("SISYPHUS_LOG_FORMAT"),
             registration_enabled: get("SISYPHUS_REGISTRATION_ENABLED"),
+            master_key_path: get("SISYPHUS_MASTER_KEY_PATH"),
         }
     }
 }
@@ -258,6 +274,17 @@ pub fn merge(
                 .unwrap_or(DEFAULT_REGISTRATION_ENABLED),
         };
 
+    // 主密钥文件路径：CLI > env > 文件 > 默认（数据目录内 master.key）。
+    // CLI/env 层是文本，相对路径一律按相对数据目录解析（与文件层同为
+    // 配置语义，覆盖层不引入第二套相对基准）。
+    let master_key_path = match pick(&cli.master_key_path, &env.master_key_path, None) {
+        Some(path) => resolve_master_key_path(&data_dir, &path),
+        None => match &file.auth.master_key_path {
+            Some(path) => resolve_master_key_path(&data_dir, &path.to_string_lossy()),
+            None => data_dir.join(MASTER_KEY_FILE_NAME),
+        },
+    };
+
     let log_format = match log_format.as_str() {
         "json" => LogFormat::Json,
         "pretty" => LogFormat::Pretty,
@@ -280,7 +307,19 @@ pub fn merge(
         log_level,
         log_format,
         registration_enabled,
+        master_key_path,
     })
+}
+
+/// 覆盖层与文件层的主密钥路径统一解析：绝对路径原样用，相对路径按相对
+/// 数据目录解析（[`AuthFile::master_key_path`] 同为相对基准）。
+fn resolve_master_key_path(data_dir: &Path, path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        data_dir.join(path)
+    }
 }
 
 /// 覆盖层文本的布尔解析（注册开关等）：true/false 大小写不敏感，另收
@@ -314,6 +353,11 @@ mod tests {
         assert_eq!(cfg.log_level, DEFAULT_LOG_LEVEL);
         assert_eq!(cfg.log_format, LogFormat::Json);
         assert!(!cfg.registration_enabled, "注册开关默认关（ADR-0014）");
+        assert_eq!(
+            cfg.master_key_path,
+            PathBuf::from("/tmp/data").join(MASTER_KEY_FILE_NAME),
+            "主密钥默认落数据目录内"
+        );
     }
 
     #[test]
@@ -321,12 +365,14 @@ mod tests {
         let cli = Overrides {
             grpc_addr: Some("127.0.0.1:60001".into()),
             registration_enabled: Some("false".into()),
+            master_key_path: Some("/vol/cli.key".into()),
             ..Overrides::default()
         };
         let env = Overrides {
             grpc_addr: Some("127.0.0.1:60002".into()),
             rest_addr: Some("127.0.0.1:60003".into()),
             registration_enabled: Some("true".into()),
+            master_key_path: Some("/vol/env.key".into()),
             ..Overrides::default()
         };
         let file = FileConfig {
@@ -340,6 +386,7 @@ mod tests {
             },
             auth: AuthFile {
                 registration_enabled: Some(true),
+                master_key_path: Some("/vol/file.key".into()),
             },
         };
 
@@ -355,6 +402,72 @@ mod tests {
         assert_eq!(cfg.log_format, LogFormat::Pretty);
         // CLI 的 false 压过 env 与文件的 true（关得掉，不只是开得开）。
         assert!(!cfg.registration_enabled);
+        // 主密钥路径同样按 CLI > env > 文件 > 默认合并。
+        assert_eq!(cfg.master_key_path, PathBuf::from("/vol/cli.key"));
+    }
+
+    #[test]
+    fn master_key_path_merges_across_layers_and_resolves_relative() {
+        // 文件层绝对路径：直接生效。
+        let file_abs = FileConfig {
+            auth: AuthFile {
+                master_key_path: Some("/secure/volume/master.key".into()),
+                ..AuthFile::default()
+            },
+            ..FileConfig::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file_abs,
+        )
+        .expect("文件层绝对路径");
+        assert_eq!(cfg.master_key_path, PathBuf::from("/secure/volume/master.key"));
+
+        // 文件层相对路径：按相对数据目录解析。
+        let file_rel = FileConfig {
+            auth: AuthFile {
+                master_key_path: Some("keys/master.key".into()),
+                ..AuthFile::default()
+            },
+            ..FileConfig::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file_rel,
+        )
+        .expect("文件层相对路径");
+        assert_eq!(
+            cfg.master_key_path,
+            PathBuf::from("/tmp/data/keys/master.key")
+        );
+
+        // CLI/env 层压过文件层，相对路径同样按数据目录解析。
+        let cli = Overrides {
+            master_key_path: Some("my.key".into()),
+            ..Overrides::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &cli,
+            &Overrides::default(),
+            &file_abs,
+        )
+        .expect("CLI 层");
+        assert_eq!(cfg.master_key_path, PathBuf::from("/tmp/data/my.key"));
+
+        // 无任何覆盖：数据目录内默认文件名。
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &FileConfig::default(),
+        )
+        .expect("默认");
+        assert_eq!(cfg.master_key_path, PathBuf::from("/tmp/data").join(MASTER_KEY_FILE_NAME));
     }
 
     #[test]
@@ -362,6 +475,7 @@ mod tests {
         let file_on = FileConfig {
             auth: AuthFile {
                 registration_enabled: Some(true),
+                ..AuthFile::default()
             },
             ..FileConfig::default()
         };

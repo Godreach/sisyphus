@@ -882,6 +882,217 @@
         }
       }
     },
+    "/api/v1/projects/{name}/secrets": {
+      "get": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "列项目机密名（项目 admin 档：viewer/runner 连名都 403，由 extractor\n裁决、本端点不可达）。",
+        "operationId": "list_secrets",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "机密名清单（按名排序；值永不可读，任何端点不回显）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SecretNameResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "项目权限不足（机密管理需项目 admin 档；viewer/runner 连名不可见）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}/secrets/{secret}": {
+      "put": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "建/覆写机密（项目 admin 档；值只写不读，成功响应无值形态）。",
+        "operationId": "put_secret",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "secret",
+            "in": "path",
+            "description": "机密名（env 键字符集：字母数字与下划线）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutSecretRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "已写入：值加密落库，任何端点不再回显"
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "项目权限不足（机密管理需项目 admin 档；viewer/runner 连名不可见）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（机密名非法）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "删除机密（项目 admin 档：名消失即 DELETE 后的可观察语义）。",
+        "operationId": "delete_secret",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "secret",
+            "in": "path",
+            "description": "机密名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "已删除：名从清单消失"
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "项目权限不足（机密管理需项目 admin 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在或不可见，或机密名不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/users": {
       "get": {
         "tags": [
@@ -1579,6 +1790,19 @@
           }
         }
       },
+      "PutSecretRequest": {
+        "type": "object",
+        "description": "机密名请求体：值只写不读——value 出现在请求里，此后任何响应不再出现。",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "机密值（写入即加密落库；永不可读回，请谨慎覆写）。"
+          }
+        }
+      },
       "ResetPasswordRequest": {
         "type": "object",
         "description": "代办重置密码请求体（全局 admin，无需当前密码——ADR-0014：v1 无邮件\n自助重置，管理员代办即找回通道）。",
@@ -1634,6 +1858,19 @@
           "git",
           "svn"
         ]
+      },
+      "SecretNameResponse": {
+        "type": "object",
+        "description": "GET 清单条目：仅名（值形态不存在——机密值任何端点不回显）。",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "机密名。"
+          }
+        }
       },
       "TokenResponse": {
         "type": "object",
@@ -1741,6 +1978,10 @@
     {
       "name": "projects",
       "description": "项目管理（v1：list / create / get；成员三档角色分配，票 B2b-T5）"
+    },
+    {
+      "name": "secrets",
+      "description": "项目机密（票 B2b-T6：值只写不读——建/覆写、仅名清单、删；viewer/runner 连名不可见，项目 admin 档）"
     },
     {
       "name": "pipelines",

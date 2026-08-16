@@ -16,5 +16,6 @@ pub mod grpc;
 mod notify;
 mod sched;
 mod scm;
+pub mod secrets;
 pub mod store;
 mod trigger;
