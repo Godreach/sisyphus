@@ -3,6 +3,7 @@
 
 use utoipa::OpenApi;
 
+use super::auth;
 use super::error::{ErrorBody, ValidationIssue};
 use super::health;
 use super::pipelines;
@@ -18,10 +19,15 @@ use super::projects;
         title = "sisyphus Server API",
         version = env!("CARGO_PKG_VERSION"),
         description = "自托管 CI 平台 Server REST API。业务端点均在 /api/v1/ 前缀下；\
-                       B2a 阶段暂无鉴权（auth 批次统一中间件补）。",
+                       B2b 起会话认证全局把关（未认证一律 401，放行面仅 login/setup\
+                       /healthz 与静态资源，票 B2b-T1）。",
     ),
     paths(
         health::healthz,
+        auth::setup,
+        auth::login,
+        auth::logout,
+        auth::me,
         projects::list,
         projects::create,
         projects::get_one,
@@ -32,6 +38,8 @@ use super::projects;
         health::Healthz,
         ErrorBody,
         ValidationIssue,
+        auth::CredentialsRequest,
+        auth::MeResponse,
         projects::ScmTypeDto,
         projects::CreateProjectRequest,
         projects::ProjectResponse,
@@ -41,6 +49,7 @@ use super::projects;
     )),
     tags(
         (name = "infra", description = "探针与基础设施端点"),
+        (name = "auth", description = "认证与会话（setup wizard / login / logout / me）"),
         (name = "projects", description = "项目管理（v1：list / create / get）"),
         (name = "pipelines", description = "Pipeline 定义读写（model 校验 + revision 语义）"),
     )

@@ -30,7 +30,7 @@ pub struct PipelineDefinitionResponse {
     pub definition: PipelineDefinitionPayload,
     /// 当前修订版本号（每次保存 +1，从 1 起）。
     pub revision: u32,
-    /// 最后保存的操作人（auth 落地前为占位标识）。
+    /// 最后保存的操作人。
     pub operator: String,
     /// 最后保存时间（Unix 毫秒）。
     pub updated_at: i64,
@@ -41,7 +41,7 @@ pub struct PipelineDefinitionResponse {
 pub struct SaveDefinitionResponse {
     /// 本次保存后的修订版本号。
     pub revision: u32,
-    /// 操作人（auth 落地前为占位标识）。
+    /// 操作人（登录用户名，票 B2b-T1 起）。
     pub operator: String,
     /// 保存时间（Unix 毫秒）。
     pub updated_at: i64,
@@ -100,12 +100,17 @@ pub async fn get_definition(
 )]
 pub async fn put_definition(
     State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<super::auth::AuthContext>,
     Path((name, pipeline)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<Json<SaveDefinitionResponse>, ApiError> {
     // 先落 model 类型：形态错也是校验失败（统一 422 形态，不走 axum 默认拒绝）。
     let definition: Pipeline = parse_body(&body)?;
-    let revision = state.pipelines.save(&name, &pipeline, &definition).await?;
+    // 操作人实名：认证中间件注入的登录用户名（票 B2b-T1）。
+    let revision = state
+        .pipelines
+        .save(&name, &pipeline, &definition, &auth.username)
+        .await?;
     Ok(Json(SaveDefinitionResponse {
         revision: revision.number,
         operator: revision.operator,

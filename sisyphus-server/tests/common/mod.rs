@@ -2,32 +2,145 @@
 //! 目录 → bootstrap（池+PRAGMA+迁移）→ 与二进制相同的 Router 组合根。
 //! 静态资源本地覆盖目录按生产形态落在数据目录 `web/` 子目录
 //! （config::WEB_DIR），需要覆盖文件的用例往 `TestApp::web` 写即可。
+//!
+//! B2b-T1 起附认证辅助：`setup_and_login` 走 setup wizard + login 换会话
+//! cookie；`test_app_at` 在同一数据目录重开装配（Server 重启缝）。
+//!
+//! 各测试二进制只消费本模块的子集（rest_api / auth_rest / static_web 各取
+//! 所需），未消费项的 dead_code 告警在此统一豁免。
 
-use std::path::PathBuf;
+#![allow(dead_code)]
 
+use std::path::{Path, PathBuf};
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode, header};
+use axum::response::Response;
+use http_body_util::BodyExt;
 use sisyphus_server::api::{AppState, router};
 use sisyphus_server::config::WEB_DIR;
 use sisyphus_server::store;
+use sqlx::SqlitePool;
+use tower::ServiceExt;
 
 /// 进程内测试装配：TempDir 随结构体存活，测试结束才连同库文件一起清理。
 pub struct TestApp {
     /// 与二进制相同的 Router 组合根（oneshot 驱动）。
     pub router: axum::Router,
+    /// 底层连接池：用例直查/直改库（如把 session 改过期、断言哈希形态）。
+    pub pool: SqlitePool,
     /// 静态资源本地覆盖目录（数据目录 `web/` 子目录）：用例自行放置文件。
-    /// 只被 static_web 测试面消费；rest_api 二进制里未读，故局部允许。
+    /// 只被 static_web 测试面消费；其余二进制里未读，故局部允许。
     #[allow(dead_code)]
     pub web: PathBuf,
-    _dir: tempfile::TempDir,
+    _dir: Option<tempfile::TempDir>,
 }
 
-/// 装配测试应用：真实 store + 临时库，不起 socket、不 spawn 进程。
+/// 装配测试应用（全新临时数据目录）：真实 store + 临时库，不起 socket、
+/// 不 spawn 进程。
 pub async fn test_app() -> TestApp {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let pool = store::bootstrap(dir.path()).await.expect("bootstrap");
-    let web = dir.path().join(WEB_DIR);
+    let mut app = test_app_at(dir.path()).await;
+    app._dir = Some(dir);
+    app
+}
+
+/// 在既有数据目录上装配（Server 重启缝：同一目录第二次 bootstrap + 新
+/// Router；TempDir 归调用侧持有）。
+pub async fn test_app_at(data_dir: &Path) -> TestApp {
+    let pool = store::bootstrap(data_dir).await.expect("bootstrap");
+    let web = data_dir.join(WEB_DIR);
     TestApp {
-        router: router(AppState::new(pool), web.clone()),
+        router: router(AppState::new(pool.clone()), web.clone()),
+        pool,
         web,
-        _dir: dir,
+        _dir: None,
     }
+}
+
+/// setup wizard 建首个 admin + login 换会话，返回 Cookie 请求头值
+/// （`sisyphus_session=...`，业务端点用例统一经它过认证）。
+pub async fn setup_and_login(app: &TestApp) -> String {
+    let resp = post(
+        app,
+        "/api/v1/auth/setup",
+        r#"{ "username": "admin", "password": "admin-password-1" }"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "setup 建首个 admin");
+
+    let resp = post(
+        app,
+        "/api/v1/auth/login",
+        r#"{ "username": "admin", "password": "admin-password-1" }"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "login 应成功");
+    cookie_of(&resp).expect("login 应下发会话 cookie")
+}
+
+/// 从响应取会话 cookie 的完整请求头值。
+pub fn cookie_of(resp: &Response) -> Option<String> {
+    resp.headers()
+        .get(header::SET_COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .next()
+        .map(|kv| kv.trim().to_string())
+}
+
+/// 进程内请求。
+pub async fn req(app: &TestApp, method: &str, path: &str, body: Option<String>) -> Response {
+    req_with_cookie(app, method, path, body, None).await
+}
+
+/// 带 cookie 的进程内请求（认证面用例）。
+pub async fn req_with_cookie(
+    app: &TestApp,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+    cookie: Option<&str>,
+) -> Response {
+    let mut builder = Request::builder().method(method).uri(path);
+    if body.is_some() {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+    }
+    if let Some(cookie) = cookie {
+        builder = builder.header(header::COOKIE, cookie);
+    }
+    let body = Body::from(body.unwrap_or_default());
+    app.router
+        .clone()
+        .oneshot(builder.body(body).expect("构造请求"))
+        .await
+        .expect("oneshot")
+}
+
+pub async fn get(app: &TestApp, path: &str) -> Response {
+    req(app, "GET", path, None).await
+}
+
+pub async fn post(app: &TestApp, path: &str, body: &str) -> Response {
+    req(app, "POST", path, Some(body.into())).await
+}
+
+pub async fn put(app: &TestApp, path: &str, body: &str) -> Response {
+    req(app, "PUT", path, Some(body.into())).await
+}
+
+/// 读出响应体为 UTF-8 文本。
+pub async fn body_text(resp: Response) -> String {
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("读响应体")
+        .to_bytes();
+    String::from_utf8(bytes.to_vec()).expect("UTF-8")
+}
+
+pub async fn body_json(resp: Response) -> serde_json::Value {
+    serde_json::from_str(&body_text(resp).await).expect("JSON 体")
 }

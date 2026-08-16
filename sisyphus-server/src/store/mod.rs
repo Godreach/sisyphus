@@ -8,6 +8,8 @@
 
 pub mod pipelines;
 pub mod projects;
+pub mod sessions;
+pub mod users;
 
 // 缝定形、无消费者（票 #32：只定契约不交付实现，日志/产物批次落同一缝后移除）。
 #[allow(dead_code, unused_imports)]
@@ -234,7 +236,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .expect("读表清单");
-        for expected in ["pipelines", "projects"] {
+        for expected in ["pipelines", "projects", "users", "sessions"] {
             assert!(
                 tables.iter().any(|t| t == expected),
                 "缺表 {expected}：{tables:?}"
@@ -272,14 +274,17 @@ mod tests {
 
         // 模拟旧库升级：抹掉迁移标记与业务表，使下一次 bootstrap 见到待应用迁移。
         let pool = open_raw_pool_for_test(dir.path()).await;
-        sqlx::query("DROP TABLE pipelines")
-            .execute(&pool)
-            .await
-            .expect("drop pipelines");
-        sqlx::query("DROP TABLE projects")
-            .execute(&pool)
-            .await
-            .expect("drop projects");
+        for stmt in [
+            "DROP TABLE pipelines",
+            "DROP TABLE projects",
+            "DROP TABLE users",
+            "DROP TABLE sessions",
+        ] {
+            sqlx::raw_sql(stmt)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("执行 {stmt}: {e}"));
+        }
         sqlx::query("DELETE FROM _sqlx_migrations")
             .execute(&pool)
             .await
@@ -293,7 +298,11 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("迁移标记");
-        assert_eq!(rows, 1, "0001 应已重新应用");
+        assert_eq!(
+            rows as usize,
+            MIGRATOR.migrations.len(),
+            "嵌入迁移应全部重新应用"
+        );
 
         // 迁移前备份产生：backups/<stamp>/sisyphus.db，且为迁移前的旧内容（非空）。
         let backups = count_backups(dir.path()).expect("枚举备份");

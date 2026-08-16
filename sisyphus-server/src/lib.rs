@@ -8,14 +8,13 @@
 //! 进程内驱动 [`api::router`]，不起 socket、不 spawn 进程（Spec B2a）。
 
 pub mod api;
+pub mod auth;
 pub mod config;
-pub mod grpc;
-pub mod store;
-
-mod auth;
 mod engine;
 mod events;
+pub mod grpc;
 mod notify;
 mod sched;
 mod scm;
+pub mod store;
 mod trigger;

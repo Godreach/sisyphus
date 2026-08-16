@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "sisyphus Server API",
-    "description": "自托管 CI 平台 Server REST API。业务端点均在 /api/v1/ 前缀下；B2a 阶段暂无鉴权（auth 批次统一中间件补）。",
+    "description": "自托管 CI 平台 Server REST API。业务端点均在 /api/v1/ 前缀下；B2b 起会话认证全局把关（未认证一律 401，放行面仅 login/setup/healthz 与静态资源，票 B2b-T1）。",
     "contact": {
       "name": "sisyphus contributors"
     },
@@ -13,6 +13,163 @@
     "version": "1.0.0"
   },
   "paths": {
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "登录：用户名密码换取会话 cookie。",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "登录成功，Set-Cookie 下发会话（HttpOnly + SameSite=Lax + Path=/）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "用户名或密码错误（不区分两者）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体不是合法 JSON 或形态不符",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "登出：删会话行（原 cookie 即刻失效）并清 cookie。",
+        "operationId": "logout",
+        "responses": {
+          "204": {
+            "description": "已登出：会话删除 + Set-Cookie 清空（需认证）"
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "当前用户（SPA 引导用；需认证）。",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "当前用户名与全局管理员标志",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/setup": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "setup wizard：空库时创建首个全局管理员。",
+        "operationId": "setup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CredentialsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "首个全局管理员已创建",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "用户表非空：端点不可用（不暴露状态）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（用户名非空、密码最小 8 位）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects": {
       "get": {
         "tags": [
@@ -302,6 +459,24 @@
           }
         }
       },
+      "CredentialsRequest": {
+        "type": "object",
+        "description": "setup wizard / login 共用的凭据请求体。",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "description": "密码（最小长度 8，无复杂度规则）。"
+          },
+          "username": {
+            "type": "string",
+            "description": "用户名。"
+          }
+        }
+      },
       "ErrorBody": {
         "type": "object",
         "description": "统一错误响应体。",
@@ -336,6 +511,24 @@
           }
         }
       },
+      "MeResponse": {
+        "type": "object",
+        "description": "当前用户视图（setup / login / me 共用；SPA 引导用）。",
+        "required": [
+          "username",
+          "is_admin"
+        ],
+        "properties": {
+          "is_admin": {
+            "type": "boolean",
+            "description": "是否全局管理员。"
+          },
+          "username": {
+            "type": "string",
+            "description": "用户名。"
+          }
+        }
+      },
       "PipelineDefinitionPayload": {
         "type": "object",
         "description": "PUT 请求体：Pipeline 定义（sisyphus-model JSON 形态）。\n\nOpenAPI 契约里是自由 object——schema 事实源在 sisyphus-model，\n不在 API 层复刻一份漂移源。"
@@ -356,7 +549,7 @@
           },
           "operator": {
             "type": "string",
-            "description": "最后保存的操作人（auth 落地前为占位标识）。"
+            "description": "最后保存的操作人。"
           },
           "revision": {
             "type": "integer",
@@ -430,7 +623,7 @@
         "properties": {
           "operator": {
             "type": "string",
-            "description": "操作人（auth 落地前为占位标识）。"
+            "description": "操作人（登录用户名，票 B2b-T1 起）。"
           },
           "revision": {
             "type": "integer",
@@ -477,6 +670,10 @@
     {
       "name": "infra",
       "description": "探针与基础设施端点"
+    },
+    {
+      "name": "auth",
+      "description": "认证与会话（setup wizard / login / logout / me）"
     },
     {
       "name": "projects",

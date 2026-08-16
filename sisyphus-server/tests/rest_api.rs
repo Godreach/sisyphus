@@ -1,57 +1,35 @@
 //! REST 进程内集成（Spec B2a 测试缝）：经与二进制相同的 Router 组合根做
 //! oneshot 请求——不起 socket、不 spawn 进程，背后挂真实 store + 临时库。
-//! 只测外部行为：HTTP 状态码与 JSON 形态。
+//! 只测外部行为：HTTP 状态码与 JSON 形态。业务端点用例经
+//! `common::setup_and_login` 过认证（票 B2b-T1 起无鉴权窗口关闭）；认证面
+//! 自身的行为（setup/login/logout/me、中间件 401）在 `auth_rest.rs`。
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::response::Response;
-use http_body_util::BodyExt;
 use sisyphus_model::pipeline::Pipeline;
-use tower::ServiceExt;
 
 mod common;
 
-use common::{TestApp, test_app};
+use common::{TestApp, body_json, get, req_with_cookie};
 
-/// 进程内请求（每个用例现装组合根，互不共享状态）。
-async fn req(app: &TestApp, method: &str, path: &str, body: Option<String>) -> Response {
-    let mut builder = Request::builder().method(method).uri(path);
-    if body.is_some() {
-        builder = builder.header(header::CONTENT_TYPE, "application/json");
-    }
-    let body = Body::from(body.unwrap_or_default());
-    app.router
-        .clone()
-        .oneshot(builder.body(body).expect("构造请求"))
-        .await
-        .expect("oneshot")
+/// 业务端点用例的已认证装配：app + 会话 cookie。
+async fn authed_app() -> (TestApp, String) {
+    let app = common::test_app().await;
+    let cookie = common::setup_and_login(&app).await;
+    (app, cookie)
 }
 
-async fn get(app: &TestApp, path: &str) -> Response {
-    req(app, "GET", path, None).await
+/// 已认证 GET（业务端点用例的便捷形态）。
+async fn authed_get(app: &TestApp, cookie: &str, path: &str) -> Response {
+    req_with_cookie(app, "GET", path, None, Some(cookie)).await
 }
 
-async fn post(app: &TestApp, path: &str, body: &str) -> Response {
-    req(app, "POST", path, Some(body.into())).await
+async fn authed_post(app: &TestApp, cookie: &str, path: &str, body: &str) -> Response {
+    req_with_cookie(app, "POST", path, Some(body.into()), Some(cookie)).await
 }
 
-async fn put(app: &TestApp, path: &str, body: &str) -> Response {
-    req(app, "PUT", path, Some(body.into())).await
-}
-
-/// 读出响应体为 UTF-8 文本。
-async fn body_text(resp: Response) -> String {
-    let bytes = resp
-        .into_body()
-        .collect()
-        .await
-        .expect("读响应体")
-        .to_bytes();
-    String::from_utf8(bytes.to_vec()).expect("UTF-8")
-}
-
-async fn body_json(resp: Response) -> serde_json::Value {
-    serde_json::from_str(&body_text(resp).await).expect("JSON 体")
+async fn authed_put(app: &TestApp, cookie: &str, path: &str, body: &str) -> Response {
+    req_with_cookie(app, "PUT", path, Some(body.into()), Some(cookie)).await
 }
 
 fn assert_json_content_type(resp: &Response) {
@@ -84,7 +62,7 @@ fn valid_definition() -> String {
 async fn healthz_returns_200_without_querying_store() {
     // healthz 不鉴权、不查库（ADR-0010/0019）：handler 无存储触碰，
     // 能答 200 即证进程存活语义（深度检查随可观测性批次接入）。
-    let app = test_app().await;
+    let app = common::test_app().await;
     let resp = get(&app, "/healthz").await;
 
     assert_eq!(resp.status(), StatusCode::OK);
@@ -94,8 +72,9 @@ async fn healthz_returns_200_without_querying_store() {
 
 #[tokio::test]
 async fn api_unknown_path_returns_unified_json_404() {
-    // /api 前缀未命中：统一 JSON 错误形态（错误码 + message），供客户端稳定解析。
-    let app = test_app().await;
+    // /api 前缀未命中：统一 JSON 错误形态（错误码 + message），供客户端稳定
+    // 解析；未匹配路由不经认证中间件，404 形态不因认证状态改变。
+    let app = common::test_app().await;
     let resp = get(&app, "/api/v1/does-not-exist").await;
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -116,7 +95,7 @@ async fn swagger_ui_browsable_and_openapi_json_fetchable() {
     use sisyphus_server::api::ApiDoc;
     use utoipa::OpenApi;
 
-    let app = test_app().await;
+    let app = common::test_app().await;
 
     // UI：/swagger-ui 重定向到带斜杠的入口，入口本身 200 且是 HTML。
     let entry = get(&app, "/swagger-ui").await;
@@ -146,16 +125,17 @@ async fn swagger_ui_browsable_and_openapi_json_fetchable() {
     assert_eq!(served, expect, "HTTP 面与 ApiDoc 逐字一致");
 }
 
-/// tracer bullet 全链路（票 B2a-T4 AC）：建项目 → PUT 非法定义 422 +
-/// 结构化校验错误清单 → PUT 合法定义 revision=1 → 再存 revision=2 →
-/// GET 读回与提交等价。
+/// tracer bullet 全链路（票 B2a-T4 AC + B2b-T1 实名操作人）：登录 →
+/// 建项目 → PUT 非法定义 422 + 结构化校验错误清单 → PUT 合法定义
+/// revision=1 → 再存 revision=2 → GET 读回与提交等价。
 #[tokio::test]
 async fn definition_save_read_back_tracer_bullet() {
-    let app = test_app().await;
+    let (app, cookie) = authed_app().await;
 
     // 1. 建项目。
-    let resp = post(
+    let resp = authed_post(
         &app,
+        &cookie,
         "/api/v1/projects",
         r#"{ "name": "demo", "scm_type": "git", "scm_url": "https://example.com/repo", "default_branch": "main" }"#,
     )
@@ -184,7 +164,13 @@ async fn definition_save_read_back_tracer_bullet() {
         }]
     })
     .to_string();
-    let resp = put(&app, "/api/v1/projects/demo/pipelines/build", &invalid).await;
+    let resp = authed_put(
+        &app,
+        &cookie,
+        "/api/v1/projects/demo/pipelines/build",
+        &invalid,
+    )
+    .await;
     assert_eq!(
         resp.status(),
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -213,9 +199,10 @@ async fn definition_save_read_back_tracer_bullet() {
         assert!(e["message"].as_str().is_some_and(|m| !m.is_empty()));
     }
 
-    // 3. PUT 合法定义：revision=1。
-    let resp = put(
+    // 3. PUT 合法定义：revision=1，操作人为登录用户实名（票 B2b-T1）。
+    let resp = authed_put(
         &app,
+        &cookie,
         "/api/v1/projects/demo/pipelines/build",
         &valid_definition(),
     )
@@ -223,12 +210,13 @@ async fn definition_save_read_back_tracer_bullet() {
     assert_eq!(resp.status(), StatusCode::OK, "合法定义应 200");
     let saved = body_json(resp).await;
     assert_eq!(saved["revision"], 1, "首存 revision=1");
-    assert_eq!(saved["operator"], "anonymous", "auth 落地前占位操作人");
+    assert_eq!(saved["operator"], "admin", "操作人为登录用户");
     assert!(saved["updated_at"].as_i64().is_some_and(|t| t > 0));
 
     // 4. 再存：revision=2。
-    let resp = put(
+    let resp = authed_put(
         &app,
+        &cookie,
         "/api/v1/projects/demo/pipelines/build",
         &valid_definition(),
     )
@@ -237,12 +225,12 @@ async fn definition_save_read_back_tracer_bullet() {
     assert_eq!(body_json(resp).await["revision"], 2, "续存 revision=2");
 
     // 5. GET：读回与提交等价（serde 反序列化成 model 类型比对）。
-    let resp = get(&app, "/api/v1/projects/demo/pipelines/build").await;
+    let resp = authed_get(&app, &cookie, "/api/v1/projects/demo/pipelines/build").await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_json_content_type(&resp);
     let body = body_json(resp).await;
     assert_eq!(body["revision"], 2);
-    assert_eq!(body["operator"], "anonymous");
+    assert_eq!(body["operator"], "admin");
     assert!(body["updated_at"].as_i64().is_some_and(|t| t > 0));
     let submitted: Pipeline =
         serde_json::from_str(&valid_definition()).expect("提交定义可反序列化");
@@ -253,13 +241,14 @@ async fn definition_save_read_back_tracer_bullet() {
     assert_eq!(read_back.stages[0].name, "build");
 }
 
-/// projects list / create / get 往返与错误面（票 B2a-T4 AC）。
+/// projects list / create / get 往返与错误面（票 B2a-T4 AC，已认证面）。
 #[tokio::test]
 async fn projects_round_trip() {
-    let app = test_app().await;
+    let (app, cookie) = authed_app().await;
 
-    let resp = post(
+    let resp = authed_post(
         &app,
+        &cookie,
         "/api/v1/projects",
         r#"{ "name": "alpha", "scm_type": "git", "scm_url": "https://example.com/a" }"#,
     )
@@ -271,8 +260,9 @@ async fn projects_round_trip() {
     assert!(alpha["default_branch"].is_null(), "git 默认分支可空");
     assert!(alpha["id"].as_i64().is_some_and(|id| id > 0));
 
-    let resp = post(
+    let resp = authed_post(
         &app,
+        &cookie,
         "/api/v1/projects",
         r#"{ "name": "beta", "scm_type": "svn", "scm_url": "https://svn.example.com/trunk" }"#,
     )
@@ -280,7 +270,7 @@ async fn projects_round_trip() {
     assert_eq!(resp.status(), StatusCode::CREATED);
 
     // list：全量、按名排序。
-    let resp = get(&app, "/api/v1/projects").await;
+    let resp = authed_get(&app, &cookie, "/api/v1/projects").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let list = body_json(resp).await;
     let names: Vec<&str> = list
@@ -292,17 +282,18 @@ async fn projects_round_trip() {
     assert_eq!(names, ["alpha", "beta"]);
 
     // get：字段等价读回；不存在 404 统一形态。
-    let resp = get(&app, "/api/v1/projects/alpha").await;
+    let resp = authed_get(&app, &cookie, "/api/v1/projects/alpha").await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(body_json(resp).await, alpha, "get 与 create 读回等价");
 
-    let resp = get(&app, "/api/v1/projects/nope").await;
+    let resp = authed_get(&app, &cookie, "/api/v1/projects/nope").await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     assert_eq!(body_json(resp).await["code"], "NOT_FOUND");
 
     // 重名 409。
-    let resp = post(
+    let resp = authed_post(
         &app,
+        &cookie,
         "/api/v1/projects",
         r#"{ "name": "alpha", "scm_type": "git", "scm_url": "https://example.com/other" }"#,
     )
@@ -311,8 +302,9 @@ async fn projects_round_trip() {
     assert_eq!(body_json(resp).await["code"], "CONFLICT");
 
     // 输入校验 422：空名 + svn 带默认分支，错误清单整组。
-    let resp = post(
+    let resp = authed_post(
         &app,
+        &cookie,
         "/api/v1/projects",
         r#"{ "name": "  ", "scm_type": "svn", "scm_url": "https://s.example/t", "default_branch": "trunk" }"#,
     )
@@ -324,19 +316,20 @@ async fn projects_round_trip() {
     assert!(errors.len() >= 2, "空名与 svn 分支应都在：{errors:?}");
 
     // 请求体非法 JSON：同样落统一 422 形态。
-    let resp = post(&app, "/api/v1/projects", "{ not json").await;
+    let resp = authed_post(&app, &cookie, "/api/v1/projects", "{ not json").await;
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body_json(resp).await["code"], "VALIDATION_FAILED");
 }
 
-/// pipeline 定义端点的寻径错误面与非法 JSON。
+/// pipeline 定义端点的寻径错误面与非法 JSON（已认证面）。
 #[tokio::test]
 async fn definition_endpoint_error_surface() {
-    let app = test_app().await;
+    let (app, cookie) = authed_app().await;
 
     // 项目不存在：PUT/GET 都 404。
-    let resp = put(
+    let resp = authed_put(
         &app,
+        &cookie,
         "/api/v1/projects/nope/pipelines/build",
         &valid_definition(),
     )
@@ -344,22 +337,24 @@ async fn definition_endpoint_error_surface() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     assert_eq!(body_json(resp).await["code"], "NOT_FOUND");
 
-    let resp = get(&app, "/api/v1/projects/nope/pipelines/build").await;
+    let resp = authed_get(&app, &cookie, "/api/v1/projects/nope/pipelines/build").await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     // 项目在、pipeline 不在：GET 404。
-    post(
+    authed_post(
         &app,
+        &cookie,
         "/api/v1/projects",
         r#"{ "name": "demo", "scm_type": "git", "scm_url": "https://example.com/repo" }"#,
     )
     .await;
-    let resp = get(&app, "/api/v1/projects/demo/pipelines/ghost").await;
+    let resp = authed_get(&app, &cookie, "/api/v1/projects/demo/pipelines/ghost").await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     // 定义 JSON 不合 model 形态（字段类型错）：422 校验形态。
-    let resp = put(
+    let resp = authed_put(
         &app,
+        &cookie,
         "/api/v1/projects/demo/pipelines/build",
         r#"{ "name": 123, "stages": [] }"#,
     )
@@ -368,7 +363,13 @@ async fn definition_endpoint_error_surface() {
     assert_eq!(body_json(resp).await["code"], "VALIDATION_FAILED");
 
     // 完全非 JSON：422 统一形态（不走 axum 默认纯文本拒绝）。
-    let resp = put(&app, "/api/v1/projects/demo/pipelines/build", "not json").await;
+    let resp = authed_put(
+        &app,
+        &cookie,
+        "/api/v1/projects/demo/pipelines/build",
+        "not json",
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_json_content_type(&resp);
     assert_eq!(body_json(resp).await["code"], "VALIDATION_FAILED");

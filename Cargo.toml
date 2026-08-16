@@ -48,6 +48,16 @@ http-body-util = "0.1"
 rust-embed = "8"
 # URL 路径百分号解码（静态资源路径清洗用）
 percent-encoding = "2"
+# 认证（ADR-0014）：argon2id 密码哈希——纯 Rust、交叉编译友好（bcrypt 类
+# C 依赖是 6 目标交叉编译链风险）
+argon2 = "0.5"
+# session id 落库只存 SHA-256（库泄露 ≠ 会话劫持，与 PAT 同纪律）
+sha2 = "0.10"
+# session id 的 base64url 无填充编码（argon2 传递依赖同族，不新增树体积）
+base64ct = "1"
+# argon2 盐与 session id 的 OS 随机源（rand_core 0.6 与 password-hash 同线；
+# 需自带 getrandom feature——password-hash 的再导出未启用它）
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [workspace.lints.rust]
 # unsafe 降为 warn：vendored protoc 的 build.rs 需 set_var（1.97 起为 unsafe），

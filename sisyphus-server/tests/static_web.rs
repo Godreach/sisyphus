@@ -75,7 +75,11 @@ async fn local_override_dir_shadows_embedded_assets() {
     std::fs::create_dir_all(&app.web).unwrap();
 
     // 同名 index.html：SPA 入口被覆盖（含 fallback 场景）。
-    std::fs::write(app.web.join("index.html"), "<!doctype html><p>override-home</p>").unwrap();
+    std::fs::write(
+        app.web.join("index.html"),
+        "<!doctype html><p>override-home</p>",
+    )
+    .unwrap();
     // 嵌套资产：只存在于覆盖目录。
     std::fs::create_dir_all(app.web.join("assets")).unwrap();
     std::fs::write(app.web.join("assets").join("app.js"), "// override-asset").unwrap();
@@ -85,7 +89,10 @@ async fn local_override_dir_shadows_embedded_assets() {
         let resp = get(&app, path).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_text(resp).await;
-        assert!(body.contains("override-home"), "路径 {path} 应被覆盖：{body}");
+        assert!(
+            body.contains("override-home"),
+            "路径 {path} 应被覆盖：{body}"
+        );
         assert!(!body.contains(EMBEDDED_MARKER), "内嵌版本应被压过：{body}");
     }
 

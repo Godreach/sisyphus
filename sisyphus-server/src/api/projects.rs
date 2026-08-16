@@ -1,7 +1,8 @@
 //! 项目端点（票 B2a-T4）：list / create / get。
 //!
 //! update/delete 及其级联语义（pipeline 删除对构建历史的影响）归后续批次
-//! 裁定，不预开端点。B2a 暂无鉴权，auth 批次以统一中间件补。
+//! 裁定，不预开端点。认证由 `/api/v1` 全局中间件统一把关（票 B2b-T1），
+//! 项目级授权（403）随后续批次以端点 extractor 补。
 
 use axum::Json;
 use axum::body::Bytes;

@@ -70,6 +70,16 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, "NOT_FOUND", what, None)
     }
 
+    /// 401：未认证或会话失效（认证中间件全局面统一形态，票 B2b-T1）。
+    pub fn unauthorized() -> Self {
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            "UNAUTHORIZED",
+            "未认证或会话已过期",
+            None,
+        )
+    }
+
     /// 422：输入校验失败，错误清单整组透传（Spec B2a §4）。
     pub fn validation(message: impl Into<String>, issues: Vec<ValidationIssue>) -> Self {
         Self::new(
@@ -94,6 +104,11 @@ impl ApiError {
             "服务内部错误，请稍后重试或查看服务端日志",
             None,
         )
+    }
+
+    /// HTTP 状态码（测试断言用）。
+    pub fn status_code(&self) -> StatusCode {
+        self.status
     }
 }
 

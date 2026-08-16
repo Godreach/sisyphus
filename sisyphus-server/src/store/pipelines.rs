@@ -3,16 +3,13 @@
 //! 保存路径：输入先过 sisyphus-model 校验（单一事实源，schema 不解析定义
 //! 内部）→ 事务内条件更新——按读到的当前 revision 做 `WHERE revision = ?`
 //! 的 UPDATE，未命中即并发写冲突，回滚重试；首存 INSERT revision=1。
-//! 由此并发下 revision 单调不回退、每次保存 +1。操作人 auth 落地前为
-//! 占位标识。
+//! 由此并发下 revision 单调不回退、每次保存 +1。操作人为认证中间件注入的
+//! 登录用户名（票 B2b-T1 起）。
 
 use sisyphus_model::pipeline::{Pipeline, Revision};
 use sqlx::SqlitePool;
 
 use super::{StoreError, is_busy, is_unique_violation, now_ms};
-
-/// auth 批次落地前的占位操作人标识（Spec B2a §4）。
-pub const PLACEHOLDER_OPERATOR: &str = "anonymous";
 
 /// 条件更新冲突的最大重试次数（超出视为持续写竞争，向上报错）。
 const MAX_SAVE_ATTEMPTS: usize = 16;
@@ -53,6 +50,7 @@ impl PipelineRepo {
         project: &str,
         pipeline_name: &str,
         pipeline: &Pipeline,
+        operator: &str,
     ) -> Result<Revision, StoreError> {
         if let Err(errors) = sisyphus_model::validate::validate(pipeline) {
             return Err(StoreError::InvalidDefinition(errors));
@@ -63,7 +61,10 @@ impl PipelineRepo {
         // 事务内条件更新：并发保存未命中即重试，revision 单调不回退。
         let mut last_conflict = None;
         for _ in 0..MAX_SAVE_ATTEMPTS {
-            match self.save_once(project_id, pipeline_name, &definition).await {
+            match self
+                .save_once(project_id, pipeline_name, &definition, operator)
+                .await
+            {
                 Ok(revision) => return Ok(revision),
                 Err(StoreError::Conflict(e)) => last_conflict = Some(e),
                 Err(e) => return Err(e),
@@ -109,6 +110,7 @@ impl PipelineRepo {
         project_id: i64,
         pipeline_name: &str,
         definition: &str,
+        operator: &str,
     ) -> Result<Revision, StoreError> {
         let now = now_ms();
         let mut tx = self.pool.begin().await?;
@@ -130,7 +132,7 @@ impl PipelineRepo {
                 .bind(project_id)
                 .bind(pipeline_name)
                 .bind(definition)
-                .bind(PLACEHOLDER_OPERATOR)
+                .bind(operator)
                 .bind(now)
                 .bind(now)
                 .execute(&mut *tx)
@@ -146,7 +148,7 @@ impl PipelineRepo {
                 )
                 .bind(definition)
                 .bind(next)
-                .bind(PLACEHOLDER_OPERATOR)
+                .bind(operator)
                 .bind(now)
                 .bind(id)
                 .bind(revision)
@@ -179,7 +181,7 @@ impl PipelineRepo {
         tx.commit().await?;
         Ok(Revision {
             number: new_number,
-            operator: PLACEHOLDER_OPERATOR.into(),
+            operator: operator.to_string(),
             at_ms: now,
         })
     }
@@ -337,7 +339,7 @@ mod tests {
         pipeline.stages[0].when = Some("${SISY_WORKSPACE} == \"/x\"".into());
 
         let err = repo
-            .save("demo", "build", &pipeline)
+            .save("demo", "build", &pipeline, "tester")
             .await
             .expect_err("应拒保存");
         let StoreError::InvalidDefinition(errors) = err else {
@@ -361,7 +363,7 @@ mod tests {
     async fn save_to_missing_project_is_not_found() {
         let (_dir, repo) = fixture().await;
         let err = repo
-            .save("nope", "build", &minimal_pipeline())
+            .save("nope", "build", &minimal_pipeline(), "tester")
             .await
             .expect_err("项目不存在应报错");
         assert!(
@@ -375,20 +377,20 @@ mod tests {
         let (_dir, repo) = fixture().await;
 
         let r1 = repo
-            .save("demo", "build", &minimal_pipeline())
+            .save("demo", "build", &minimal_pipeline(), "tester")
             .await
             .expect("首存");
         assert_eq!(r1.number, 1);
-        assert_eq!(r1.operator, PLACEHOLDER_OPERATOR);
+        assert_eq!(r1.operator, "tester", "操作人为调用侧传入的实名");
         assert!(r1.at_ms > 0);
 
         let r2 = repo
-            .save("demo", "build", &minimal_pipeline())
+            .save("demo", "build", &minimal_pipeline(), "tester")
             .await
             .expect("续存");
         assert_eq!(r2.number, 2);
         let r3 = repo
-            .save("demo", "build", &minimal_pipeline())
+            .save("demo", "build", &minimal_pipeline(), "tester")
             .await
             .expect("再存");
         assert_eq!(r3.number, 3);
@@ -400,7 +402,7 @@ mod tests {
             .expect("读取")
             .expect("应存在");
         assert_eq!(stored.revision, 3);
-        assert_eq!(stored.operator, PLACEHOLDER_OPERATOR);
+        assert_eq!(stored.operator, "tester");
         assert!(stored.updated_at >= stored.created_at);
         let back: Pipeline = serde_json::from_str(&stored.definition).expect("定义应可解析");
         assert_eq!(back, minimal_pipeline(), "读回定义与提交等价");
@@ -415,7 +417,7 @@ mod tests {
         let (_dir, repo) = fixture().await;
         let submitted = full_pipeline();
 
-        repo.save("demo", "release", &submitted)
+        repo.save("demo", "release", &submitted, "tester")
             .await
             .expect("保存");
         let stored = repo
@@ -440,7 +442,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let mut pipeline = minimal_pipeline();
                 pipeline.name = format!("build-{i}");
-                repo.save("demo", "build", &pipeline)
+                repo.save("demo", "build", &pipeline, "tester")
                     .await
                     .expect("并发保存应成功")
             }));
