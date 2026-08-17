@@ -1781,6 +1781,357 @@
         }
       }
     },
+    "/api/v1/projects/{name}/pipelines/{pipeline}/triggers": {
+      "get": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "触发器清单（项目 admin 档）：cron / poll 各一，按类型序。",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "触发器清单（cron/poll 各一）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TriggerResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（触发器管理需项目 admin 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "建触发器（项目 admin 档）：cron / poll 各一；同 (pipeline, kind) 已存在 409。",
+        "operationId": "create",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTriggerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "已创建",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（建触发器需项目 admin 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见，或 pipeline 不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "同 (pipeline, kind) 触发器已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（spec 缺失/非法、kind 未知）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}/pipelines/{pipeline}/triggers/{kind}": {
+      "get": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "触发器详情（项目 admin 档）：按 {kind} 取一个。",
+        "operationId": "get_one",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "触发器类型（cron/poll）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "触发器详情",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（需项目 admin 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见，或触发器不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "改触发器（项目 admin 档）：改 spec 与启停。poll 启用重置基线（ADR-0016）。",
+        "operationId": "patch",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "触发器类型（cron/poll）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchTriggerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已更新",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（需项目 admin 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见，或触发器不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（spec 非法、spec 与 kind 不匹配）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{name}/secrets": {
       "get": {
         "tags": [
@@ -2773,6 +3124,48 @@
           }
         }
       },
+      "CreateTriggerRequest": {
+        "type": "object",
+        "description": "建触发器请求体：`kind` 选 cron / poll；spec 按 kind 给（不匹配者忽略）。",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "cron": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CronSpecDto",
+                "description": "cron spec（kind=cron 时必填）。"
+              }
+            ]
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "启停（缺省 true：创建即启用，首探记基线不触发）。"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TriggerKindDto",
+            "description": "触发器类型。"
+          },
+          "poll": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PollSpecInputDto",
+                "description": "poll spec（kind=poll 时必填；`interval_minutes` 缺省取 config 默认）。"
+              }
+            ]
+          }
+        }
+      },
       "CreateUserRequest": {
         "type": "object",
         "description": "建号请求体（全局 admin）。",
@@ -2874,6 +3267,19 @@
           "username": {
             "type": "string",
             "description": "用户名。"
+          }
+        }
+      },
+      "CronSpecDto": {
+        "type": "object",
+        "description": "cron spec（输入 / 输出同型：5 字段表达式）。",
+        "required": [
+          "expr"
+        ],
+        "properties": {
+          "expr": {
+            "type": "string",
+            "description": "5 字段 cron 表达式（`分 时 日 月 周`，标准 Unix/CI 形态）。"
           }
         }
       },
@@ -3132,6 +3538,41 @@
           }
         }
       },
+      "PatchTriggerRequest": {
+        "type": "object",
+        "description": "改触发器请求体：字段均可选，只更新出现者；spec 必须匹配路径 `{kind}`。",
+        "properties": {
+          "cron": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CronSpecDto",
+                "description": "cron spec（路径 kind=cron 时生效；kind=poll 时给则 422）。"
+              }
+            ]
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "启停。poll 启用（false→true）重置基线（ADR-0016）。"
+          },
+          "poll": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PollSpecInputDto",
+                "description": "poll spec（路径 kind=poll 时生效；kind=cron 时给则 422）。"
+              }
+            ]
+          }
+        }
+      },
       "PatchUserRequest": {
         "type": "object",
         "description": "禁用/启用请求体（全局 admin）。",
@@ -3177,6 +3618,20 @@
             "type": "integer",
             "format": "int64",
             "description": "最后保存时间（Unix 毫秒）。"
+          }
+        }
+      },
+      "PollSpecInputDto": {
+        "type": "object",
+        "description": "poll spec 输入：`interval_minutes` 缺省取 config `[triggers] poll_interval_minutes`。",
+        "properties": {
+          "interval_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "轮询节奏（分钟，>= 1；缺省取 config 默认 5 分钟）。"
           }
         }
       },
@@ -3428,6 +3883,70 @@
           }
         }
       },
+      "TriggerKindDto": {
+        "type": "string",
+        "description": "触发器类型（cron / poll；manual 不建行）。",
+        "enum": [
+          "cron",
+          "poll"
+        ]
+      },
+      "TriggerResponse": {
+        "type": "object",
+        "description": "触发器响应：配置 + 探测/基线状态（触发历史经 builds 行呈现，不在此回）。",
+        "required": [
+          "kind",
+          "spec",
+          "enabled",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "baseline_commit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "poll 基线 commit（创建/启用时记、不触发；cron 恒空）。"
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "创建时间（Unix 毫秒）。"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "启停。"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TriggerKindDto",
+            "description": "触发器类型。"
+          },
+          "last_probe_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "最近探测/命中时间（Unix 毫秒；cron 为最近命中点）。"
+          },
+          "last_probe_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "最近探测/触发失败（失败记入、按节奏重试、不自动禁用）。"
+          },
+          "spec": {
+            "description": "配置（`{\"expr\":\"...\"}` / `{\"interval_minutes\":N}`，落库原文）。"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "最后更新时间（Unix 毫秒）。"
+          }
+        }
+      },
       "TriggerSourceDto": {
         "type": "string",
         "description": "构建触发源（手动/cron/poll）。",
@@ -3547,6 +4066,10 @@
     {
       "name": "builds",
       "description": "构建生命周期（票 B2c-T5：手动触发 / 取消 / 重跑 / 列表 / 详情；runner 档触发/取消/重跑、viewer 档列表/详情）"
+    },
+    {
+      "name": "triggers",
+      "description": "触发器管理（票 B2c-T6，ADR-0016：cron / poll 触发源 CRUD；项目 admin 档——列/建/改配置与启停；触发历史经 builds 行呈现）"
     },
     {
       "name": "users",

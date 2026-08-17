@@ -39,6 +39,8 @@ sha2.workspace = true
 base64ct.workspace = true
 rand_core.workspace = true
 chacha20poly1305.workspace = true
+cron.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

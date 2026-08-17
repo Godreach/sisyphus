@@ -18,6 +18,10 @@ pub const DEFAULT_REGISTRATION_ENABLED: bool = false;
 /// orphan 宽限默认值（分钟，ADR-0008：Agent 离线后运行中任务 unknown 宽限
 /// 超时判失败；默认 10 分钟，config `[scheduler]` 可覆盖）。
 pub const DEFAULT_ORPHAN_GRACE_MINUTES: i64 = 10;
+/// poll 触发器轮询节奏默认值（分钟，ADR-0016 票 #14 已定：项目级默认 5
+/// 分钟）。新建 poll 触发器未显式给节奏时取此默认值，进触发器 spec；config
+/// `[triggers]` 可覆盖。
+pub const DEFAULT_POLL_INTERVAL_MINUTES: i64 = 5;
 
 /// 数据目录内的配置文件名。
 pub const CONFIG_FILE_NAME: &str = "config.toml";
@@ -65,6 +69,9 @@ pub struct Config {
     /// orphan 宽限分钟（ADR-0008：Agent 离线后运行中任务 unknown 的宽限；
     /// 默认 10 分钟）。
     pub orphan_grace_minutes: i64,
+    /// poll 触发器轮询节奏默认分钟（ADR-0016：项目级默认 5 分钟；新建 poll
+    /// 触发器未显式给节奏时取此值，进触发器 spec）。
+    pub poll_interval_minutes: i64,
 }
 
 /// 同一形态的覆盖层：CLI flag 与 `SISYPHUS_` 环境变量都归约为它。
@@ -100,6 +107,9 @@ pub struct FileConfig {
     /// `[scheduler]` 段（ADR-0008：调度时间语义）。
     #[serde(default)]
     pub scheduler: SchedulerFile,
+    /// `[triggers]` 段（ADR-0016：触发器节奏默认）。
+    #[serde(default)]
+    pub triggers: TriggersFile,
 }
 
 /// `[server]` 段。
@@ -140,6 +150,16 @@ pub struct SchedulerFile {
     /// orphan 宽限分钟（Agent 离线后运行中任务 unknown 的宽限，超时判失败；
     /// 默认 10 分钟）。
     pub orphan_grace_minutes: Option<i64>,
+}
+
+/// `[triggers]` 段（ADR-0016，票 B2c-T6：触发器节奏默认；新建触发器未显式
+/// 给值时取此）。无 CLI/env 覆盖层——节奏是触发器级配置的默认底，非
+/// 运行时调度旋钮。
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggersFile {
+    /// poll 触发器轮询节奏默认分钟（项目级默认 5 分钟，ADR-0016 票 #14）。
+    pub poll_interval_minutes: Option<i64>,
 }
 
 /// 配置加载/合并错误。
@@ -209,6 +229,11 @@ registration_enabled = false
 # orphan 宽限分钟（Agent 离线后运行中任务 unknown 的宽限，超时未恢复判失败，ADR-0008；
 # 默认 10 分钟）
 orphan_grace_minutes = 10
+
+[triggers]
+# poll 触发器轮询节奏默认分钟（项目级默认 5 分钟，ADR-0016）：新建 poll 触发器
+# 未显式给节奏时取此值，进触发器 spec；cron 触发器按各自表达式节奏，不取此值。
+poll_interval_minutes = 5
 "#
 }
 
@@ -331,6 +356,15 @@ pub fn merge(
         .unwrap_or(DEFAULT_ORPHAN_GRACE_MINUTES)
         .max(0);
 
+    // poll 节奏默认分钟：文件层可配，无 CLI/env 覆盖层（默认 5，ADR-0016
+    // 票 #14）。负值/0 按 1 处理（最少 1 分钟——调用侧 max(1) 收口，
+    // 0 分钟轮询会忙轮，无意义）。
+    let poll_interval_minutes = file
+        .triggers
+        .poll_interval_minutes
+        .unwrap_or(DEFAULT_POLL_INTERVAL_MINUTES)
+        .max(1);
+
     Ok(Config {
         data_dir,
         rest_addr,
@@ -340,6 +374,7 @@ pub fn merge(
         registration_enabled,
         master_key_path,
         orphan_grace_minutes,
+        poll_interval_minutes,
     })
 }
 
@@ -394,6 +429,10 @@ mod tests {
             cfg.orphan_grace_minutes, DEFAULT_ORPHAN_GRACE_MINUTES,
             "orphan 宽限默认 10 分钟（ADR-0008）"
         );
+        assert_eq!(
+            cfg.poll_interval_minutes, DEFAULT_POLL_INTERVAL_MINUTES,
+            "poll 节奏默认 5 分钟（ADR-0016）"
+        );
     }
 
     #[test]
@@ -425,6 +464,7 @@ mod tests {
                 master_key_path: Some("/vol/file.key".into()),
             },
             scheduler: SchedulerFile::default(),
+            triggers: TriggersFile::default(),
         };
 
         let cfg = merge(PathBuf::from("/tmp/data"), &cli, &env, &file)
@@ -573,6 +613,10 @@ mod tests {
             cfg.orphan_grace_minutes, DEFAULT_ORPHAN_GRACE_MINUTES,
             "样例值与内置默认一致（orphan 宽限）"
         );
+        assert_eq!(
+            cfg.poll_interval_minutes, DEFAULT_POLL_INTERVAL_MINUTES,
+            "样例值与内置默认一致（poll 节奏）"
+        );
 
         // 带注释：样例要能当作文档读。
         assert!(sample_toml().lines().any(|l| l.trim_start().starts_with('#')));
@@ -616,6 +660,63 @@ mod tests {
         // 未知字段拒绝（deny_unknown_fields）。
         assert!(matches!(
             parse_toml("[scheduler]\norphan_grace = 5\n"),
+            Err(ConfigError::InvalidToml(_))
+        ));
+    }
+
+    /// 票 B2c-T6：`[triggers] poll_interval_minutes` 文件层可配；负值/0 按 1
+    /// 处理（最少 1 分钟——0 分钟会忙轮，无意义）；未知字段拒绝。
+    #[test]
+    fn triggers_poll_interval_merges_from_file_and_clamps_non_positive() {
+        let file = FileConfig {
+            triggers: TriggersFile {
+                poll_interval_minutes: Some(15),
+            },
+            ..FileConfig::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file,
+        )
+        .expect("文件层 poll 节奏");
+        assert_eq!(cfg.poll_interval_minutes, 15);
+
+        // 负值/0 按 1（调用侧 max(1) 收口——0 分钟轮询会忙轮）。
+        let file_zero = FileConfig {
+            triggers: TriggersFile {
+                poll_interval_minutes: Some(0),
+            },
+            ..FileConfig::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file_zero,
+        )
+        .expect("0 按 1");
+        assert_eq!(cfg.poll_interval_minutes, 1);
+
+        let file_neg = FileConfig {
+            triggers: TriggersFile {
+                poll_interval_minutes: Some(-3),
+            },
+            ..FileConfig::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file_neg,
+        )
+        .expect("负值按 1");
+        assert_eq!(cfg.poll_interval_minutes, 1);
+
+        // 未知字段拒绝（deny_unknown_fields）。
+        assert!(matches!(
+            parse_toml("[triggers]\npoll_cadence = 5\n"),
             Err(ConfigError::InvalidToml(_))
         ));
     }

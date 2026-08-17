@@ -198,6 +198,23 @@ impl TriggerRepo {
         Ok(result.rows_affected() > 0)
     }
 
+    /// 重置 poll 基线与探测历史：清空 `baseline_commit` / `last_probe_at` /
+    /// `last_probe_error`（全置 NULL）。启用触发器时调用（ADR-0016「启用时记
+    /// 基线不触发」：下次探测见 baseline 缺失 → 记当前 head 作基线、不触发；
+    /// 禁用期间落地的提交随基线一并吸收、不补触发）。返回 false 表示触发器
+    /// 不存在。
+    pub async fn reset_baseline(&self, id: i64) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE triggers SET baseline_commit = NULL, last_probe_at = NULL,
+             last_probe_error = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(now_ms())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// 某项目 pipeline 的触发器清单（cron/poll 各一；按类型排序输出稳定）。
     pub async fn list_by_pipeline(
         &self,
@@ -488,6 +505,36 @@ mod tests {
             .expect("再探测"));
         let row = repo.get(poll.id).await.expect("查").expect("应存在");
         assert!(row.last_probe_error.is_none());
+    }
+
+    /// 票 B2c-T6：启用 poll 触发器时重置基线与探测历史——下次探测见
+    /// baseline 缺失即记当前 head 作基线、不触发（ADR-0016「启用时记基线
+    /// 不触发」），禁用期间落地的提交随基线一并吸收。
+    #[tokio::test]
+    async fn reset_baseline_clears_baseline_and_probe_history() {
+        let (_dir, pool, project_id) = fixture().await;
+        let repo = TriggerRepo::new(pool.clone());
+        let poll = repo
+            .create(input(project_id, TriggerKind::Poll))
+            .await
+            .expect("建 poll");
+        repo.record_baseline(poll.id, "abc123", 1_000)
+            .await
+            .expect("记基线");
+        repo.record_probe(poll.id, 2_000, Some("探测失败"))
+            .await
+            .expect("记失败历史");
+
+        // 重置：基线、探测时间、错误全清。
+        assert!(repo.reset_baseline(poll.id).await.expect("重置"));
+        let row = repo.get(poll.id).await.expect("查").expect("应存在");
+        assert_eq!(row.baseline_commit, None, "基线清空");
+        assert_eq!(row.last_probe_at, None, "探测时间清空");
+        assert_eq!(row.last_probe_error, None, "错误清空");
+        assert!(row.enabled, "启停不动");
+
+        // 不存在：false。
+        assert!(!repo.reset_baseline(poll.id + 999).await.expect("重置"));
     }
 
     #[tokio::test]

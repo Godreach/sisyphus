@@ -35,6 +35,7 @@ pub mod policy;
 pub mod projects;
 pub mod secrets;
 pub mod tokens;
+pub mod triggers;
 pub mod users;
 
 mod web;
@@ -64,6 +65,7 @@ use crate::store::projects::ProjectRepo;
 use crate::store::secrets::SecretRepo;
 use crate::store::sessions::SessionRepo;
 use crate::store::tokens::PatRepo;
+use crate::store::triggers::TriggerRepo;
 use crate::store::users::UserRepo;
 
 /// REST 层共享状态：repo 组合注入（池在 [`AppState::new`] 处消费一次后
@@ -90,6 +92,9 @@ pub struct AppState {
     /// Agent 注册面 repo（票 B2c-T3：建条目/启停/编辑/在线维护/标签匹配；
     /// REST 面与 gRPC 通道认证面共用）。
     pub agents: AgentRepo,
+    /// 触发器 repo（票 B2c-T6，ADR-0016：cron/poll 触发源 CRUD + 基线/探测
+    /// 历史；REST 面 CRUD 消费，trigger 引擎后台扫表消费）。
+    pub triggers: TriggerRepo,
     /// 审计日志 repo（票 B2b-T7，ADR-0015：只增 + 过滤回放，全局 admin
     /// 查询端点消费；各端点安全事件接线处写入）。
     pub audit: AuditRepo,
@@ -108,14 +113,24 @@ pub struct AppState {
     /// 用户自注册开关（config `[auth] registration_enabled`，默认关；
     /// register 端点的门，票 B2b-T4）。
     pub registration_enabled: bool,
+    /// poll 触发器轮询节奏默认分钟（config `[triggers] poll_interval_minutes`，
+    /// 默认 5，ADR-0016）：新建 poll 触发器未显式给节奏时取此值，进触发器
+    /// spec（票 B2c-T6）。
+    pub poll_interval_minutes: i64,
 }
 
 impl AppState {
     /// 由连接池装配（组合根：开池+迁移在 [`crate::store::bootstrap`]）。
     /// `registration_enabled` 来自合并后的启动配置（CLI > env > toml >
     /// 默认，ADR-0010）；`master_key` 为机密加密主密钥（ADR-0015，票
-    /// B2b-T6：启动路径已生成/读回密钥文件）。
-    pub fn new(pool: SqlitePool, registration_enabled: bool, master_key: MasterKey) -> Self {
+    /// B2b-T6：启动路径已生成/读回密钥文件）；`poll_interval_minutes` 为
+    /// poll 触发器节奏默认（ADR-0016，票 B2c-T6）。
+    pub fn new(
+        pool: SqlitePool,
+        registration_enabled: bool,
+        master_key: MasterKey,
+        poll_interval_minutes: i64,
+    ) -> Self {
         let bus = EventBus::new();
         Self {
             pool: pool.clone(),
@@ -127,12 +142,14 @@ impl AppState {
             members: MemberRepo::new(pool.clone()),
             secrets: SecretRepo::new(pool.clone()),
             agents: AgentRepo::new(pool.clone()),
+            triggers: TriggerRepo::new(pool.clone()),
             audit: AuditRepo::new(pool.clone()),
             engine: Engine::new(pool.clone(), master_key, bus.clone()),
             bus,
             master_key,
             login_limiter: LoginRateLimiter::new(),
             registration_enabled,
+            poll_interval_minutes,
         }
     }
 }
@@ -195,6 +212,14 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route(
             "/projects/{name}/pipelines/{pipeline}/builds/{number}/rerun",
             post(builds::rerun),
+        )
+        .route(
+            "/projects/{name}/pipelines/{pipeline}/triggers",
+            get(triggers::list).post(triggers::create),
+        )
+        .route(
+            "/projects/{name}/pipelines/{pipeline}/triggers/{kind}",
+            get(triggers::get_one).patch(triggers::patch),
         )
         .route("/audit", get(audit::list))
         .route("/agents", get(agents::list).post(agents::create))

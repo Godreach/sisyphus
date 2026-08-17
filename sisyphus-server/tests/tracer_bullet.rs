@@ -1,7 +1,7 @@
 //! Spec B2b tracer bullet 全链路（票 B2b-T7 AC，Router 缝）：空库首启 →
 //! setup wizard 建全局 admin → 登录换 cookie → 建普通用户并分配项目角色 →
 //! 三档矩阵（viewer/runner/admin 在定义保存端点上 403/403/200）→ PAT 创建
-//! + Bearer 调用 → 跨源 POST 被 CSRF 拒 → 连续失败登录触发限流 → 禁用用户
+//! 与 Bearer 调用 → 跨源 POST 被 CSRF 拒 → 连续失败登录触发限流 → 禁用用户
 //! 即刻踢线 → 项目 admin 写入机密（密文落库、永不可读）→ 审计页回放全程。
 //!
 //! 一条测试走完 B2b 的每一块服务端面，只断言 HTTP 状态码与 JSON 形态 +

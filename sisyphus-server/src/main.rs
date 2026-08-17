@@ -93,7 +93,12 @@ async fn main() {
     };
     // REST 组合根（B2a-T4）：池注入 repo，端点面见 api::router；注册开关
     // 随配置注入（票 B2b-T4）、主密钥随配置注入（票 B2b-T6）。
-    let state = api::AppState::new(pool.clone(), config.registration_enabled, master_key);
+    let state = api::AppState::new(
+        pool.clone(),
+        config.registration_enabled,
+        master_key,
+        config.poll_interval_minutes,
+    );
     // 静态资源本地覆盖目录（B2a-T5）：数据目录 web/ 子目录，不存在即纯内嵌。
     let web_override_dir = config.data_dir.join(sisyphus_server::config::WEB_DIR);
 
@@ -120,6 +125,20 @@ async fn main() {
     });
     // 构建终态通知钩子（票 #46 留位；notify 批次在此接 SMTP 发送）。
     let _notifier = sisyphus_server::notify::spawn_notifier(state.bus.clone());
+
+    // 触发器装配（票 B2c-T6，ADR-0016）：触发引擎共享 engine + 事件总线，
+    // 后台周期扫表（cron 按表达式命中触发、poll 按节奏轮询）。探测经 scm
+    // trait 缝隔离——本批挂 [`scm::UnimplementedProbe`]（poll 记
+    // last_probe_error、按节奏重试，真实 git/svn 探测随 scm 批次换入），
+    // cron 不经探测照常工作。与 server 进程同生命周期（单实例纪律）。
+    let trigger_engine = sisyphus_server::trigger::TriggerEngine::new(
+        state.engine.clone(),
+        pool.clone(),
+        Arc::new(sisyphus_server::scm::UnimplementedProbe) as Arc<dyn sisyphus_server::scm::ScmProbe>,
+    );
+    let trigger_task = tokio::spawn(async move {
+        trigger_engine.run(sisyphus_server::trigger::TRIGGER_LOOP_INTERVAL).await;
+    });
 
     // 双端口先绑定再 serve（ADR-0005 端口合并策略推迟，各自独立监听）：
     // 任一端口被占即启动失败，不带病运行半个服务。
@@ -174,6 +193,7 @@ async fn main() {
     }
     sweep.abort();
     sched_task.abort();
+    trigger_task.abort();
 }
 
 /// tracing 基础初始化（ADR-0019）：RUST_LOG 整体胜出，否则用配置级别

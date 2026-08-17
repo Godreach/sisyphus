@@ -51,7 +51,7 @@ async fn harness() -> Harness {
         &dir.path().join(sisyphus_server::config::MASTER_KEY_FILE_NAME),
     )
     .expect("测试主密钥");
-    let state = api::AppState::new(pool, false, master_key);
+    let state = api::AppState::new(pool, false, master_key, sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES);
     Harness { _dir: dir, state }
 }
 

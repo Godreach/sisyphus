@@ -14,6 +14,7 @@ use super::pipelines;
 use super::projects;
 use super::secrets;
 use super::tokens;
+use super::triggers;
 use super::users;
 
 /// Server REST API 契约。
@@ -55,6 +56,10 @@ use super::users;
         builds::rerun,
         builds::list,
         builds::detail,
+        triggers::list,
+        triggers::create,
+        triggers::get_one,
+        triggers::patch,
         users::list,
         users::create,
         users::patch,
@@ -99,6 +104,12 @@ use super::users;
         builds::TriggerSourceDto,
         builds::JobStatusDto,
         builds::RerunModeDto,
+        triggers::TriggerKindDto,
+        triggers::CronSpecDto,
+        triggers::PollSpecInputDto,
+        triggers::CreateTriggerRequest,
+        triggers::PatchTriggerRequest,
+        triggers::TriggerResponse,
         users::UserResponse,
         users::CreateUserRequest,
         users::PatchUserRequest,
@@ -119,6 +130,7 @@ use super::users;
         (name = "secrets", description = "项目机密（票 B2b-T6：值只写不读——建/覆写、仅名清单、删；viewer/runner 连名不可见，项目 admin 档）"),
         (name = "pipelines", description = "Pipeline 定义读写（model 校验 + revision 语义）"),
         (name = "builds", description = "构建生命周期（票 B2c-T5：手动触发 / 取消 / 重跑 / 列表 / 详情；runner 档触发/取消/重跑、viewer 档列表/详情）"),
+        (name = "triggers", description = "触发器管理（票 B2c-T6，ADR-0016：cron / poll 触发源 CRUD；项目 admin 档——列/建/改配置与启停；触发历史经 builds 行呈现）"),
         (name = "users", description = "用户管理（全局 admin：建/列/禁用/重置，票 B2b-T4）与用户目录（项目 admin 的最小只读清单，票 B2b-T5）"),
         (name = "audit", description = "审计回放（票 B2b-T7：安全事件只增记账，仅全局 admin 可查询——按时间/用户/项目/事件类型过滤 + 分页）"),
         (name = "agents", description = "Agent 注册面（票 B2c-T3：建条目/启停/编辑/详情——全局 admin 专属；token 与注册码明文仅在创建响应出现一次）"),

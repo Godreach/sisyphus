@@ -77,7 +77,12 @@ pub async fn test_app_at_with(data_dir: &Path, registration_enabled: bool) -> Te
         &data_dir.join(sisyphus_server::config::MASTER_KEY_FILE_NAME),
     )
     .expect("测试主密钥");
-    let state = AppState::new(pool.clone(), registration_enabled, master_key);
+    let state = AppState::new(
+        pool.clone(),
+        registration_enabled,
+        master_key,
+        sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES,
+    );
     TestApp {
         router: router(state.clone(), web.clone()),
         state,

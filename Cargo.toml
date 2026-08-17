@@ -61,6 +61,14 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # 机密值加密（ADR-0015）：XChaCha20-Poly1305——纯 Rust、无 AES 硬件依赖、
 # 192 位随机 nonce 免 nonce 管理重用风险（RustCrypto 系，与 argon2 同族）
 chacha20poly1305 = "0.10"
+# cron 定时触发（票 B2c-T6，ADR-0016）：cron 表达式解析/匹配，纯 Rust。
+# 依赖 chrono（clock feature，纯 Rust 跨编译友好），trigger 模块用于
+# 「表达式按节奏扫表」的下次/上次命中求值。
+cron = "0.17"
+# 日期时间（cron 的传递依赖；trigger 模块直接消费——Unix 毫秒 ↔ DateTime
+# 转换、cron 命中点迭代）。default-features=false + clock 与 cron 同线
+# （共享同一 chrono），避免引入第二份。
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [workspace.lints.rust]
 # unsafe 降为 warn：vendored protoc 的 build.rs 需 set_var（1.97 起为 unsafe），

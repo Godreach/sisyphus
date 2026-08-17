@@ -59,7 +59,7 @@ async fn harness() -> Harness {
             .join(sisyphus_server::config::MASTER_KEY_FILE_NAME),
     )
     .expect("测试主密钥");
-    let state = api::AppState::new(pool.clone(), false, master_key);
+    let state = api::AppState::new(pool.clone(), false, master_key, sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES);
 
     let sessions = Arc::new(grpc::SessionRegistry::new());
     let dispatcher = Arc::new(grpc::GrpcDispatcher::new(sessions.clone()));

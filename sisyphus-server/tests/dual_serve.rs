@@ -22,7 +22,7 @@ async fn rest_and_grpc_serve_side_by_side() {
         &dir.path().join(sisyphus_server::config::MASTER_KEY_FILE_NAME),
     )
     .expect("测试主密钥");
-    let state = api::AppState::new(pool, false, master_key);
+    let state = api::AppState::new(pool, false, master_key, sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES);
     let web_override_dir = dir.path().join(sisyphus_server::config::WEB_DIR);
 
     // 建一个 Agent 条目（票 #47 起通道认证 Bearer sisa_ token）：握手
