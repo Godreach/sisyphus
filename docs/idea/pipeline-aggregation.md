@@ -1,79 +1,106 @@
 # Pipeline 聚合式编排设计构想
 
+状态：构想（未定案）
+日期：2026-08-18
+涉及 ADR：与 ADR-0006（Pipeline 数据模型与执行语义）相关，本构想是对其"定义只存 Server 端、阶段按序、无任务级 DAG"语义的**上层扩展**，不推翻 v1 基础模型，见文末「与现状的对齐」。
+现状：v1 骨架开发中（B1~B3 冲刺）。本构想**不进入当前冲刺实现**，待 v1 骨架收口后单独立项。
+
 ## 核心思想
 
-Pipeline 是一种聚合形式，而非单体脚本。每个步骤都可独立执行，实际构建运行的是编排好的 pipeline 变体。
+Pipeline 是**聚合（aggregation）形式**而非单体脚本：一次实际构建运行的是「从可复用的编排单元中选取、排序、叠加条件」得出的**变体（variant）**，而不是每次从零手写一条流程。
 
-## 层次结构
+## 痛点拆解：复用分两个轴
+
+大多数 CI 平台的用法是「新建 pipeline → 在内部逐 step 编排」。"不同的流程"意味着反复执行同一个编排动作，重复出现在两个地方，必须分开看：
+
+1. **step 本体复用（内容轴）**——"怎么编译这个项目"这段逻辑，被多条流水线共用。
+2. **编排复用（flow 轴）**——"PR 校验 / 发布"这种 step 的排列组合，被反复拿来改改就用。
+
+> 用户描述的原话是「反复去设置 step 流程」，这是 **flow 轴的重复**。任何只解决 step 本体复用的设计（如全局 step 池）都不充分——见下。
+
+## 候选方案对比
+
+### 方案 A：全局 step 池（必要不充分）
+
+所有 step 放进一个全局池，pipeline 变体从池中取 step 编排。
+
+- 复用的是 **step 本体**，flow 轴的排列组合仍然每个 pipeline 各做一遍——痛点原样还在。
+- 全局池有治理成本：无命名空间、无版本、无废弃机制，谁改了池内 step 影响面不可知，最终沦为共享盘式的 `final_v2` 垃圾场。
+- 结论：池子本身有价值，但**只作为共享单元的管理机制**存在，不能单独回答"编排复用"。
+
+### 方案 B：复制 + 继承（方向对，语义要精修）
+
+新建 pipeline 仍走「新建 → 编排 step」流程，但**支持从既有 pipeline 复制出变体**，step 支持「同用 / 重写」：
+
+- **未覆盖的项自动跟随基线更新**——这是真正想要的价值。
+- 危险点：如果"覆盖就永久冻结、基线更新静默跳过它"，系统半年后会退化为"没人知道哪条变体的哪个 step 是旧逻辑、敢不敢改基线"——OOP 继承 / Helm values / Git 子模块翻车过无数次的**继承腐坏**。
+- 结论：方向正确，但"覆盖"的语义必须从"静默漂移"改成"受管分歧"。
+
+## 建议骨架：方案 B 为主，方案 A 作为其底层实现
+
+### 复用单元定界：job/阶段 粒度
+
+现有领域模型中 step 是 job 内最小执行单元（shell / checkout），粒度太细、与产物/环境强绑定，直接复用易碎。真正值得复用、且能对上混合式编辑器的是 **job / 阶段这一层**（带 env、labels、when、超时、重试、产物上传/下载依赖）。复用单元定在这一层，不与现有词汇冲突。
+
+### 变体 = 基准引用 + 显式差异
+
+**变体（variant）**不是定义的一份自由拷贝，而是：
+
+1. **基准引用**：记录「基准 pipeline + 基准 revision」（沿用 ADR-0006 已定的 revision 机制，天然可用）。
+2. **显式差异面**，收窄为三类声明式差异：
+   - **选择**：本次变体带哪些子流程（对应"PR 构建 = 编译 + 单测" vs "发布构建 = 编译 + 全量测试 + 部署"）。
+   - **参数绑定**：只声明变化点取值，不改逻辑（如目标分支、构建档位）。
+   - **局部覆盖**：copy-on-write，逐条记录 `谁、何时、针对哪个基准 revision`。
+3. **传播语义（受管分歧）**：
+   - 共享项**自动跟随基线**（用户要的价值）。
+   - 覆盖项在基线上对应项也被改动时，**显式标出**："你覆盖的项基线上已更新，diff 在此，保留 or 采纳"——绝不清零、绝不静默合并，把静默漂移变成受管分歧。
+4. **跟随 latest 默认开 + 可 pin**：日常跟随最新，发布冻结时钉住某基准 revision。
+
+方案 A 的池子没有消失：共享单元（step/job）走池子的治理（命名、版本、废弃），编排复用走变体层——**两层各归其位**。
+
+## 层次结构（保留原构想的三层）
 
 ```
-Pipeline (变体)
-  └─ Sub-pipeline (逻辑阶段)
-       └─ Step (原子可执行单元)
+Pipeline variant（变体：基准 + 差异）
+  └─ Sub-pipeline（逻辑阶段：编译 / 测试 / 部署 / 通知）
+       └─ Step（原子可执行单元，可被多条 sub-pipeline 复用）
 ```
 
-### Step（原子单元）
-- 最小粒度的可执行单元
-- 独立可执行、可测试、可复用
-- 定义自己的输入/输出、超时、重试策略
-- 同一个 step 可以出现在多个 sub-pipeline 中
-
-### Sub-pipeline（逻辑阶段）
-- 按业务语义组织 step 的聚合体
-- 例如："编译"、"测试"、"部署"、"通知"
-- 内部 step 之间可以有串行/并行/条件依赖关系
-- sub-pipeline 本身也可以嵌套组合
-
-### Pipeline variant（变体）
-- 一次实际构建执行的编排实例
-- 从可用的 sub-pipeline 中选取并排序
-- 可以叠加条件：when 表达式、fail-fast 策略
-- 同一套 step/sub-pipeline 可以编排出多个变体
-  - 例如：PR 构建（编译+单测）vs 发布构建（编译+全量测试+部署）
-
-## 配置形式设想
+## 配置形式设想（示意，非定稿）
 
 ```yaml
-# step 定义
+# step 定义（池中共享单元）
 steps:
-  checkout:
-    kind: shell
-    script: "git clone {{ .repo }} ."
-  build:
-    kind: shell
-    script: "cargo build --release"
-  unit-test:
-    kind: shell
-    script: "cargo test --lib"
-  deploy:
-    kind: shell
-    script: "helm upgrade --install ..."
+  checkout:  { kind: shell, script: "git clone {{ .repo }} ." }
+  build:     { kind: shell, script: "cargo build --release" }
+  unit-test: { kind: shell, script: "cargo test --lib" }
+  deploy:    { kind: shell, script: "helm upgrade --install ..." }
 
 # sub-pipeline 组合
 sub-pipelines:
-  compile:
-    steps: [checkout, build]
-  test:
-    steps: [unit-test]
-    needs: compile
-  release:
-    steps: [deploy]
-    needs: [compile, test]
+  compile: { steps: [checkout, build] }
+  test:    { steps: [unit-test], needs: compile }
+  release: { steps: [deploy], needs: [compile, test] }
 
 # pipeline 变体
 pipelines:
-  pr-check:
-    stages: [compile, test]
-    fail-fast: true
-  release:
-    stages: [compile, test, release]
-    fail-fast: false
+  pr-check:  { stages: [compile, test], fail-fast: true }
+  release:   { stages: [compile, test, release], fail-fast: false }
 ```
 
-## 待思考
+> 注意：以上 yaml 仅用于表达模型。v1 已定「定义只存 Server 端数据库、repo 内无配置文件」（ADR-0006 / ADR-0001），若落地仍走 web UI 编辑 + Server 存储，yaml 只是等价序列化形式。
 
-- [ ] step 的幂等性保证
-- [ ] sub-pipeline 之间的产物传递（artifact flow）
-- [ ] 条件执行的表达式语言（when 求值）
-- [ ] step 版本管理与向后兼容
-- [ ] 与现有 trigger / agent 模型的衔接
+## 与现状的对齐 / 冲突
+
+- **复用单元上移**：把可复用对象从"step"上移到"job/阶段"，与 CONTEXT.md 词汇兼容，不发明与现状冲突的新词。
+- **无 DAG 约束**：ADR-0006 明确 v1 无任务级 DAG、阶段按序、阶段内并行。变体模型是**叠在其上的选择/组合层**，不要求 DAG；sub-pipeline 内部的串/并行关系仍受此约束。若未来要 sub-pipeline 级 `needs` 依赖，需单独立项评估（v2 候选）。
+- **继承腐坏护栏**：变体的"覆盖"必须走受管分歧（显式 diff + 保留/采纳），禁止静默合并——这是本构想的硬约束，实施时不可为了省事而放开。
+
+## 待思考（v1 后立项时逐项决策）
+
+- [ ] 变体的差异面是否足够窄（选择 / 参数绑定 / 局部覆盖三类是否覆盖真实场景）
+- [ ] 覆盖项的 diff 呈现与"保留 / 采纳"交互（web UI）
+- [ ] 池中共享单元的命名空间 / 版本 / 废弃机制
+- [ ] 与现有 trigger（cron/poll）在变体上的组合语义
+- [ ] 变体与构建快照、从失败任务重跑的衔接（变体上重跑意味着什么）
+- [ ] 若引入 sub-pipeline 级依赖，与 ADR-0006"无 DAG"的边界如何划定
