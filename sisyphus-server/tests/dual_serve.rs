@@ -38,6 +38,7 @@ async fn rest_and_grpc_serve_side_by_side() {
             custom_labels: "[]".into(),
             max_concurrency: 1,
             register_code_hash: sisyphus_server::auth::token_hash(&code),
+            register_code_expires_at: 1_700_000_000_000 + 24 * 60 * 60 * 1000,
         })
         .await
         .expect("建 Agent 条目");

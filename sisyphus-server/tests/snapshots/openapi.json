@@ -13,6 +13,78 @@
     "version": "1.0.0"
   },
   "paths": {
+    "/api/v1/agent/register": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "注册码换 token（票 #57，Spec B3 §7 唯一动 server 的面）：Agent 凭\n`--reg-key` 兑码换长期 token。**公开端点**（不经认证中间件——Agent\n此刻只有注册码没有 token，与 login 同档放行）。",
+        "description": "校验序（票 #57 AC）：注册码哈希匹配（无效 404）→ 一次性未用（已用\n409）→ 短有效期（过期 403）→ Agent 未停用（停用 403）→ 兑码：签发\n新 token 换旧（库里只存哈希、旧明文不可找回，「换」由重新签发兑现，\n顺带吊销任何外泄的旧 token）+ 注册码置已用。兑码原子闸在 store 层\n（`redeem_register_code` 条件更新，并发双换只成一个）。",
+        "operationId": "register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterAgentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已兑码：返回 per-Agent token（sisa_ + 43 字符；注册码置已用、token 换新）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterAgentResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "注册码已过期，或 Agent 已停用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "注册码无效（哈希无匹配）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "注册码已使用（一次性）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败（name/register_code 非空）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents": {
       "get": {
         "tags": [
@@ -349,7 +421,8 @@
                 "secret_deleted",
                 "agent_created",
                 "agent_disabled",
-                "agent_enabled"
+                "agent_enabled",
+                "agent_registered"
               ]
             }
           },
@@ -3693,6 +3766,37 @@
           "value": {
             "type": "string",
             "description": "机密值（写入即加密落库；永不可读回，请谨慎覆写）。"
+          }
+        }
+      },
+      "RegisterAgentRequest": {
+        "type": "object",
+        "description": "注册码换 token 请求体（票 #57，Spec B3 §7）：Agent 启动凭 `--reg-key`\n兑码，body 带构建机名 + 注册码（注册码哈希查行定位 Agent——一次性、\n24h 短有效期、未停用才放行）。",
+        "required": [
+          "name",
+          "register_code"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "构建机名（与建条目时一致；仅用于核对/审计，不参与寻径）。"
+          },
+          "register_code": {
+            "type": "string",
+            "description": "一次性注册码（`sisa_reg_` + 43 字符，建条目响应签发）。"
+          }
+        }
+      },
+      "RegisterAgentResponse": {
+        "type": "object",
+        "description": "注册码兑 token 响应：per-Agent 通道 token（`sisa_` + 43 字符）。\n\n兑码即换新（库里只存哈希、旧明文不可找回，兑码时重新签发并吊销旧\ntoken）——注册码换 token 的「换」语义由此兑现；此后 Agent 以此 token\n直连，注册码置已用。",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "per-Agent 通道 token（`sisa_` + 43 字符）。请立即保存：注册码兑完\n即作废，本响应是 token 唯一一次出现（此后直连不再需要注册码）。"
           }
         }
       },

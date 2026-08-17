@@ -71,6 +71,11 @@ pub struct AgentRow {
     pub disk_usage: Option<String>,
     /// 一次性注册码的 SHA-256（注册码换 token 流程随 Agent 批次）。
     pub register_code_hash: String,
+    /// 注册码是否已兑（一次性置位：兑码即 1，防重放，票 #57）。
+    pub register_code_used: bool,
+    /// 注册码有效期截止（Unix 毫秒；ADR-0010：一次性 + 24h 过期。迁移前
+    /// 既有行为空 = 不失效的遗留语义）。
+    pub register_code_expires_at: Option<i64>,
     /// 创建时间（Unix 毫秒）。
     pub created_at: i64,
     /// 最后更新时间（Unix 毫秒）。
@@ -115,6 +120,8 @@ pub struct NewAgent {
     pub max_concurrency: i32,
     /// 一次性注册码的 SHA-256。
     pub register_code_hash: String,
+    /// 注册码有效期截止（Unix 毫秒；建条目即签 24h，ADR-0010）。
+    pub register_code_expires_at: i64,
 }
 
 /// Agent repo：建条目 / 启停与编辑 / 在线维护 / 标签匹配。
@@ -136,8 +143,9 @@ impl AgentRepo {
         let result = sqlx::query(
             "INSERT INTO agents
                 (name, token_hash, system_labels, custom_labels, max_concurrency,
-                 online, disabled, register_code_hash, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?)",
+                 online, disabled, register_code_hash, register_code_expires_at,
+                 created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)",
         )
         .bind(&input.name)
         .bind(&input.token_hash)
@@ -145,6 +153,7 @@ impl AgentRepo {
         .bind(&input.custom_labels)
         .bind(input.max_concurrency)
         .bind(&input.register_code_hash)
+        .bind(input.register_code_expires_at)
         .bind(now)
         .bind(now)
         .execute(&self.pool)
@@ -266,7 +275,7 @@ impl AgentRepo {
         let row = sqlx::query_as::<_, AgentTuple>(
             "SELECT id, name, token_hash, system_labels, custom_labels, max_concurrency,
                     online, disabled, last_seen_at, disk_usage, register_code_hash,
-                    created_at, updated_at
+                    register_code_used, register_code_expires_at, created_at, updated_at
              FROM agents WHERE token_hash = ? AND disabled = 0",
         )
         .bind(token_hash)
@@ -275,12 +284,58 @@ impl AgentRepo {
         row.map(AgentRow::from_tuple).transpose()
     }
 
+    /// 注册码换 token 流程的查行面（票 #57）：按注册码哈希取 Agent——含
+    /// 一次性/有效期/停用裁决所需的全部字段，由调用侧（REST 面）裁决并
+    /// 调 [`Self::redeem_register_code`] 原子置已用。不存在返回 `None`
+    /// （无效注册码）。
+    pub async fn find_by_register_code(&self, code_hash: &str) -> Result<Option<AgentRow>, StoreError> {
+        let row = sqlx::query_as::<_, AgentTuple>(
+            "SELECT id, name, token_hash, system_labels, custom_labels, max_concurrency,
+                    online, disabled, last_seen_at, disk_usage, register_code_hash,
+                    register_code_used, register_code_expires_at, created_at, updated_at
+             FROM agents WHERE register_code_hash = ?",
+        )
+        .bind(code_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(AgentRow::from_tuple).transpose()
+    }
+
+    /// 兑码（票 #57）：原子换 token + 注册码置已用——一次性语义的并发闸，
+    /// 且把「未停用 + 未过期」并入条件（防读后写前的 TOCTOU：读到的行在
+    /// 兑码瞬间已被停用/过期仍成功换 token）。`WHERE register_code_used = 0`
+    /// 保证并发双换只有一个成功（另一个 rows_affected = 0 → 调用侧回 409
+    /// 「已使用」）。返回 false 表示兑码被抢（另一请求先兑）、Agent 已停用
+    /// 或注册码已过期（调用侧按语义回错）。
+    pub async fn redeem_register_code(
+        &self,
+        id: i64,
+        new_token_hash: &str,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE agents
+             SET token_hash = ?, register_code_used = 1, updated_at = ?
+             WHERE id = ?
+               AND register_code_used = 0
+               AND disabled = 0
+               AND (register_code_expires_at IS NULL OR register_code_expires_at > ?)",
+        )
+        .bind(new_token_hash)
+        .bind(now_ms())
+        .bind(id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// 全部 Agent（管理面清单；按名排序输出稳定）。
     pub async fn list(&self) -> Result<Vec<AgentRow>, StoreError> {
         let rows = sqlx::query_as::<_, AgentTuple>(
             "SELECT id, name, token_hash, system_labels, custom_labels, max_concurrency,
                     online, disabled, last_seen_at, disk_usage, register_code_hash,
-                    created_at, updated_at
+                    register_code_used, register_code_expires_at, created_at, updated_at
              FROM agents ORDER BY name",
         )
         .fetch_all(&self.pool)
@@ -295,7 +350,7 @@ impl AgentRepo {
         let rows = sqlx::query_as::<_, AgentTuple>(
             "SELECT id, name, token_hash, system_labels, custom_labels, max_concurrency,
                     online, disabled, last_seen_at, disk_usage, register_code_hash,
-                    created_at, updated_at
+                    register_code_used, register_code_expires_at, created_at, updated_at
              FROM agents WHERE online = 1 ORDER BY name",
         )
         .fetch_all(&self.pool)
@@ -308,7 +363,7 @@ impl AgentRepo {
         let row = sqlx::query_as::<_, AgentTuple>(
             "SELECT id, name, token_hash, system_labels, custom_labels, max_concurrency,
                     online, disabled, last_seen_at, disk_usage, register_code_hash,
-                    created_at, updated_at
+                    register_code_used, register_code_expires_at, created_at, updated_at
              FROM agents WHERE id = ?",
         )
         .bind(id)
@@ -322,7 +377,7 @@ impl AgentRepo {
         let row = sqlx::query_as::<_, AgentTuple>(
             "SELECT id, name, token_hash, system_labels, custom_labels, max_concurrency,
                     online, disabled, last_seen_at, disk_usage, register_code_hash,
-                    created_at, updated_at
+                    register_code_used, register_code_expires_at, created_at, updated_at
              FROM agents WHERE name = ?",
         )
         .bind(name)
@@ -420,6 +475,8 @@ type AgentTuple = (
     Option<i64>,    // last_seen_at
     Option<String>, // disk_usage
     String,         // register_code_hash
+    bool,           // register_code_used
+    Option<i64>,    // register_code_expires_at
     i64,            // created_at
     i64,            // updated_at
 );
@@ -440,8 +497,10 @@ impl AgentRow {
             last_seen_at: row.8,
             disk_usage: row.9,
             register_code_hash: row.10,
-            created_at: row.11,
-            updated_at: row.12,
+            register_code_used: row.11,
+            register_code_expires_at: row.12,
+            created_at: row.13,
+            updated_at: row.14,
         })
     }
 }
@@ -479,6 +538,7 @@ mod tests {
             custom_labels: custom.into(),
             max_concurrency: 1,
             register_code_hash: format!("code-hash-{name}"),
+            register_code_expires_at: 1_700_000_000_000 + 24 * 60 * 60 * 1000,
         }
     }
 
@@ -517,6 +577,91 @@ mod tests {
         let list = repo.list().await.expect("清单");
         assert_eq!(list.len(), 1);
         assert!(repo.get_by_name("nope").await.expect("查").is_none());
+    }
+
+    /// 票 #57 AC（store 缝）：注册码换 token 的查行面 + 原子兑码——
+    /// 未兑可换（token 换新、置已用）、重兑返回 false（并发闸）、无效码
+    /// None、有效期字段随建条目落定。
+    #[tokio::test]
+    async fn register_code_redeem_is_one_time_and_rotates_token() {
+        let (_dir, pool) = fixture().await;
+        let repo = AgentRepo::new(pool.clone());
+        let agent = repo
+            .create(new_agent("linux-1", "[]", "[]"))
+            .await
+            .expect("建条目");
+        assert!(!agent.register_code_used, "新建未兑");
+        assert_eq!(
+            agent.register_code_expires_at,
+            Some(1_700_000_000_000 + 24 * 60 * 60 * 1000),
+            "建条目即签 24h 有效期"
+        );
+
+        // 无效码：None。
+        assert!(repo
+            .find_by_register_code("code-hash-unknown")
+            .await
+            .expect("查")
+            .is_none());
+
+        // 未兑可换：查行 → 原子兑码 → token 换新、置已用。
+        let row = repo
+            .find_by_register_code("code-hash-linux-1")
+            .await
+            .expect("查")
+            .expect("应存在");
+        assert_eq!(row.id, agent.id);
+        assert!(repo
+            .redeem_register_code(row.id, "sisa-hash-new", 1_700_000_000_000)
+            .await
+            .expect("兑码"));
+        let after = repo.get(agent.id).await.expect("查").expect("应存在");
+        assert!(after.register_code_used, "兑码后置已用");
+        assert_eq!(after.token_hash, "sisa-hash-new", "token 换新");
+
+        // 重兑：false（一次性防重放——并发双换的败者也走这条路）。
+        assert!(!repo
+            .redeem_register_code(agent.id, "sisa-hash-another", 1_700_000_000_000)
+            .await
+            .expect("重兑应 false"));
+
+        // 过期码：false（原子闸含「未过期」条件——读后写前的 TOCTOU 关闭）。
+        let expired = repo
+            .create(new_agent("linux-2", "[]", "[]"))
+            .await
+            .expect("建 linux-2");
+        sqlx::query("UPDATE agents SET register_code_expires_at = 100 WHERE id = ?")
+            .bind(expired.id)
+            .execute(&pool)
+            .await
+            .expect("拨过期");
+        assert!(!repo
+            .redeem_register_code(expired.id, "sisa-hash-expired", 1_000)
+            .await
+            .expect("过期应 false"));
+
+        // 停用：false（原子闸含「未停用」条件）。
+        let disabled = repo
+            .create(new_agent("linux-3", "[]", "[]"))
+            .await
+            .expect("建 linux-3");
+        repo.set_disabled(disabled.id, true).await.expect("停用");
+        assert!(!repo
+            .redeem_register_code(disabled.id, "sisa-hash-disabled", 1_000)
+            .await
+            .expect("停用应 false"));
+
+        // 兑码后 token 认证面以新哈希命中、旧哈希失效。
+        assert!(repo
+            .find_active_by_hash("sisa-hash-new")
+            .await
+            .expect("认证")
+            .is_some());
+        assert!(repo
+            .find_active_by_hash("sisa-hash-linux-1")
+            .await
+            .expect("认证")
+            .is_none(), "兑码即吊销旧 token（换新）");
     }
 
     #[tokio::test]

@@ -35,6 +35,9 @@ pub const LOGBUF_DIR: &str = "logbuf";
 pub struct Config {
     /// Server 地址（gRPC 通道；无内置默认，缺则启动失败）。
     pub server_url: String,
+    /// Server REST API 基址（注册码兑 token / 产物 / 升级包下载的 HTTP 面，
+    /// 票 #57 起消费；与 gRPC 通道地址不同端口，无内置默认）。
+    pub api_url: Option<String>,
     /// 数据目录（默认 `~/.sisyphus-agent`）。
     pub data_dir: PathBuf,
     /// 日志级别（trace/debug/info/warn/error）。
@@ -61,6 +64,7 @@ impl Config {
         let server_url = pick_str(&cli.server_url, &env.server_url)
             .ok_or(ConfigError::MissingServerUrl)?
             .to_string();
+        let api_url = pick_str(&cli.api_url, &env.api_url).map(ToOwned::to_owned);
         let log_level = pick_str(&cli.log_level, &env.log_level)
             .unwrap_or(DEFAULT_LOG_LEVEL)
             .to_string();
@@ -70,6 +74,7 @@ impl Config {
 
         Ok(Config {
             server_url,
+            api_url,
             data_dir,
             log_level,
             log_file: pick_path(&cli.log_file, &env.log_file),
@@ -107,6 +112,8 @@ impl Config {
 pub struct Overrides {
     /// Server 地址覆盖。
     pub server_url: Option<String>,
+    /// Server REST API 基址覆盖（注册/产物/升级下载的 HTTP 面）。
+    pub api_url: Option<String>,
     /// 数据目录覆盖（相对路径按相对当前工作目录解析）。
     pub data_dir: Option<PathBuf>,
     /// 日志级别覆盖。
@@ -125,6 +132,7 @@ impl Overrides {
         };
         Overrides {
             server_url: get("SISYPHUS_SERVER_URL"),
+            api_url: get("SISYPHUS_API_URL"),
             data_dir: get("SISYPHUS_DATA_DIR").map(PathBuf::from),
             log_level: get("SISYPHUS_LOG_LEVEL"),
             log_file: get("SISYPHUS_LOG_FILE").map(PathBuf::from),
@@ -216,6 +224,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("临时数据目录");
         let cli = Overrides {
             server_url: Some("http://127.0.0.1:50051".into()),
+            api_url: Some("http://127.0.0.1:8080".into()),
             data_dir: Some(dir.path().to_path_buf()),
             log_level: Some("debug".into()),
             log_file: Some(dir.path().join("agent.log")),
@@ -223,6 +232,7 @@ mod tests {
         let cfg = Config::load(&cli, &Overrides::default()).expect("CLI 层完整");
 
         assert_eq!(cfg.server_url, "http://127.0.0.1:50051");
+        assert_eq!(cfg.api_url.as_deref(), Some("http://127.0.0.1:8080"));
         assert_eq!(cfg.log_level, "debug");
         assert_eq!(cfg.log_file, Some(dir.path().join("agent.log")));
 
@@ -240,21 +250,25 @@ mod tests {
         // env 层压过内置默认。
         let env = Overrides {
             server_url: Some("http://env:50051".into()),
+            api_url: Some("http://env:8080".into()),
             log_level: Some("warn".into()),
             ..Overrides::default()
         };
         let cfg = Config::load(&Overrides::default(), &env).expect("env 层");
         assert_eq!(cfg.server_url, "http://env:50051");
+        assert_eq!(cfg.api_url.as_deref(), Some("http://env:8080"));
         assert_eq!(cfg.log_level, "warn");
 
         // CLI 层压过 env 层。
         let cli = Overrides {
             server_url: Some("http://cli:50051".into()),
+            api_url: Some("http://cli:8080".into()),
             log_level: Some("trace".into()),
             ..Overrides::default()
         };
         let cfg = Config::load(&cli, &env).expect("CLI 层");
         assert_eq!(cfg.server_url, "http://cli:50051");
+        assert_eq!(cfg.api_url.as_deref(), Some("http://cli:8080"));
         assert_eq!(cfg.log_level, "trace");
     }
 

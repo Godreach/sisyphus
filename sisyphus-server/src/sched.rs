@@ -874,6 +874,7 @@ mod tests {
                     custom_labels: "[]".into(),
                     max_concurrency: 1,
                     register_code_hash: "code-hash".into(),
+                    register_code_expires_at: 1_700_000_000_000 + 24 * 60 * 60 * 1000,
                 })
                 .await
                 .expect("建 Agent");
@@ -1012,6 +1013,7 @@ mod tests {
                 custom_labels: "[]".into(),
                 max_concurrency: 1,
                 register_code_hash: "code-hash-orphan".into(),
+                register_code_expires_at: 1_700_000_000_000 + 24 * 60 * 60 * 1000,
             })
             .await
             .expect("建 Agent");
@@ -1101,6 +1103,7 @@ mod tests {
                 custom_labels: "[]".into(),
                 max_concurrency: 1,
                 register_code_hash: "code-hash-recon".into(),
+                register_code_expires_at: 1_700_000_000_000 + 24 * 60 * 60 * 1000,
             })
             .await
             .expect("建 Agent");

@@ -54,12 +54,16 @@ pub enum AuditEvent {
     AgentDisabled,
     /// 启用 Agent（撤销停用；detail 记构建机名）。
     AgentEnabled,
+    /// 注册码兑 token（票 #57：Agent 凭一次性注册码换长期 token——token
+    /// 换新并吊销旧值；actor 记 Agent 名，detail 记构建机名，注册码/token
+    /// 值永不落审计）。
+    AgentRegistered,
 }
 
 impl AuditEvent {
     /// 全部事件类型（契约单点：`as_str` 映射 + [`Self::parse`] 识别 +
     /// OpenAPI enum 生成的共同来源——新增事件类型只改这里与 [`Self::as_str`]）。
-    pub const ALL: [AuditEvent; 17] = [
+    pub const ALL: [AuditEvent; 18] = [
         Self::LoginSuccess,
         Self::LoginFailure,
         Self::Logout,
@@ -77,6 +81,7 @@ impl AuditEvent {
         Self::AgentCreated,
         Self::AgentDisabled,
         Self::AgentEnabled,
+        Self::AgentRegistered,
     ];
 
     /// 落库 / 查询过滤文本（契约值；filter 参数按此匹配）。
@@ -99,6 +104,7 @@ impl AuditEvent {
             Self::AgentCreated => "agent_created",
             Self::AgentDisabled => "agent_disabled",
             Self::AgentEnabled => "agent_enabled",
+            Self::AgentRegistered => "agent_registered",
         }
     }
 
@@ -460,6 +466,10 @@ mod tests {
             AuditEvent::SecretCreated,
             AuditEvent::SecretOverwritten,
             AuditEvent::SecretDeleted,
+            AuditEvent::AgentCreated,
+            AuditEvent::AgentDisabled,
+            AuditEvent::AgentEnabled,
+            AuditEvent::AgentRegistered,
         ] {
             assert_eq!(AuditEvent::parse(event.as_str()), Some(event));
         }

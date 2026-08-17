@@ -68,6 +68,7 @@ async fn create_agent(state: &api::AppState, name: &str) -> (String, i64) {
             custom_labels: "[]".into(),
             max_concurrency: 1,
             register_code_hash: token_hash(&code),
+            register_code_expires_at: 1_700_000_000_000 + 24 * 60 * 60 * 1000,
         })
         .await
         .expect("建条目");

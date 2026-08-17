@@ -11,6 +11,7 @@
 pub mod cache;
 pub mod channel;
 pub mod config;
+pub mod register;
 pub mod runner;
 pub mod upgrader;
 pub mod workspace;

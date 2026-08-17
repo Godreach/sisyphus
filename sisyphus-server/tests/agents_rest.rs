@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 
 mod common;
 
-use common::{TestApp, body_json, get, req_with_cookie, setup_and_login, test_app};
+use common::{TestApp, body_json, get, req, req_with_cookie, setup_and_login, test_app};
 
 /// 全局 admin 建普通用户（返回其登录 cookie）。
 async fn login_as_regular(app: &TestApp, admin_cookie: &str, username: &str) -> String {
@@ -295,6 +295,116 @@ async fn patch_disables_kicks_and_edits_spec() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn register_code_exchanges_for_token_one_time() {
+    let app = test_app().await;
+    let cookie = setup_and_login(&app).await;
+
+    // 建条目拿到注册码与 token。
+    let created = create_agent(&app, &cookie, r#"{"name": "linux-1"}"#).await;
+    let register_code = created["register_code"].as_str().expect("注册码");
+    let _original_token = created["token"].as_str().expect("原 token");
+
+    // 兑码：公开端点（无 cookie）返回 per-Agent token（sisa_ + 43）。
+    let body = format!(r#"{{"name": "linux-1", "register_code": "{register_code}"}}"#);
+    let resp = req(&app, "POST", "/api/v1/agent/register", Some(body)).await;
+    assert_eq!(resp.status(), StatusCode::OK, "有效注册码应兑码成功");
+    let json = body_json(resp).await;
+    let token = json["token"].as_str().expect("token");
+    assert!(token.starts_with("sisa_"), "{token}");
+    assert_eq!(token.len(), "sisa_".len() + 43);
+
+    // 兑码即换新：库里 token_hash 已轮换（旧 token 吊销、新 token 可用）。
+    let token_hash: String =
+        sqlx::query_scalar("SELECT token_hash FROM agents WHERE name = 'linux-1'")
+            .fetch_one(&app.pool)
+            .await
+            .expect("直查 token_hash");
+    assert_ne!(token_hash, token, "库里仍是哈希");
+    assert_eq!(token_hash.len(), 64);
+    assert_ne!(
+        token_hash,
+        sisyphus_server::auth::token_hash(_original_token),
+        "兑码吊销旧 token（换新）"
+    );
+
+    // 注册码置已用：重兑 409（一次性）。
+    let body = format!(r#"{{"name": "linux-1", "register_code": "{register_code}"}}"#);
+    let resp = req(&app, "POST", "/api/v1/agent/register", Some(body)).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "重兑应 409");
+    assert_eq!(body_json(resp).await["code"], "CONFLICT");
+
+    // 审计（ADR-0015：注册码兑 token 入账；actor 记 Agent 名）。
+    let events: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT actor, event_type, detail FROM audit_log WHERE event_type = 'agent_registered'",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .expect("直查审计");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].0, "linux-1", "actor 记 Agent 名");
+    assert!(events[0].2.as_deref().unwrap_or("").contains("linux-1"));
+}
+
+#[tokio::test]
+async fn register_rejects_invalid_used_expired_and_disabled() {
+    let app = test_app().await;
+    let cookie = setup_and_login(&app).await;
+    let created = create_agent(&app, &cookie, r#"{"name": "linux-1"}"#).await;
+    let register_code = created["register_code"].as_str().expect("注册码");
+
+    // 无效注册码（哈希无匹配）：404。
+    let body = r#"{"name": "linux-1", "register_code": "sisa_reg_deadbeef"}"#;
+    let resp = req(&app, "POST", "/api/v1/agent/register", Some(body.into())).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "无效注册码应 404");
+    assert_eq!(body_json(resp).await["code"], "NOT_FOUND");
+
+    // 已用（先正常兑一次）：409。
+    let ok_body = format!(r#"{{"name": "linux-1", "register_code": "{register_code}"}}"#);
+    let resp = req(&app, "POST", "/api/v1/agent/register", Some(ok_body.clone())).await;
+    assert_eq!(resp.status(), StatusCode::OK, "先兑一次");
+    let resp = req(&app, "POST", "/api/v1/agent/register", Some(ok_body)).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "已用应 409");
+
+    // 停用：403（停用即踢线，不配发 token）。
+    let created2 = create_agent(&app, &cookie, r#"{"name": "linux-2"}"#).await;
+    let code2 = created2["register_code"].as_str().expect("注册码");
+    let resp = req_with_cookie(
+        &app,
+        "PATCH",
+        "/api/v1/agents/linux-2",
+        Some(r#"{"disabled": true}"#.into()),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "停用 linux-2");
+    let body = format!(r#"{{"name": "linux-2", "register_code": "{code2}"}}"#);
+    let resp = req(&app, "POST", "/api/v1/agent/register", Some(body)).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "停用应 403");
+    assert_eq!(body_json(resp).await["code"], "FORBIDDEN");
+
+    // 过期：403（直接改库把有效期拨到过去——repo 缝已验过期判据）。
+    let created3 = create_agent(&app, &cookie, r#"{"name": "linux-3"}"#).await;
+    let code3 = created3["register_code"].as_str().expect("注册码");
+    sqlx::query("UPDATE agents SET register_code_expires_at = 1 WHERE name = 'linux-3'")
+        .execute(&app.pool)
+        .await
+        .expect("拨过期");
+    let body = format!(r#"{{"name": "linux-3", "register_code": "{code3}"}}"#);
+    let resp = req(&app, "POST", "/api/v1/agent/register", Some(body)).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "过期应 403");
+
+    // 空 name / 空注册码：422。
+    for body in [
+        r#"{"name": "", "register_code": "sisa_reg_x"}"#,
+        r#"{"name": "linux-1", "register_code": ""}"#,
+        "not-json",
+    ] {
+        let resp = req(&app, "POST", "/api/v1/agent/register", Some(body.into())).await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
 }
 
 /// 带 cookie 的 GET（走同源 CSRF 头形态，与 common 的 req_with_cookie 同构）。

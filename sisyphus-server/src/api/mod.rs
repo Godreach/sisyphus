@@ -167,7 +167,11 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
     let v1_public = Router::new()
         .route("/auth/setup", post(auth::setup))
         .route("/auth/login", post(auth::login))
-        .route("/auth/register", post(auth::register));
+        .route("/auth/register", post(auth::register))
+        // 注册码兑 token（票 #57）：Agent 凭注册码换长期 token，此刻没有
+        // token 只有注册码——公开端点（与 login 同档放行；注册码本身即
+        // 高熵随机，哈希匹配即身份）。
+        .route("/agent/register", post(agents::register));
 
     let v1_protected = Router::new()
         .route("/auth/logout", post(auth::logout))
