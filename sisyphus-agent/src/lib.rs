@@ -11,6 +11,7 @@
 pub mod cache;
 pub mod channel;
 pub mod config;
+pub mod logbuf;
 pub mod register;
 pub mod runner;
 pub mod upgrader;
@@ -21,12 +22,14 @@ use std::sync::Arc;
 use channel::ChannelConfig;
 use tokio::sync::{RwLock, mpsc, watch};
 
+use crate::logbuf::{DEFAULT_GRACE, LogBuffer};
+
 /// 占位模块收帧观测：各占位循环收到下行指令即记录其类别（分派骨架的
 /// 断言面——「占位 handle 可收」的唯一外部可观测信号；真实执行随各批次
 /// 换入后移除）。
 pub type ReceiptLog = Arc<std::sync::Mutex<Vec<String>>>;
 
-/// Agent 组合根：配置 + 通道（连接/心跳/重连/分派）+ 各模块占位句柄。
+/// Agent 组合根：配置 + 通道（连接/心跳/重连/分派）+ 日志缓冲 + 各模块占位句柄。
 pub struct Agent {
     /// 启动配置（数据目录五处约定的来源）。本批装配后不再读取——
     /// workspace/cache/logbuf 等后续批次从 `data_dir` 派生路径，
@@ -38,6 +41,9 @@ pub struct Agent {
     dispatch: channel::Dispatch,
     /// 在途任务集（runner 维护，重连随 JobReported 上报；本批为空集）。
     in_flight: Arc<RwLock<Vec<String>>>,
+    /// 日志 seq 缓冲（ADR-0007/0013：先落盘再发出、断线累计、重连幂等重放、
+    /// 终态宽限删除/孤儿补传后删除）。
+    logbuf: LogBuffer,
     /// 各模块占位句柄（真实执行随后续批次换入）。
     runner: runner::Handle,
     workspace: workspace::Handle,
@@ -63,6 +69,7 @@ impl Agent {
     }
 
     /// 以指定通道参数装配（测试注入短心跳/短退避/固定采样求确定性）。
+    /// 日志缓冲用默认宽限（1 分钟，ADR-0013）。
     pub fn with_channel_config(config: config::Config, channel_cfg: ChannelConfig) -> Self {
         // 分派通道：各模块持有接收端，reader 持有发送端。
         let (runner_tx, runner_rx) = mpsc::channel(channel::DISPATCH_CAPACITY);
@@ -76,17 +83,24 @@ impl Agent {
             cache: cache_tx,
         };
         let receipts = ReceiptLog::default();
+        let logbuf = LogBuffer::new(config.logbuf_dir(), DEFAULT_GRACE);
         Self {
             config,
             channel_cfg,
             dispatch,
             in_flight: Arc::new(RwLock::new(Vec::new())),
+            logbuf,
             runner: runner::Handle::new(runner_rx, receipts.clone()),
             workspace: workspace::Handle::new(workspace_rx, receipts.clone()),
             cache: cache::Handle::new(cache_rx, receipts.clone()),
             upgrader: upgrader::Handle::new(upgrader_rx, receipts.clone()),
             receipts,
         }
+    }
+
+    /// 日志缓冲句柄（runner 喂事件/测试断言）。
+    pub fn logbuf(&self) -> LogBuffer {
+        self.logbuf.clone()
     }
 
     /// 占位模块收帧观测（分派骨架断言面；测试/集成测试用）。
@@ -111,7 +125,12 @@ impl Agent {
             // 心跳间隔视为「健康会话」，退避复位——掉线重连回到 1s 起步。
             let started = std::time::Instant::now();
             let outcome = tokio::select! {
-                r = channel::run_connection(&self.channel_cfg, &self.dispatch, self.in_flight.clone()) => r,
+                r = channel::run_connection(
+                    &self.channel_cfg,
+                    &self.dispatch,
+                    self.in_flight.clone(),
+                    &self.logbuf,
+                ) => r,
                 _ = shutdown_requested(&mut shutdown) => break,
             };
             match outcome {

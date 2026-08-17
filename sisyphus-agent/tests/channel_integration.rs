@@ -10,7 +10,13 @@
 //! 覆盖本票验收：握手认证（无/错 token 拒连 + 永久重试不自杀）、版本窗口
 //! 过新拒连、心跳 + 系统标签 + 磁盘占用上报、指数退避重连（重连 = 新握手
 //! + 认证 + 在途上报 + 标签刷新）、下行分派骨架（各模块占位 handle 可收）。
-
+//!
+//! 日志 seq 缓冲补传（票 B3-T3，ADR-0007/0013）：断线 → 缓冲续写 → 重连幂等
+//! 重放——全量到达不丢不乱序。用例直接驱动
+//! [`sisyphus_agent::channel::run_connection`]（补传 + 孤儿清理的持有缝）而非
+//! 经 `Agent::run`：要注入可控 `in_flight` 集（判定孤儿——本批 runner 未实现，
+//! 在途集恒空；真实运行中 job 由 runner #59 维护），并显式控制两次连接
+//! （连接 A 活体 → 断线 → 连接 B 重放）。
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -84,8 +90,14 @@ struct FakeState {
     heartbeats: Mutex<Vec<sisyphus_proto::agent::Heartbeat>>,
     /// 收到的在途上报。
     reported: Mutex<Vec<JobReported>>,
+    /// 收到的日志帧（LogBatch，seq 幂等重放断言面）。
+    log_batches: Mutex<Vec<sisyphus_proto::agent::LogBatch>>,
     /// 活动会话的下行发送器（测试注入下行指令用）。
     sessions: Mutex<Vec<mpsc::Sender<Result<ChannelMessage, Status>>>>,
+    /// 断开信号：会话读取任务 select 监听，触发即关流（模拟 Server 中途掉线）。
+    /// watch = 电平触发（迟到订阅/忙中任务回到循环即见），比 Notify 边沿触发
+    /// 抗竞态——不漏断连信号。
+    drop_signal: watch::Sender<bool>,
 }
 
 impl FakeState {
@@ -107,8 +119,18 @@ impl FakeState {
     fn reported(&self) -> Vec<JobReported> {
         self.reported.lock().expect("锁").clone()
     }
+    fn log_batches(&self) -> Vec<sisyphus_proto::agent::LogBatch> {
+        self.log_batches.lock().expect("锁").clone()
+    }
     fn last_session_tx(&self) -> mpsc::Sender<Result<ChannelMessage, Status>> {
         self.sessions.lock().expect("锁").last().cloned().expect("应有会话")
+    }
+    /// 断开全部活动会话（模拟 Server 中途掉线）：置位 drop watch（各会话读取
+    /// 任务回到循环即见并退出、drop 发送器）+ 清注册表（drop 注册表的发送器
+    /// 克隆）——全部发送器消失 → 对端流 EOF → agent 走重连路径。
+    fn drop_all_sessions(&self) {
+        let _ = self.drop_signal.send(true);
+        self.sessions.lock().expect("锁").clear();
     }
 }
 
@@ -209,11 +231,20 @@ impl AgentChannel for FakeServer {
             {
                 return;
             }
-            while let Ok(Some(msg)) = inbound.message().await {
-                match msg.kind {
-                    Some(Kind::Heartbeat(hb)) => state.heartbeats.lock().expect("锁").push(hb),
-                    Some(Kind::JobReported(r)) => state.reported.lock().expect("锁").push(r),
-                    _ => {}
+            // 订阅断开信号（电平触发：迟订阅/忙中任务回到循环即见已置位）。
+            let mut drop_rx = state.drop_signal.subscribe();
+            loop {
+                tokio::select! {
+                    _ = drop_rx.changed() => break, // Server 掉线：关流
+                    msg = inbound.message() => {
+                        let Ok(Some(msg)) = msg else { break };
+                        match msg.kind {
+                            Some(Kind::Heartbeat(hb)) => state.heartbeats.lock().expect("锁").push(hb),
+                            Some(Kind::JobReported(r)) => state.reported.lock().expect("锁").push(r),
+                            Some(Kind::LogBatch(b)) => state.log_batches.lock().expect("锁").push(b),
+                            _ => {}
+                        }
+                    }
                 }
             }
         });
@@ -249,7 +280,9 @@ fn fake_state(expect_token: Option<&str>, server_version: Version) -> Arc<FakeSt
         token_present: Mutex::new(Vec::new()),
         heartbeats: Mutex::new(Vec::new()),
         reported: Mutex::new(Vec::new()),
+        log_batches: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
+        drop_signal: watch::channel(false).0,
     })
 }
 
@@ -270,7 +303,9 @@ fn channel_config(server_url: String, token: Option<&str>, data_dir: &Path) -> C
     }
 }
 
-/// 组装组合根并 spawn `Agent::run`。返回（关闭发送端, 收帧观测, JoinHandle）。
+/// 组装组合根并 spawn `Agent::run`。返回
+/// （关闭发送端, 收帧观测, 日志缓冲, JoinHandle）——日志缓冲供测试直接喂
+/// 事件（断线续写断言面）。
 fn spawn_agent(
     data_dir: &Path,
     server_url: String,
@@ -278,6 +313,7 @@ fn spawn_agent(
 ) -> (
     watch::Sender<bool>,
     sisyphus_agent::ReceiptLog,
+    sisyphus_agent::logbuf::LogBuffer,
     tokio::task::JoinHandle<()>,
 ) {
     let cfg = config::Config::load(
@@ -291,9 +327,10 @@ fn spawn_agent(
     .expect("配置");
     let agent = Agent::with_channel_config(cfg, channel_config(server_url, token, data_dir));
     let receipts = agent.receipts();
+    let logbuf = agent.logbuf();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let task = tokio::spawn(agent.run(shutdown_rx));
-    (shutdown_tx, receipts, task)
+    (shutdown_tx, receipts, logbuf, task)
 }
 
 /// 直接驱动单次连接（不经 Agent::run 重连循环）——认证/版本拒绝的断言面。
@@ -304,8 +341,15 @@ async fn connect_once(
 ) -> Result<(), sisyphus_agent::channel::ChannelError> {
     let cfg = channel_config(server_url, token, data_dir);
     let dispatch = dummy_dispatch();
-    sisyphus_agent::channel::run_connection(&cfg, &dispatch, Arc::new(RwLock::new(Vec::new())))
-        .await
+    let logbuf =
+        sisyphus_agent::logbuf::LogBuffer::new(data_dir.join("logbuf"), Duration::from_secs(60));
+    sisyphus_agent::channel::run_connection(
+        &cfg,
+        &dispatch,
+        Arc::new(RwLock::new(Vec::new())),
+        &logbuf,
+    )
+    .await
 }
 
 fn dummy_dispatch() -> sisyphus_agent::channel::Dispatch {
@@ -333,7 +377,7 @@ async fn valid_token_establishes_session_with_heartbeat_labels_and_inflight() {
     let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
-    let (shutdown_tx, _receipts, agent_task) =
+    let (shutdown_tx, _receipts, _logbuf, agent_task) =
         spawn_agent(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
 
     // 握手 + 认证通过 + 标签随连接呈送。
@@ -397,7 +441,7 @@ async fn rejects_missing_and_wrong_token_and_retries_forever() {
     // Agent::run 层：错 token 下永久退避重连（attempts 持续增长），进程
     // 不自杀（run 任务仍在跑）；shutdown 干净退出。
     let before = state.attempts();
-    let (shutdown_tx, _receipts, agent_task) =
+    let (shutdown_tx, _receipts, _logbuf, agent_task) =
         spawn_agent(dir.path(), format!("http://{addr}"), Some("sisa_wrong"));
     wait_until(|| async { state.attempts() >= before + 2 }).await;
     assert!(!agent_task.is_finished(), "拒连不自杀：run 循环仍在重试");
@@ -422,7 +466,7 @@ async fn rejects_disabled_token_and_retries() {
 
     // Agent::run 层：停用下永久退避重试（attempts 持续增长），进程不自杀。
     let before = state.attempts();
-    let (shutdown_tx, _receipts, agent_task) =
+    let (shutdown_tx, _receipts, _logbuf, agent_task) =
         spawn_agent(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
     wait_until(|| async { state.attempts() >= before + 2 }).await;
     assert!(!agent_task.is_finished(), "停用拒连不自杀：run 循环仍在重试");
@@ -462,7 +506,7 @@ async fn reconnects_after_drop_with_full_rehandshake() {
     state.drop_after_handshake.store(true, Ordering::SeqCst);
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
-    let (shutdown_tx, _receipts, agent_task) =
+    let (shutdown_tx, _receipts, _logbuf, agent_task) =
         spawn_agent(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
 
     // 断线期间多次重连：每次都是完整握手 + 认证 + 标签刷新。
@@ -504,7 +548,7 @@ async fn dispatches_downlink_frames_to_module_placeholders() {
     let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
-    let (shutdown_tx, receipts, agent_task) =
+    let (shutdown_tx, receipts, _logbuf, agent_task) =
         spawn_agent(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
 
     // 等连接建立（fake 有会话发送器）。
@@ -558,5 +602,139 @@ async fn dispatches_downlink_frames_to_module_placeholders() {
 
     shutdown_tx.send(true).expect("关闭");
     agent_task.await.expect("agent 任务应正常退出");
+    server_task.abort();
+}
+
+/// 日志 seq 缓冲补传（ADR-0007/0013 集成验收）：
+/// 断线 → 缓冲续写 → 重连幂等重放——全量到达、seq 连续无重复、不丢不乱序。
+///
+/// 直接驱动 [`sisyphus_agent::channel::run_connection`]（补传 + 孤儿清理的
+/// 持有缝），两次显式连接模拟「连接 A（活体转发）→ 断线 → 缓冲续写 →
+/// 连接 B（重放补传）」。`in_flight` 可控注入：job-1 是在途任务（缓冲保留、
+/// 重放补传）；job-2 是孤儿（补传后删除）。
+#[tokio::test]
+async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+
+    let logbuf_dir = dir.path().join("logbuf");
+    std::fs::create_dir_all(&logbuf_dir).expect("logbuf 目录");
+    let logbuf = std::sync::Arc::new(sisyphus_agent::logbuf::LogBuffer::new(
+        logbuf_dir,
+        Duration::from_secs(60),
+    ));
+    let log_event = |data: &[u8]| sisyphus_proto::agent::LogEvent {
+        seq: 0, // 缓冲层重编号
+        kind: Some(sisyphus_proto::agent::log_event::Kind::Output(
+            sisyphus_proto::agent::OutputChunk {
+                stream: sisyphus_proto::agent::Stream::Stdout as i32,
+                data: data.to_vec(),
+            },
+        )),
+    };
+
+    // 连接 A：在途 = job-1（运行中）。连接建立后活体转发 alpha/beta。
+    let cfg_a = std::sync::Arc::new(channel_config(
+        format!("http://{addr}"),
+        Some("sisa_abc"),
+        dir.path(),
+    ));
+    let dispatch_a = std::sync::Arc::new(dummy_dispatch());
+    let in_flight_a = Arc::new(RwLock::new(vec!["job-1".to_string()]));
+    let (cfg_ha, dispatch_ha, logbuf_ha) = (cfg_a.clone(), dispatch_a.clone(), logbuf.clone());
+    let conn_a = tokio::spawn(async move {
+        sisyphus_agent::channel::run_connection(
+            &cfg_ha,
+            &dispatch_ha,
+            in_flight_a,
+            &logbuf_ha,
+        )
+        .await
+    });
+    wait_until(|| async { !state.sessions.lock().expect("锁").is_empty() }).await;
+    logbuf.append("job-1", 0, log_event(b"alpha")).await.expect("落盘");
+    logbuf.append("job-1", 0, log_event(b"beta")).await.expect("落盘");
+    wait_until(|| async { state.log_batches().len() >= 2 }).await;
+
+    // 断线：fake 断开全部会话 → 连接 A 结束；断线期间缓冲继续累计。
+    state.drop_all_sessions();
+    conn_a.await.expect("连接 A 结束").expect("连接 A 干净退出");
+    logbuf.append("job-1", 0, log_event(b"gamma")).await.expect("断线续写");
+    logbuf.append("job-1", 0, log_event(b"delta")).await.expect("断线续写");
+    logbuf.append("job-2", 0, log_event(b"orphan")).await.expect("孤儿落盘");
+
+    // 连接 B（重连）：在途仍 = job-1。重放 job-1 全段（0..3）+ 孤儿 job-2
+    // 补传后删除。连接期内新事件（epsilon）经活体转发。
+    let cfg_b = std::sync::Arc::new(channel_config(
+        format!("http://{addr}"),
+        Some("sisa_abc"),
+        dir.path(),
+    ));
+    let dispatch_b = std::sync::Arc::new(dummy_dispatch());
+    let in_flight_b = Arc::new(RwLock::new(vec!["job-1".to_string()]));
+    let (cfg_hb, dispatch_hb, logbuf_hb) = (cfg_b.clone(), dispatch_b.clone(), logbuf.clone());
+    let conn_b = tokio::spawn(async move {
+        sisyphus_agent::channel::run_connection(
+            &cfg_hb,
+            &dispatch_hb,
+            in_flight_b,
+            &logbuf_hb,
+        )
+        .await
+    });
+    // 等重连建立 + job-2 孤儿缓冲删除（补传后删）。
+    wait_until(|| async { state.handshakes().len() >= 2 }).await;
+    wait_until(|| async { !logbuf.path("job-2", 0).exists() }).await;
+
+    // job-1 全量到达 0..3、无缺无杂（补传是幂等重放：连接 B 从文件头重放
+    // 整段——已活体送达的前缀 0,1 会重复上送，Server 按 seq 幂等吸收；故
+    // 不要求「每 seq 恰好一次」也不要求整体非降，只要求：不丢、不缺、无
+    // 越界杂 seq）。
+    wait_until(|| async {
+        let seen: Vec<u64> = state
+            .log_batches()
+            .iter()
+            .filter(|b| b.job_id == "job-1")
+            .map(|b| b.start_seq)
+            .collect();
+        (0..4).all(|i| seen.contains(&i))
+    })
+    .await;
+    let seen: Vec<u64> = state
+        .log_batches()
+        .iter()
+        .filter(|b| b.job_id == "job-1")
+        .map(|b| b.start_seq)
+        .collect();
+    let mut unique: Vec<u64> = seen.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        unique,
+        vec![0, 1, 2, 3],
+        "job-1 日志应全量到达 0..3（不丢、无缺、无杂）：{seen:?}"
+    );
+    // job-2 的孤儿事件重放补传后删除——fake 收到了它的日志（取证保留到
+    // 补传完成才删），缓冲文件已不在。
+    assert!(
+        state
+            .log_batches()
+            .iter()
+            .any(|b| b.job_id == "job-2" && b.start_seq == 0),
+        "孤儿 job-2 的日志应补传（取证）"
+    );
+    assert!(
+        !logbuf.path("job-2", 0).exists(),
+        "孤儿 job-2 缓冲删除"
+    );
+    assert!(
+        logbuf.path("job-1", 0).exists(),
+        "在途 job-1 的缓冲保留（不删）"
+    );
+
+    // 收尾：让连接 B 自然结束（fake 关流）后清理。
+    state.drop_all_sessions();
+    conn_b.await.expect("连接 B 结束").expect("连接 B 干净退出");
     server_task.abort();
 }

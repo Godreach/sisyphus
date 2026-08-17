@@ -31,6 +31,8 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 
+use crate::logbuf::LogBuffer;
+
 /// 心跳间隔（ADR-0007：15s 一报；与 Server 侧 `HEARTBEAT_INTERVAL_MS` 同值）。
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// 上行帧邮箱容量（心跳/ack/状态/日志/在途/列表响应共走一根通道；缓冲满
@@ -387,14 +389,15 @@ impl From<tonic::Status> for ChannelError {
 // ============================================================
 
 /// 建立并维持一次通道连接：握手 → 认证（metadata）→ 版本窗口 → 在途上报
-/// → 心跳循环 + 下行分派。流结束（对端关流/读失败）即返回，外层负责退避
-/// 重连（本函数不含重试逻辑）。
+/// → 日志缓冲补传 → 心跳循环 + 下行分派。流结束（对端关流/读失败）即返回，
+/// 外层负责退避重连（本函数不含重试逻辑）。
 ///
 /// 每次调用都是一次完整「新握手 + 认证 + 标签刷新」——重连即走同一路径。
 pub async fn run_connection(
     cfg: &ChannelConfig,
     dispatch: &Dispatch,
     in_flight: Arc<RwLock<Vec<String>>>,
+    logbuf: &LogBuffer,
 ) -> Result<(), ChannelError> {
     let channel = tonic::transport::Endpoint::from_shared(cfg.server_url.clone())
         .map_err(|e| ChannelError(format!("无效 server-url {}：{e}", cfg.server_url)))?
@@ -469,10 +472,35 @@ pub async fn run_connection(
     let job_ids = in_flight.read().await.clone();
     out_tx
         .send(ChannelMessage {
-            kind: Some(Kind::JobReported(JobReported { job_ids })),
+            kind: Some(Kind::JobReported(JobReported { job_ids: job_ids.clone() })),
         })
         .await
         .map_err(|_| ChannelError("上行邮箱关闭".into()))?;
+
+    // 日志缓冲补传（ADR-0007/0013）：先注入活体发送器（连接期新增日志经活体
+    // 转发），再幂等重放——从每个缓冲文件头重发未清空段；重复段由 Server 按
+    // seq 幂等吸收。孤儿缓冲（job 不在在途集）重放后删除——执行丢弃、日志
+    // 保留作取证后再清（ADR-0013）。
+    //
+    // 顺序说明：set_live 先于 replay——运行中 job（#59 起）的连接期新增日志
+    // 须立即活体转发（重放不截断缓冲，活体 seq 恒高于已落盘段）。同
+    // (job, attempt) 内重放读与追加写由 logbuf 的 open 锁互斥（无撕裂读）；
+    // 追加活体转发与重放发送的到达交错由 Server 按 seq 幂等落库吸收——最终
+    // 状态恒正确，符合「不做 per-batch ack 等待」的补传语义（ADR-0013）。
+    logbuf.set_live(Some(out_tx.clone())).await;
+    for msg in logbuf
+        .replay_all()
+        .await
+        .map_err(|e| ChannelError(format!("日志缓冲重放失败：{e}")))?
+    {
+        out_tx
+            .send(msg)
+            .await
+            .map_err(|_| ChannelError("上行邮箱关闭".into()))?;
+    }
+    for (job_id, attempt) in logbuf.orphans(&job_ids) {
+        logbuf.clear_now(&job_id, attempt);
+    }
 
     // 心跳循环：15s 一报，附带磁盘占用（ADR-0019）。独立 task——连接期内
     // 与 reader 并行；流结束由外层 abort。
@@ -496,8 +524,10 @@ pub async fn run_connection(
     });
 
     // 单 reader 循环：下行帧按类型分派到各模块；流读完（对端关流）或读
-    // 失败即结束连接（外层退避重连）。
+    // 失败即结束连接（外层退避重连）。清除活体日志转发——此后事件仅落缓冲，
+    // 重连时重放补传。
     let result = read_and_dispatch(&mut inbound, dispatch).await;
+    logbuf.set_live(None).await;
     heartbeat.abort();
     writer.abort();
     result
