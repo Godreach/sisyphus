@@ -356,8 +356,16 @@ impl Scheduler {
         }
     }
 
-    /// 周期兜底：匹配（标签变更/槽位释放未唤醒的场景）+ job 超时 + orphan 宽限。
+    /// 周期兜底：drive 非终态构建（事件丢失安全网）+ 匹配 + job 超时 + orphan 宽限。
     async fn periodic_pass(&self, now: i64) {
+        // 安全网：事件总线是「可丢热通知」——若 BuildCreated 因订阅者缺席/
+        // 滞后被丢，queued 构建不会被推进（match_pass 只下发已组装的任务，
+        // 不 drive 构建）。周期 drive 非终态构建兜底，与启动 [`Self::reconstruct`]
+        // 同款（drive 幂等：running 在跑阶段是 no-op，queued 按 FIFO 提升 +
+        // 组装）。先 drive 再 match，同一轮内新组装的任务即可下发。
+        if let Err(e) = self.drive_non_terminal().await {
+            tracing::warn!(error = %e, "周期 drive 非终态构建失败");
+        }
         if let Err(e) = self.match_pass(now).await {
             tracing::warn!(error = %e, "匹配扫描失败");
         }
@@ -367,6 +375,16 @@ impl Scheduler {
         if let Err(e) = self.orphan_pass(now).await {
             tracing::warn!(error = %e, "orphan 宽限扫描失败");
         }
+    }
+
+    /// 周期 drive 兜底：推进全部非终态构建（queued/running）。事件驱动的
+    /// [`Engine::drive`] 在 BuildCreated 时调用；本面接管「事件丢了」的构建
+    /// ——DB 是真相源，queued/running 构建即「需推进」的真相。
+    async fn drive_non_terminal(&self) -> Result<(), StoreError> {
+        for build in self.builds.non_terminal().await? {
+            self.engine.drive(build.id).await?;
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -381,9 +399,7 @@ impl Scheduler {
     ///
     /// orphan 宽限计时从 `unknown_at`（已落库）继续，重启不重置窗口。
     pub async fn reconstruct(&self) -> Result<(), StoreError> {
-        for build in self.builds.non_terminal().await? {
-            self.engine.drive(build.id).await?;
-        }
+        self.drive_non_terminal().await?;
         for job in self.jobs.channel_cancel_pending().await? {
             if let Some(agent_id) = job.agent_id {
                 let _ = self

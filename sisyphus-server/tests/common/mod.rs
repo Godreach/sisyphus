@@ -36,6 +36,9 @@ pub const DEFAULT_PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALH
 pub struct TestApp {
     /// 与二进制相同的 Router 组合根（oneshot 驱动）。
     pub router: axum::Router,
+    /// 组合根状态（含 engine——构建端点用例需直接 drive 推进：缺机密失败、
+    /// from_failed 重跑前置失败态等，无 sched 循环时手动驱动）。
+    pub state: AppState,
     /// 底层连接池：用例直查/直改库（如把 session 改过期、断言哈希形态）。
     pub pool: SqlitePool,
     /// 静态资源本地覆盖目录（数据目录 `web/` 子目录）：用例自行放置文件。
@@ -74,11 +77,25 @@ pub async fn test_app_at_with(data_dir: &Path, registration_enabled: bool) -> Te
         &data_dir.join(sisyphus_server::config::MASTER_KEY_FILE_NAME),
     )
     .expect("测试主密钥");
+    let state = AppState::new(pool.clone(), registration_enabled, master_key);
     TestApp {
-        router: router(
-            AppState::new(pool.clone(), registration_enabled, master_key),
-            web.clone(),
-        ),
+        router: router(state.clone(), web.clone()),
+        state,
+        pool,
+        web,
+        _dir: None,
+    }
+}
+
+/// 由既有 AppState 装配 TestApp（票 B2c-T5 tracer bullet：REST router 与
+/// scheduler/gRPC 共享同一 state——REST 触发经事件总线唤醒调度循环下发，
+/// fake Agent 经真实 tonic 通道收 JobSpec）。调用侧持有 TempDir。
+pub fn test_app_from_state(state: AppState, data_dir: &Path) -> TestApp {
+    let web = data_dir.join(WEB_DIR);
+    let pool = state.pool.clone();
+    TestApp {
+        router: router(state.clone(), web.clone()),
+        state,
         pool,
         web,
         _dir: None,
@@ -197,4 +214,15 @@ pub async fn body_text(resp: Response) -> String {
 
 pub async fn body_json(resp: Response) -> serde_json::Value {
     serde_json::from_str(&body_text(resp).await).expect("JSON 体")
+}
+
+/// 直接驱动 engine 推进构建（构建 REST 测试缝：common harness 无 sched 循环，
+/// 缺机密失败 / from_failed 重跑前置失败态等需手动驱动；与 sched 循环共享
+/// 同一 engine，drive 幂等）。
+pub async fn drive_build(app: &TestApp, build_id: i64) {
+    app.state
+        .engine
+        .drive(build_id)
+        .await
+        .expect("engine drive");
 }

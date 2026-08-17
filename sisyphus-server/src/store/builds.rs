@@ -451,18 +451,21 @@ impl BuildRepo {
         rows.into_iter().map(BuildRow::from_tuple).collect()
     }
 
-    /// 按 (project, number) 取构建；不存在返回 `None`（REST 详情寻径）。
+    /// 按 (project, pipeline, number) 取构建；不存在返回 `None`（REST 详情
+    /// 寻径——构建号 per-pipeline，须带 pipeline_name 唯一定位）。
     pub async fn get_by_number(
         &self,
         project_id: i64,
+        pipeline_name: &str,
         number: i64,
     ) -> Result<Option<BuildRow>, StoreError> {
         let row = sqlx::query_as::<_, BuildTuple>(
             "SELECT id, project_id, pipeline_name, number, status, trigger, trigger_detail,
                     attempt, snapshot, started_at, finished_at, cancelled_at, updated_at
-             FROM builds WHERE project_id = ? AND number = ?",
+             FROM builds WHERE project_id = ? AND pipeline_name = ? AND number = ?",
         )
         .bind(project_id)
+        .bind(pipeline_name)
         .bind(number)
         .fetch_optional(&self.pool)
         .await?;
@@ -480,6 +483,79 @@ impl BuildRepo {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(BuildRow::from_tuple).collect()
+    }
+
+    /// 项目的某 pipeline 构建列表分页（按号倒序，REST 列表面 + 状态过滤，
+    /// 票 B2c-T5）。`status` 为 `None` 时不过滤；`limit`/`offset` 由调用侧校验
+    /// （page/limit 归一化）。运行时查询（非 `query!` 宏，不动 `.sqlx`）；
+    /// `status` 取自枚举 `as_str()`，无注入面。
+    pub async fn list_page(
+        &self,
+        project_id: i64,
+        pipeline_name: &str,
+        status: Option<BuildStatus>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<BuildRow>, StoreError> {
+        let rows = match status {
+            Some(status) => sqlx::query_as::<_, BuildTuple>(
+                "SELECT id, project_id, pipeline_name, number, status, trigger, trigger_detail,
+                        attempt, snapshot, started_at, finished_at, cancelled_at, updated_at
+                 FROM builds
+                 WHERE project_id = ? AND pipeline_name = ? AND status = ?
+                 ORDER BY number DESC LIMIT ? OFFSET ?",
+            )
+            .bind(project_id)
+            .bind(pipeline_name)
+            .bind(status.as_str())
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?,
+            None => sqlx::query_as::<_, BuildTuple>(
+                "SELECT id, project_id, pipeline_name, number, status, trigger, trigger_detail,
+                        attempt, snapshot, started_at, finished_at, cancelled_at, updated_at
+                 FROM builds
+                 WHERE project_id = ? AND pipeline_name = ?
+                 ORDER BY number DESC LIMIT ? OFFSET ?",
+            )
+            .bind(project_id)
+            .bind(pipeline_name)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?,
+        };
+        rows.into_iter().map(BuildRow::from_tuple).collect()
+    }
+
+    /// 项目某 pipeline 构建总数（可选状态过滤；REST 列表分页的 total，
+    /// 票 B2c-T5）。
+    pub async fn count_by_project(
+        &self,
+        project_id: i64,
+        pipeline_name: &str,
+        status: Option<BuildStatus>,
+    ) -> Result<i64, StoreError> {
+        let count: i64 = match status {
+            Some(status) => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM builds
+                 WHERE project_id = ? AND pipeline_name = ? AND status = ?",
+            )
+            .bind(project_id)
+            .bind(pipeline_name)
+            .bind(status.as_str())
+            .fetch_one(&self.pool)
+            .await?,
+            None => sqlx::query_scalar(
+                "SELECT COUNT(*) FROM builds WHERE project_id = ? AND pipeline_name = ?",
+            )
+            .bind(project_id)
+            .bind(pipeline_name)
+            .fetch_one(&self.pool)
+            .await?,
+        };
+        Ok(count)
     }
 }
 
@@ -1093,5 +1169,114 @@ mod tests {
         let list = repo.list_by_project(project_id).await.expect("清单");
         let numbers: Vec<i64> = list.iter().map(|b| b.number).collect();
         assert_eq!(numbers, vec![3, 2, 1], "按号倒序");
+    }
+
+    /// 票 B2c-T5：分页 + 状态过滤 + 计数（REST 列表面）。
+    #[tokio::test]
+    async fn list_page_counts_and_filters_by_status() {
+        let (_dir, pool, project_id) = fixture().await;
+        let repo = BuildRepo::new(pool.clone());
+        let b1 = repo
+            .start(start_build(project_id, TriggerSource::Manual))
+            .await
+            .expect("1");
+        let b2 = repo
+            .start(start_build(project_id, TriggerSource::Cron))
+            .await
+            .expect("2");
+        let _b3 = repo
+            .start(start_build(project_id, TriggerSource::Manual))
+            .await
+            .expect("3");
+        // 1 → succeeded、2 → failed、3 留 queued（倒序 3,2,1）。
+        repo.transition(b1.id, BuildStatus::Running, 1_000)
+            .await
+            .expect("1 运行");
+        repo.transition(b1.id, BuildStatus::Succeeded, 2_000)
+            .await
+            .expect("1 成功");
+        repo.transition(b2.id, BuildStatus::Running, 3_000)
+            .await
+            .expect("2 运行");
+        repo.transition(b2.id, BuildStatus::Failed, 4_000)
+            .await
+            .expect("2 失败");
+
+        // 倒序分页：limit 2 offset 0 → [3,2]；offset 2 → [1]。
+        let page = repo
+            .list_page(project_id, "release", None, 2, 0)
+            .await
+            .expect("页");
+        assert_eq!(
+            page.iter().map(|b| b.number).collect::<Vec<_>>(),
+            vec![3, 2]
+        );
+        let page = repo
+            .list_page(project_id, "release", None, 2, 2)
+            .await
+            .expect("页");
+        assert_eq!(
+            page.iter().map(|b| b.number).collect::<Vec<_>>(),
+            vec![1]
+        );
+
+        // 总数与状态过滤计数。
+        assert_eq!(
+            repo.count_by_project(project_id, "release", None)
+                .await
+                .expect("total"),
+            3
+        );
+        assert_eq!(
+            repo.count_by_project(project_id, "release", Some(BuildStatus::Failed))
+                .await
+                .expect("failed total"),
+            1
+        );
+        assert_eq!(
+            repo.count_by_project(project_id, "release", Some(BuildStatus::Queued))
+                .await
+                .expect("queued total"),
+            1
+        );
+
+        // 状态过滤分页：failed → [2]。
+        let page = repo
+            .list_page(project_id, "release", Some(BuildStatus::Failed), 10, 0)
+            .await
+            .expect("页");
+        assert_eq!(
+            page.iter().map(|b| b.number).collect::<Vec<_>>(),
+            vec![2]
+        );
+        // 无命中状态 → 空。
+        assert!(repo
+            .list_page(project_id, "release", Some(BuildStatus::Cancelled), 10, 0)
+            .await
+            .expect("页")
+            .is_empty());
+
+        // 跨 pipeline 隔离：另一 pipeline 的构建不计入本 pipeline 列表/计数。
+        let other = repo
+            .start(StartBuild {
+                pipeline_name: "lint".into(),
+                ..start_build(project_id, TriggerSource::Manual)
+            })
+            .await
+            .expect("他 pipeline");
+        assert_eq!(
+            repo.count_by_project(project_id, "release", None)
+                .await
+                .expect("release total"),
+            3,
+            "他 pipeline 不计入"
+        );
+        assert_eq!(
+            repo.count_by_project(project_id, "lint", None)
+                .await
+                .expect("lint total"),
+            1
+        );
+        let _ = other;
     }
 }

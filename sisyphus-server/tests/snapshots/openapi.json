@@ -1296,6 +1296,491 @@
         }
       }
     },
+    "/api/v1/projects/{name}/pipelines/{pipeline}/builds": {
+      "get": {
+        "tags": [
+          "builds"
+        ],
+        "summary": "构建列表（viewer 档）：按号倒序 + 分页 + 状态过滤。",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "单页条数（1..=100，默认 20）。",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "页码（从 1 起，默认 1）。",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "queued",
+                "running",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "timeout"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "构建概要列表（按号倒序）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuildListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（列表需 viewer 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "分页/状态过滤参数非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "builds"
+        ],
+        "summary": "手动触发构建（runner 档）：参数覆盖默认值 + 可选分支/commit/revision，\n调 engine 统一触发入口，返回 202 + 构建号。",
+        "operationId": "trigger",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TriggerBuildRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "已触发，返回构建号（异步推进）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuildAcceptedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "viewer 档不足（触发需 runner 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见，或 pipeline 不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}": {
+      "get": {
+        "tags": [
+          "builds"
+        ],
+        "summary": "构建详情（viewer 档）：状态/触发人/attempt/耗时/阶段与任务状态。",
+        "operationId": "detail",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "description": "构建号",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "构建详情（含阶段与任务状态）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuildDetailResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（详情需 viewer 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见，或构建号不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/cancel": {
+      "post": {
+        "tags": [
+          "builds"
+        ],
+        "summary": "取消构建（runner 档，build 级）：排队中移出、运行中经通道下发 CancelBuild\n（engine DB 迁移 + 发事件，sched 据此下发）。终态幂等 202。",
+        "operationId": "cancel",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "description": "构建号",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "已受理取消（终态幂等）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuildAcceptedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "viewer 档不足（取消需 runner 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见，或构建号不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/rerun": {
+      "post": {
+        "tags": [
+          "builds"
+        ],
+        "summary": "重跑构建（runner 档）：from_scratch 新号 attempt=1 / from_failed 同号\nattempt+1（成功任务保留）。",
+        "operationId": "rerun",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "description": "构建号",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RerunBuildRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "已受理重跑，返回新构建号/attempt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuildAcceptedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "viewer 档不足（重跑需 runner 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见，或构建号不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "from_failed 要求构建处于 failed/cancelled/timeout 终态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体非法（mode 缺失/未知）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{name}/secrets": {
       "get": {
         "tags": [
@@ -1967,6 +2452,227 @@
           }
         }
       },
+      "BuildAcceptedResponse": {
+        "type": "object",
+        "description": "触发 / 重跑的受理响应：构建号 + 当前状态（异步推进，sched 驱动）。",
+        "required": [
+          "number",
+          "build_id",
+          "attempt",
+          "status"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "重跑 attempt（首跑 1；from_failed +1）。"
+          },
+          "build_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "构建行 id。"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "per-pipeline 构建号。"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BuildStatusDto",
+            "description": "受理时状态（queued / running）。"
+          }
+        }
+      },
+      "BuildDetailResponse": {
+        "type": "object",
+        "description": "构建详情响应。",
+        "required": [
+          "number",
+          "pipeline_name",
+          "status",
+          "trigger",
+          "trigger_by",
+          "attempt",
+          "stages"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "重跑 attempt。"
+          },
+          "cancelled_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "取消时刻。"
+          },
+          "elapsed_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "耗时（毫秒；已完成 = finished-started，运行中 = now-started，未运行为空）。"
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "终态时刻。"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "per-pipeline 构建号。"
+          },
+          "pipeline_name": {
+            "type": "string",
+            "description": "pipeline 名。"
+          },
+          "stages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StageViewDto"
+            },
+            "description": "阶段与任务状态（按快照阶段序）。"
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "开始时刻（queued→running）。"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BuildStatusDto",
+            "description": "构建状态。"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/TriggerSourceDto",
+            "description": "触发源。"
+          },
+          "trigger_by": {
+            "type": "string",
+            "description": "触发人。"
+          }
+        }
+      },
+      "BuildListResponse": {
+        "type": "object",
+        "description": "分页列表响应。",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "limit"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BuildSummaryResponse"
+            },
+            "description": "本页构建概要（按号倒序）。"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "description": "单页条数。"
+          },
+          "page": {
+            "type": "integer",
+            "format": "int64",
+            "description": "当前页码。"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "总条数（满足过滤条件；供客户端算页数）。"
+          }
+        }
+      },
+      "BuildStatusDto": {
+        "type": "string",
+        "description": "构建状态（REST 形态；落库文本同型）。",
+        "enum": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "timeout"
+        ]
+      },
+      "BuildSummaryResponse": {
+        "type": "object",
+        "description": "列表条目（构建概要）。",
+        "required": [
+          "number",
+          "pipeline_name",
+          "status",
+          "trigger",
+          "trigger_by",
+          "attempt"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "重跑 attempt。"
+          },
+          "cancelled_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "取消时刻。"
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "终态时刻。"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "per-pipeline 构建号。"
+          },
+          "pipeline_name": {
+            "type": "string",
+            "description": "pipeline 名。"
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "开始时刻（queued→running；未运行为空）。"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BuildStatusDto",
+            "description": "构建状态。"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/TriggerSourceDto",
+            "description": "触发源。"
+          },
+          "trigger_by": {
+            "type": "string",
+            "description": "触发人（业务表实名）。"
+          }
+        }
+      },
       "ChangePasswordRequest": {
         "type": "object",
         "description": "自助改密请求体（票 B2b-T4）。",
@@ -2252,6 +2958,89 @@
           }
         }
       },
+      "JobStatusDto": {
+        "type": "string",
+        "description": "任务状态（详情视图；落库文本同型）。",
+        "enum": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed",
+          "cancelled",
+          "skipped",
+          "unknown",
+          "timeout",
+          "aborted"
+        ]
+      },
+      "JobViewDto": {
+        "type": "object",
+        "description": "任务视图（构建详情内；含 attempt 历史——重跑后同任务多行并列）。",
+        "required": [
+          "name",
+          "status",
+          "attempt",
+          "allow_failure"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "调度到的 Agent 行 id（未调度为空）。"
+          },
+          "allow_failure": {
+            "type": "boolean",
+            "description": "allow_failure 豁免 fail-fast。"
+          },
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "第几次执行（同任务重跑 attempt+1）。"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "详情（失败原因、缺失机密名、超时等；机密只记名不泄值）。"
+          },
+          "exit_code": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "退出码（可空）。"
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "终态时刻。"
+          },
+          "name": {
+            "type": "string",
+            "description": "任务名。"
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "开始时刻。"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatusDto",
+            "description": "任务状态。"
+          }
+        }
+      },
       "MeResponse": {
         "type": "object",
         "description": "当前用户视图（setup / login / me 共用；SPA 引导用）。",
@@ -2452,6 +3241,27 @@
           }
         }
       },
+      "RerunBuildRequest": {
+        "type": "object",
+        "description": "重跑请求体：模式二选一。",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/RerunModeDto",
+            "description": "重跑模式。"
+          }
+        }
+      },
+      "RerunModeDto": {
+        "type": "string",
+        "description": "重跑模式（`from_scratch` 新号 / `from_failed` 同号 attempt+1）。",
+        "enum": [
+          "from_scratch",
+          "from_failed"
+        ]
+      },
       "ResetPasswordRequest": {
         "type": "object",
         "description": "代办重置密码请求体（全局 admin，无需当前密码——ADR-0014：v1 无邮件\n自助重置，管理员代办即找回通道）。",
@@ -2521,6 +3331,33 @@
           }
         }
       },
+      "StageViewDto": {
+        "type": "object",
+        "description": "阶段视图（构建详情内；阶段名取自构建快照）。",
+        "required": [
+          "index",
+          "name",
+          "jobs"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "阶段序号（从 0 起）。"
+          },
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobViewDto"
+            },
+            "description": "阶段内任务（含 attempt 历史）。"
+          },
+          "name": {
+            "type": "string",
+            "description": "阶段名（快照内定义）。"
+          }
+        }
+      },
       "TokenResponse": {
         "type": "object",
         "description": "PAT 列表项（无值形态：名 / 创建时间 / 过期——令牌值任何端点不再出现）。",
@@ -2553,6 +3390,52 @@
             "description": "令牌名。"
           }
         }
+      },
+      "TriggerBuildRequest": {
+        "type": "object",
+        "description": "手动触发请求体：参数覆盖（默认值之上叠加）+ 可选 git 分支/commit 或 svn\nrevision。空体等价于全默认（参数取定义默认值、git 缺省项目默认分支）。",
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "git 分支（手动可选；缺省项目默认分支；svn 无分支概念）。"
+          },
+          "commit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "git commit sha（手动未钉为空——Agent 检分支头）。"
+          },
+          "params": {
+            "type": "object",
+            "description": "参数覆盖（名→值；默认值之上叠加，不存在的名无害——未被引用即无效果）。",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "svn revision（手动可选；git 为空）。"
+          }
+        }
+      },
+      "TriggerSourceDto": {
+        "type": "string",
+        "description": "构建触发源（手动/cron/poll）。",
+        "enum": [
+          "manual",
+          "cron",
+          "poll"
+        ]
       },
       "UserResponse": {
         "type": "object",
@@ -2660,6 +3543,10 @@
     {
       "name": "pipelines",
       "description": "Pipeline 定义读写（model 校验 + revision 语义）"
+    },
+    {
+      "name": "builds",
+      "description": "构建生命周期（票 B2c-T5：手动触发 / 取消 / 重跑 / 列表 / 详情；runner 档触发/取消/重跑、viewer 档列表/详情）"
     },
     {
       "name": "users",

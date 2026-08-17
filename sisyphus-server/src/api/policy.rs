@@ -46,6 +46,11 @@ pub struct ProjectAccess {
 /// handler 解构出 [`ProjectAccess`] 直接用。
 pub struct RequireViewer(pub ProjectAccess);
 
+/// 声明 runner 档位（[`Permission::Run`]，票 B2c-T5）：触发 / 取消 / 重跑构建。
+/// viewer 档不足 → 403；无角色 → 404（与不存在同形）。handler 解构出
+/// [`ProjectAccess`] 直接用（含 `operator` 作触发人实名）。
+pub struct RequireRunner(pub ProjectAccess);
+
 /// 声明项目 admin 档位（[`Permission::Manage`]）：定义保存、成员管理、
 /// 机密管理、项目设置。
 pub struct RequireAdmin(pub ProjectAccess);
@@ -83,6 +88,19 @@ impl FromRequestParts<AppState> for RequireViewer {
         resolve(parts, state, Permission::View)
             .await
             .map(RequireViewer)
+    }
+}
+
+impl FromRequestParts<AppState> for RequireRunner {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        resolve(parts, state, Permission::Run)
+            .await
+            .map(RequireRunner)
     }
 }
 

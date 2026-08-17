@@ -601,6 +601,39 @@ impl Engine {
     }
 
     // -----------------------------------------------------------------------
+    // 构建取消（票 B2c-T5 REST 面入口）
+    // -----------------------------------------------------------------------
+
+    /// 取消构建（build 级）：排队中移出 pending 池、构建置 cancelled、发布
+    /// `BuildStatus{Cancelled}` 事件——sched 循环订阅后经通道向在途
+    /// running/unknown 任务下发 CancelBuild（与 fail-fast 级联同款事件路径：
+    /// engine 做 DB 状态迁移 + 发事件，sched 据事件下发取消）。终态幂等
+    /// （已终态构建原样返回，不重复迁移）。构建不存在返回 `None`（REST 映射
+    /// 404）。离线 Agent 的在途任务取消挂起重连补发（DB 可重建：
+    /// `channel_cancel_pending` 视图）。
+    pub async fn cancel_build(&self, build_id: i64) -> Result<Option<BuildRow>, StoreError> {
+        let now = now_ms();
+        let Some(build) = self.builds.get(build_id).await? else {
+            return Ok(None);
+        };
+        if build.status.is_terminal() {
+            return Ok(Some(build));
+        }
+        self.builds
+            .transition(build_id, BuildStatus::Cancelled, now)
+            .await?;
+        self.jobs.cancel_queued_by_build(build_id, now).await?;
+        let cancelled = self
+            .builds
+            .get(build_id)
+            .await?
+            .expect("刚迁移的构建必存在");
+        let project_name = self.project_name(build.project_id).await?;
+        self.publish_build_status(&cancelled, &project_name);
+        Ok(Some(cancelled))
+    }
+
+    // -----------------------------------------------------------------------
     // 事件广播
     // -----------------------------------------------------------------------
 

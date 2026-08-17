@@ -24,6 +24,7 @@
 pub mod agents;
 pub mod audit;
 pub mod auth;
+pub mod builds;
 pub mod csrf;
 pub mod docs;
 pub mod error;
@@ -178,6 +179,22 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route(
             "/projects/{name}/pipelines/{pipeline}",
             get(pipelines::get_definition).put(pipelines::put_definition),
+        )
+        .route(
+            "/projects/{name}/pipelines/{pipeline}/builds",
+            get(builds::list).post(builds::trigger),
+        )
+        .route(
+            "/projects/{name}/pipelines/{pipeline}/builds/{number}",
+            get(builds::detail),
+        )
+        .route(
+            "/projects/{name}/pipelines/{pipeline}/builds/{number}/cancel",
+            post(builds::cancel),
+        )
+        .route(
+            "/projects/{name}/pipelines/{pipeline}/builds/{number}/rerun",
+            post(builds::rerun),
         )
         .route("/audit", get(audit::list))
         .route("/agents", get(agents::list).post(agents::create))
