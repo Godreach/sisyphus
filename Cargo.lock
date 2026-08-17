@@ -1952,11 +1952,15 @@ name = "sisyphus-agent"
 version = "1.0.0"
 dependencies = [
  "clap",
+ "libc",
  "sisyphus-proto",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
  "tracing",
+ "tracing-subscriber",
+ "windows-sys",
 ]
 
 [[package]]

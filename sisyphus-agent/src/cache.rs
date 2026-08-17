@@ -1,1 +1,34 @@
-//! 占位模块：cache（ADR-0009 已列，业务逻辑随后续批次实现）。
+//! 占位模块：cache（ADR-0009 已列；缓存机制随 B3-T7 实现）。
+//!
+//! B3-T1 只提供分派骨架的接收端：CacheCommand 指令经 channel reader 投递
+//! 到本模块通道，占位循环收帧即记日志（「占位 handle 可收」）。
+
+use sisyphus_proto::agent::{ChannelMessage, channel_message::Kind};
+use tokio::sync::mpsc;
+
+use crate::ReceiptLog;
+
+/// cache 占位句柄：持有下行接收端与收帧观测（分派骨架断言面）。
+pub struct Handle {
+    rx: mpsc::Receiver<ChannelMessage>,
+    receipts: ReceiptLog,
+}
+
+impl Handle {
+    /// 以分派通道的接收端构造。
+    pub fn new(rx: mpsc::Receiver<ChannelMessage>, receipts: ReceiptLog) -> Self {
+        Self { rx, receipts }
+    }
+
+    /// 占位循环：收列表/删除指令即记日志并忽略（真实处理随 B3-T7）。
+    pub async fn run(mut self) {
+        while let Some(msg) = self.rx.recv().await {
+            let kind = match msg.kind {
+                Some(Kind::CacheCmd(_)) => "cache",
+                _ => "other",
+            };
+            tracing::info!(?msg, "cache 收到指令（占位：忽略，处理随后续批次）");
+            self.receipts.lock().expect("观测锁").push(kind.to_string());
+        }
+    }
+}
