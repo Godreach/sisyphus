@@ -1,7 +1,7 @@
 <script setup lang="ts">
-// 应用壳（ADR-0020 IA：底部 zh/EN 即时切换 + 路由出口）。
-// 侧栏（概览/项目/Agent/管理 四区）随 12 页 IA 页面票落地；本壳挂路由
-// 出口、语言切换与已登录用户的登出动作（B4-T2 登出闭环）。
+// 应用壳（ADR-0020 IA：侧栏 概览/项目/Agent/管理 四区 + 底部 zh/EN 即时
+// 切换 + 路由出口）。B4-T3 起 概览/项目 已是真实页面，侧栏导航随页面票
+// 逐项点亮；未实现页（Agent/管理四页/pipeline 编辑/构建详情）仍占位。
 // 登出后整页回登录页：清 cookie + 清认证态（401 回调的 redirect 不适用，
 // 登出是主动离开，不回跳原目标）。
 
@@ -20,8 +20,23 @@ const locale = computed(() => currentLocale())
 const isAuthed = computed(() => auth.isAuthed)
 const username = computed(() => auth.user?.username ?? '')
 
+/** 侧栏导航项（ADR-0020 四区；页面未实现者也列出，点击落占位页）。 */
+const navItems = [
+  { name: 'overview', labelKey: 'routes.overview' },
+  { name: 'projects', labelKey: 'routes.projects' },
+  { name: 'agents', labelKey: 'routes.agents' },
+  { name: 'admin-secrets', labelKey: 'routes.adminSecrets' },
+  { name: 'admin-audit', labelKey: 'routes.adminAudit' },
+  { name: 'admin-upgrade', labelKey: 'routes.adminUpgrade' },
+  { name: 'admin-users', labelKey: 'routes.adminUsers' },
+] as const
+
 function toggleLocale(): void {
   setLocale(locale.value === 'zh-CN' ? 'en-US' : 'zh-CN')
+}
+
+function go(name: (typeof navItems)[number]['name']): void {
+  void router.push({ name })
 }
 
 async function signOut(): Promise<void> {
@@ -32,20 +47,37 @@ async function signOut(): Promise<void> {
 
 <template>
   <div class="app-shell">
-    <main class="app-main">
-      <RouterView />
-    </main>
-
-    <footer class="app-footer">
-      <div v-if="isAuthed" class="footer-user">
-        <span class="footer-username">{{ username }}</span>
-        <button type="button" class="footer-logout" @click="signOut">
-          {{ t('auth.logout') }}
+    <aside v-if="isAuthed" class="app-sidebar">
+      <nav class="sidebar-nav">
+        <button
+          v-for="item in navItems"
+          :key="item.name"
+          type="button"
+          class="sidebar-link"
+          :class="{ active: $route.name === item.name }"
+          @click="go(item.name)"
+        >
+          {{ t(item.labelKey) }}
         </button>
-      </div>
-      <button type="button" class="lang-switch" @click="toggleLocale">
-        {{ t('app.langSwitch') }}
-      </button>
-    </footer>
+      </nav>
+    </aside>
+
+    <div class="app-body">
+      <main class="app-main">
+        <RouterView />
+      </main>
+
+      <footer class="app-footer">
+        <div v-if="isAuthed" class="footer-user">
+          <span class="footer-username">{{ username }}</span>
+          <button type="button" class="footer-logout" @click="signOut">
+            {{ t('auth.logout') }}
+          </button>
+        </div>
+        <button type="button" class="lang-switch" @click="toggleLocale">
+          {{ t('app.langSwitch') }}
+        </button>
+      </footer>
+    </div>
   </div>
 </template>

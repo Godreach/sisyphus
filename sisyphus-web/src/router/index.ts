@@ -1,7 +1,8 @@
 // 路由表（ADR-0020 12 页 IA，票 B4-T1 骨架）。
 //
-// 本票只立骨架与守卫语义：页面实现归后续页面票（B4-T2+）。受保护段全部
-// 挂 PlaceholderView 占位，路由守卫保证「未认证访问受保护页 → 登录 →
+// 本票立骨架与守卫语义；页面按页面票落地：概览/项目列表/项目详情已随
+// B4-T3 实现，其余（pipeline 编辑、构建详情、Agent、管理四页）仍挂
+// PlaceholderView 占位，路由守卫保证「未认证访问受保护页 → 登录 →
 // 登录成功回跳」闭环（守卫逻辑见 `src/router/guards.ts`）。
 
 import { createRouter, createWebHistory } from 'vue-router'
@@ -26,19 +27,19 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/',
     name: 'overview',
-    component: () => import('@/views/PlaceholderView.vue'),
+    component: () => import('@/views/OverviewView.vue'),
     meta: { title: 'routes.overview' },
   },
   {
     path: '/projects',
     name: 'projects',
-    component: () => import('@/views/PlaceholderView.vue'),
+    component: () => import('@/views/ProjectsView.vue'),
     meta: { title: 'routes.projects' },
   },
   {
     path: '/projects/:name',
     name: 'project-detail',
-    component: () => import('@/views/PlaceholderView.vue'),
+    component: () => import('@/views/ProjectDetailView.vue'),
     meta: { title: 'routes.projectDetail' },
   },
   {

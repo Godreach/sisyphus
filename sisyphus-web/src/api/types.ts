@@ -83,11 +83,52 @@ export interface CreatedAgentResponse {
   agent: AgentResponse
 }
 
+// ---------------------------------------------------------------------------
+// 构建 / pipeline DTO（后端 `api/builds.rs`、`api/pipelines.rs`）。本批
+// （B4-T3）只镜像消费到的 pipeline 定义探测形态；构建 DTO 随消费页面票
+// （B4-T4 构建详情）按需补全。
+// ---------------------------------------------------------------------------
+
+/** Pipeline 定义响应（后端 `PipelineDefinitionResponse`：定义原文 + 修订）。 */
+export interface PipelineDefinitionResponse {
+  definition: Record<string, unknown>
+  revision: number
+  operator: string
+  updated_at: number
+}
+
 /** 建 Agent 条目请求体（后端 `CreateAgentRequest`）。 */
 export interface CreateAgentRequest {
   name: string
   custom_labels?: string[]
   max_concurrency?: number
+}
+
+// ---------------------------------------------------------------------------
+// 成员 / 用户目录 DTO（后端 `api/members.rs`、`api/users.rs`，ADR-0014）。
+// 本批（B4-T3）供项目详情成员管理与概览/项目页消费。
+// ---------------------------------------------------------------------------
+
+/** 项目成员角色（后端 `RoleDto`：viewer / runner / admin，ADR-0014 三档）。 */
+export type MemberRoleDto = 'viewer' | 'runner' | 'admin'
+
+/** 成员分配请求项（后端 `MemberAssignment`；PUT 为整组替换语义）。 */
+export interface MemberAssignment {
+  username: string
+  role: MemberRoleDto
+}
+
+/** 成员清单项（后端 `MemberResponse`，GET 响应 / PUT 后回读共用）。 */
+export interface MemberResponse {
+  user_id: number
+  username: string
+  role: MemberRoleDto
+}
+
+/** 用户目录项（后端 `DirectoryEntryResponse`：仅 id + 用户名，成员分配下拉）。 */
+export interface DirectoryEntryResponse {
+  id: number
+  username: string
 }
 
 /** 前端可分支消费的 API 错误（非 2xx 统一落此形态）。 */
