@@ -46,13 +46,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sisyphus_proto::agent::{
-    ChannelMessage, CheckoutStep, JobAck, JobPhase, JobSpec, JobStatus, ScmCredential,
+    ChannelMessage, CheckoutStep, JobAck, JobPhase, JobSpec, JobStatus, JobStep, ScmCredential,
     channel_message::Kind, execution_env::Kind as EnvKind, job_step::Kind as StepKind,
 };
 use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::ReceiptLog;
+use crate::cache::{Cache, RestoreError};
 use crate::checkout;
 use crate::container;
 use crate::exec::{self, SpawnError, StepOutcome};
@@ -196,6 +197,7 @@ pub struct Handle {
     uplink: RunnerUplink,
     in_flight: Arc<RwLock<Vec<String>>>,
     workspace: Workspace,
+    cache: Cache,
     logbuf: LogBuffer,
     cancels: CancelRegistry,
     jobs: JoinSet<()>,
@@ -203,12 +205,13 @@ pub struct Handle {
 }
 
 impl Handle {
-    /// 以分派接收端、上行链路、在途集、工作区、日志缓冲与收帧观测构造。
+    /// 以分派接收端、上行链路、在途集、工作区、缓存、日志缓冲与收帧观测构造。
     pub fn new(
         rx: mpsc::Receiver<ChannelMessage>,
         uplink: RunnerUplink,
         in_flight: Arc<RwLock<Vec<String>>>,
         workspace: Workspace,
+        cache: Cache,
         logbuf: LogBuffer,
         receipts: ReceiptLog,
     ) -> Self {
@@ -217,6 +220,7 @@ impl Handle {
             uplink,
             in_flight,
             workspace,
+            cache,
             logbuf,
             cancels: CancelRegistry::default(),
             jobs: JoinSet::new(),
@@ -292,11 +296,12 @@ impl Handle {
         let uplink = self.uplink.clone();
         let in_flight = self.in_flight.clone();
         let workspace = self.workspace.clone();
+        let cache = self.cache.clone();
         let logbuf = self.logbuf.clone();
         let cancels = self.cancels.clone();
         let job_id_for_cleanup = job_id.clone();
         self.jobs.spawn(async move {
-            run_job(spec, cancel_rx, uplink, in_flight, workspace, logbuf).await;
+            run_job(spec, cancel_rx, uplink, in_flight, workspace, cache, logbuf).await;
             // 清理取消注册（已取消则 no-op；防 stale 发送器泄漏）。
             cancels.unregister(&job_id_for_cleanup).await;
         });
@@ -447,6 +452,7 @@ async fn run_job(
     uplink: RunnerUplink,
     in_flight: Arc<RwLock<Vec<String>>>,
     workspace: Workspace,
+    cache: Cache,
     logbuf: LogBuffer,
 ) {
     let job_id = spec.job_id.clone();
@@ -512,6 +518,7 @@ async fn run_job(
         &spec,
         &ws_dir,
         &backend,
+        &cache,
         &cancel_rx,
         &secret_values,
         trunc,
@@ -547,14 +554,21 @@ fn outcome_phase(outcome: JobOutcome) -> (JobPhase, Option<i32>, String) {
 /// 步骤交后端（host = [`checkout::run`]；容器 = 容器内 checkout，B3-T6/T7）。任一
 /// 步骤失败/取消/超时即终止并返回对应终态。容器任务首步前显式 `docker pull`
 /// （always，ADR-0018）。`trunc` 由调用方 per-job 创建，pull + 全步骤 + 全子命令共享。
+///
+/// **缓存 restore/save 时机**（ADR-0012）：restore 在最后一个 checkout 步骤后、
+/// 其余步骤前（锁文件就位才能算 files 哈希；无 checkout 则首步骤前）；files 缺失 =
+/// fail-fast（[`JobOutcome::SpawnFailed`] 点名）。save 仅全步骤成功后（取消/超时/
+/// 失败一律不 save——循环内早返回跳过 save）。缓存操作在宿主侧 `ws_dir` 上执行，
+/// 容器任务挂载同一工作区、容器内无感知（ADR-0018）。
 //
-// 参数多于 clippy 阈值：spec/ws/backend 是步骤输入、余下是 step 上下文（取消/脱敏/
+// 参数多于 clippy 阈值：spec/ws/backend/cache 是步骤输入、余下是 step 上下文（取消/脱敏/
 // 截断/超时/日志）——与 [`Backend::run_checkout`] 同款 allow。
 #[allow(clippy::too_many_arguments)]
 async fn run_steps(
     spec: &JobSpec,
     ws_dir: &Path,
     backend: &Backend<'_>,
+    cache: &Cache,
     cancel_rx: &watch::Receiver<bool>,
     secret_values: &[Vec<u8>],
     trunc: Arc<Truncation>,
@@ -581,7 +595,23 @@ async fn run_steps(
     }
     // `${SISY_WORKSPACE}` 展开根：host = 宿主工作区；container = /sisyphus/workspace。
     let expand_root = backend.expand_root(ws_dir);
-    for step in &spec.steps {
+
+    // 缓存 restore 时机点（ADR-0012）：最后一个 checkout 步骤后、其余步骤前。
+    // restore_before_step = 末个 checkout 的下一索引；无 checkout = 0（首步骤前）。
+    // 在该索引的步骤执行前 restore 一次；若该索引 >= 步骤数（末步是 checkout /
+    // 无步骤），循环后补做。
+    let caches_nonempty = !spec.caches.is_empty();
+    let restore_before_step = restore_point(&spec.steps);
+    let mut restored = false;
+
+    for (i, step) in spec.steps.iter().enumerate() {
+        // restore 时机点命中：本步骤执行前 restore（仅一次）。
+        if caches_nonempty && !restored && i == restore_before_step {
+            if let Err(detail) = restore_caches(cache, spec, ws_dir).await {
+                return JobOutcome::SpawnFailed(detail);
+            }
+            restored = true;
+        }
         let step_seq = step.seq;
         match step.kind.as_ref() {
             Some(StepKind::Shell(shell)) => {
@@ -768,7 +798,57 @@ async fn run_steps(
             }
         }
     }
+    // restore 时机点 >= 步骤数（末步是 checkout / 无步骤）且未 restore：循环后
+    // 补做——此时全步骤已成功（循环内失败已早返回）。
+    if caches_nonempty
+        && !restored
+        && let Err(detail) = restore_caches(cache, spec, ws_dir).await
+    {
+        return JobOutcome::SpawnFailed(detail);
+    }
+    // save：仅全步骤成功后、先于产物上传（本批无上传传输，即步骤成功后立即 save；
+    // ADR-0012）。save 失败已告警不判败——忽略返回。
+    if caches_nonempty {
+        save_caches(cache, spec, ws_dir).await;
+    }
     JobOutcome::Succeeded
+}
+
+// ============================================================
+// 缓存 restore/save 时机钩子（ADR-0012）
+// ============================================================
+
+/// 缓存 restore 时机点（ADR-0012）：末个 checkout 步骤的下一索引；无 checkout
+/// = 0（首步骤前）。锁文件就位才能算 files 哈希——故 restore 必在 checkout 之后。
+/// 纯函数，便于单测时机正确性（无需真实 checkout 执行）。
+pub(crate) fn restore_point(steps: &[JobStep]) -> usize {
+    steps
+        .iter()
+        .rposition(|s| matches!(s.kind, Some(StepKind::Checkout(_))))
+        .map(|i| i + 1)
+        .unwrap_or(0)
+}
+
+/// 在 restore 时机点对本任务所有缓存声明执行 restore。files 缺失 = `Err`（fail-fast，
+/// runner 映射 [`JobOutcome::SpawnFailed`] 点名）；restore 拷贝失败已当 miss（不进
+/// `Err`，构建照常跑）。无缓存声明 = no-op。pipeline 名取 `spec.pipeline_name`。
+async fn restore_caches(cache: &Cache, spec: &JobSpec, ws_dir: &Path) -> Result<(), String> {
+    for c in &spec.caches {
+        if let Err(RestoreError::MissingFile(f)) =
+            cache.restore(&spec.pipeline_name, c, ws_dir).await
+        {
+            return Err(format!("缓存锁文件缺失：{f}"));
+        }
+    }
+    Ok(())
+}
+
+/// 全部步骤成功后 save 各缓存声明。save 失败已告警不判败（ADR-0012）——此处
+/// 忽略返回。无缓存声明 = no-op。
+async fn save_caches(cache: &Cache, spec: &JobSpec, ws_dir: &Path) {
+    for c in &spec.caches {
+        cache.save(&spec.pipeline_name, c, ws_dir).await;
+    }
 }
 
 // ============================================================
@@ -926,6 +1006,48 @@ mod tests {
         );
     }
 
+    /// restore 时机点（ADR-0012）：末个 checkout 的下一索引；无 checkout = 0。
+    /// 纯函数——无需真实 checkout 执行即可断言时机正确性。
+    #[test]
+    fn restore_point_after_last_checkout_or_before_first_step() {
+        use sisyphus_proto::agent::{CheckoutStep, ShellStep, VcsType};
+        let shell = || JobStep {
+            name: "s".into(),
+            seq: 0,
+            kind: Some(StepKind::Shell(ShellStep { command: String::new() })),
+        };
+        let checkout = || JobStep {
+            name: "c".into(),
+            seq: 0,
+            kind: Some(StepKind::Checkout(CheckoutStep {
+                vcs: VcsType::VcsGit as i32,
+                repo_url: String::new(),
+                r#ref: String::new(),
+                commit: String::new(),
+                submodules: false,
+            })),
+        };
+        // 无步骤 → 0。
+        assert_eq!(restore_point(&[]), 0);
+        // 仅 shell → 0（无 checkout，首步骤前 restore）。
+        assert_eq!(restore_point(&[shell()]), 0);
+        assert_eq!(restore_point(&[shell(), shell()]), 0);
+        // 仅 checkout → 1（末个 checkout 是 idx 0，下一索引 1）。
+        assert_eq!(restore_point(&[checkout()]), 1);
+        // checkout + shell → 1（restore 在 checkout 后、shell 前）。
+        assert_eq!(restore_point(&[checkout(), shell()]), 1);
+        // shell + checkout + shell → 2（末个 checkout 在 idx 1，restore 在 idx 2 前）。
+        assert_eq!(restore_point(&[shell(), checkout(), shell()]), 2);
+        // 多 checkout：取最后一个 → 3。
+        assert_eq!(
+            restore_point(&[checkout(), shell(), checkout(), shell()]),
+            3,
+            "末个 checkout 后 restore"
+        );
+        // 全是 checkout → 末个之后（len）。
+        assert_eq!(restore_point(&[checkout(), checkout()]), 2);
+    }
+
     /// AC（ADR-0018「镜像缺 sh/所需二进制 = 清晰报错」）：容器步骤退出 127（command
     /// not found）→ detail 增补「镜像可能缺 sh 或 git/svn」；host 后端 + 非 127 退出
     /// 原样。无需 daemon（纯 Backend 逻辑）。
@@ -995,6 +1117,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("logbuf")).expect("建 logbuf 目录");
         let ws = Workspace::new(dir.path().join("workspaces"));
         let ws_dir = ws.resolve("pipe", "job").expect("resolve 工作区");
+        let cache = Cache::new(dir.path().join("cache"), 0);
 
         let command = if cfg!(unix) {
             "sleep 30".to_string()
@@ -1020,6 +1143,7 @@ mod tests {
             &spec,
             &ws_dir,
             &Backend::Host,
+            &cache,
             &cancel_rx,
             &[],
             trunc,
@@ -1043,6 +1167,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("logbuf")).expect("建 logbuf 目录");
         let ws = Workspace::new(dir.path().join("workspaces"));
         let ws_dir = ws.resolve("pipe", "job").expect("resolve 工作区");
+        let cache = Cache::new(dir.path().join("cache"), 0);
 
         let command = if cfg!(unix) {
             "sleep 30".to_string()
@@ -1067,6 +1192,7 @@ mod tests {
             &spec,
             &ws_dir,
             &Backend::Host,
+            &cache,
             &cancel_rx,
             &[],
             trunc,

@@ -13,4 +13,8 @@ pub struct Cli {
     /// 一次性注册码（ADR-0007：Agent 首次接入凭注册码换长期 token）
     #[arg(long)]
     pub reg_key: Option<String>,
+
+    /// 缓存容量上限（ADR-0012：单位 GiB，0 = 不限，默认 20）。
+    #[arg(long)]
+    pub cache_capacity_gib: Option<u64>,
 }

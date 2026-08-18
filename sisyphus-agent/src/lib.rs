@@ -24,6 +24,7 @@ pub mod workspace;
 
 use std::sync::Arc;
 
+use cache::Cache;
 use channel::ChannelConfig;
 use tokio::sync::{RwLock, mpsc, watch};
 use workspace::Workspace;
@@ -58,6 +59,9 @@ pub struct Agent {
     workspace_state: Workspace,
     /// 工作区占用采样器（低频后台遍历；`run` 用 channel_cfg 的间隔 spawn）。
     workspace_sampler: Arc<workspace::WorkspaceSampler>,
+    /// 缓存共享状态（ADR-0012：根 + 容量 + registry；runner restore/save 时机
+    /// 钩子 + `run_connection` set_live/读 cache_bytes）。
+    cache_state: Cache,
     /// 各模块占位句柄（真实执行随后续批次换入）。
     runner: runner::Handle,
     workspace: workspace::Handle,
@@ -76,6 +80,8 @@ impl Agent {
         let workspace_state = Workspace::new(config.workspaces_dir());
         let workspace_sampler = Arc::new(workspace::WorkspaceSampler::new(config.workspaces_dir()));
         let workspace_state = workspace_state.with_usage(workspace_sampler.clone());
+        // 缓存共享状态（ADR-0012：缓存根 + 容量上限，registry 载入）。
+        let cache_state = Cache::new(config.cache_dir(), config.cache_capacity_bytes());
         let channel_cfg = ChannelConfig {
             server_url: config.server_url.clone(),
             token: config::read_token(&config.data_dir),
@@ -87,7 +93,13 @@ impl Agent {
             disk: Arc::new(channel::PlatformDiskSampler::new(config.data_dir.clone())),
             workspace_sample_interval: workspace::DEFAULT_WORKSPACE_SAMPLE_INTERVAL,
         };
-        Self::with_channel_config(config, channel_cfg, workspace_state, workspace_sampler)
+        Self::with_channel_config(
+            config,
+            channel_cfg,
+            workspace_state,
+            workspace_sampler,
+            cache_state,
+        )
     }
 
     /// 以指定通道参数装配（测试注入短心跳/短退避/固定采样求确定性）。
@@ -98,6 +110,7 @@ impl Agent {
         channel_cfg: ChannelConfig,
         workspace_state: Workspace,
         workspace_sampler: Arc<workspace::WorkspaceSampler>,
+        cache_state: Cache,
     ) -> Self {
         // 分派通道：各模块持有接收端，reader 持有发送端。
         let (runner_tx, runner_rx) = mpsc::channel(channel::DISPATCH_CAPACITY);
@@ -116,6 +129,7 @@ impl Agent {
         let runner_uplink = runner::RunnerUplink::new();
         // Handle 持一份工作区状态克隆（与组合根共享内部；run_connection 用根上那份）。
         let handle_state = workspace_state.clone();
+        let handle_cache = cache_state.clone();
         Self {
             config,
             channel_cfg,
@@ -125,16 +139,18 @@ impl Agent {
             runner_uplink: runner_uplink.clone(),
             workspace_state,
             workspace_sampler,
+            cache_state,
             runner: runner::Handle::new(
                 runner_rx,
                 runner_uplink,
                 in_flight,
                 handle_state.clone(),
+                handle_cache.clone(),
                 logbuf,
                 receipts.clone(),
             ),
             workspace: workspace::Handle::new(workspace_rx, handle_state, receipts.clone()),
-            cache: cache::Handle::new(cache_rx, receipts.clone()),
+            cache: cache::Handle::new(cache_rx, handle_cache, receipts.clone()),
             upgrader: upgrader::Handle::new(upgrader_rx, receipts.clone()),
             receipts,
         }
@@ -153,6 +169,12 @@ impl Agent {
     /// 工作区共享状态（集成测试用它 resolve/清理真实工作区目录、读采样）。
     pub fn workspace_state(&self) -> Workspace {
         self.workspace_state.clone()
+    }
+
+    /// 缓存共享状态（集成测试用它 restore/save/列表/删除真实缓存目录、读
+    /// cache_bytes）。
+    pub fn cache_state(&self) -> Cache {
+        self.cache_state.clone()
     }
 
     /// 常驻运行：占位模块循环 + 通道重连循环。断线即指数退避重连、永久
@@ -198,6 +220,7 @@ impl Agent {
                     &self.logbuf,
                     &self.runner_uplink,
                     &self.workspace_state,
+                    &self.cache_state,
                 ) => r,
                 _ = shutdown_requested(&mut shutdown) => break,
             };

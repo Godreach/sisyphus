@@ -98,6 +98,7 @@ UPDATE_SNAPSHOTS=1 cargo test -p sisyphus-server    # 重写快照
 | 数据目录 | `--data-dir` | `SISYPHUS_DATA_DIR` | `~/.sisyphus-agent` |
 | 日志级别 | `--log-level` | `SISYPHUS_LOG_LEVEL` | `info`（`RUST_LOG` 若设置则整体胜出） |
 | 日志文件（追加 JSON） | `--log-file` | `SISYPHUS_LOG_FILE` | 无（日志走 stderr pretty） |
+| 缓存容量上限（GiB，0 = 不限） | `--cache-capacity-gib` | `SISYPHUS_CACHE_CAPACITY_GIB` | 20（ADR-0012：per-Agent 容量上限，LRU 自动淘汰；磁盘容量是机器运维属性不参与调度） |
 
 **首次接入（注册引导，票 #57）**：管理员在 web UI 建 Agent 条目并签发一次性注册码（24h 有效）后，构建机凭注册码兑长期 token 落盘再常驻：
 

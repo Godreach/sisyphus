@@ -74,10 +74,11 @@ const MAX_COLLISION_ATTEMPTS: u32 = 65_535;
 // 名称清洗
 // ============================================================
 
-/// 清洗目录名段：非 `[A-Za-z0-9._-]` 一律替换 `_`，空/`.`/`..` 归一为 `_`，
-/// 超长按字节截断（替换后恒为 ASCII，字节截断安全）。允许 `.` 但把裸 `.`
-/// 与 `..`（路径穿越）归一为 `_`。
-fn sanitize(name: &str) -> String {
+/// 清洗目录名段的字符层：非 `[A-Za-z0-9._-]` 一律替换 `_`，空/`.`/`..` 归一为
+/// `_`（路径穿越防护）。**不截断**——截断上限由调用方按各自后缀留位决定
+/// （workspace 留 `-<N>`、cache 留 files 哈希后缀，见 [`crate::cache`]）。
+/// `pub(crate)`：cache 模块复用同一清洗规则（ADR-0011/0012 同款）。
+pub(crate) fn sanitize_chars(name: &str) -> String {
     let mut s: String = name
         .chars()
         .map(|c| {
@@ -91,6 +92,14 @@ fn sanitize(name: &str) -> String {
     if s.is_empty() || s == "." || s == ".." {
         s = "_".to_string();
     }
+    s
+}
+
+/// 清洗目录名段：非 `[A-Za-z0-9._-]` 一律替换 `_`，空/`.`/`..` 归一为 `_`，
+/// 超长按字节截断（替换后恒为 ASCII，字节截断安全）。允许 `.` 但把裸 `.`
+/// 与 `..`（路径穿越）归一为 `_`。
+fn sanitize(name: &str) -> String {
+    let mut s = sanitize_chars(name);
     if s.len() > MAX_NAME_LEN {
         s.truncate(MAX_NAME_LEN);
     }

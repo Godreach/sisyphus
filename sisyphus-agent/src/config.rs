@@ -29,6 +29,8 @@ pub const WORKSPACES_DIR: &str = "workspaces";
 pub const CACHE_DIR: &str = "cache";
 /// 数据目录内的断线日志缓冲子目录名（ADR-0007/0013）。
 pub const LOGBUF_DIR: &str = "logbuf";
+/// 缓存容量上限默认值（ADR-0012：per-Agent 容量上限，单位 GiB；0 = 不限）。
+pub const DEFAULT_CACHE_CAPACITY_GIB: u64 = 20;
 
 /// 合并后的启动配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +49,9 @@ pub struct Config {
     pub log_level: String,
     /// 可选追加写 JSON 的运行日志文件（ADR-0019：不自管轮转）。
     pub log_file: Option<PathBuf>,
+    /// 缓存容量上限（ADR-0012：per-Agent，单位 GiB；0 = 不限，默认 20）。
+    /// Agent 本地配置——磁盘容量是机器的运维属性，不参与调度决策。
+    pub cache_capacity_gib: u64,
 }
 
 impl Config {
@@ -105,6 +110,10 @@ impl Config {
             workspace_root,
             log_level,
             log_file: pick_path(&cli.log_file, &env.log_file),
+            cache_capacity_gib: cli
+                .cache_capacity_gib
+                .or(env.cache_capacity_gib)
+                .unwrap_or(DEFAULT_CACHE_CAPACITY_GIB),
         })
     }
 
@@ -129,6 +138,11 @@ impl Config {
         self.data_dir.join(CACHE_DIR)
     }
 
+    /// 缓存容量上限（字节；ADR-0012：`cache_capacity_gib` GiB → 字节，0 = 不限）。
+    pub fn cache_capacity_bytes(&self) -> u64 {
+        self.cache_capacity_gib.saturating_mul(1024 * 1024 * 1024)
+    }
+
     /// 断线日志缓冲目录（ADR-0007/0013：每 (job, attempt) 一个 jsonl 文件）。
     pub fn logbuf_dir(&self) -> PathBuf {
         self.data_dir.join(LOGBUF_DIR)
@@ -151,6 +165,8 @@ pub struct Overrides {
     pub log_level: Option<String>,
     /// 日志文件覆盖。
     pub log_file: Option<PathBuf>,
+    /// 缓存容量上限覆盖（ADR-0012：GiB，0 = 不限）。
+    pub cache_capacity_gib: Option<u64>,
 }
 
 impl Overrides {
@@ -164,6 +180,8 @@ impl Overrides {
             workspace_root: get("SISYPHUS_AGENT_WORKSPACE_ROOT").map(PathBuf::from),
             log_level: get("SISYPHUS_LOG_LEVEL"),
             log_file: get("SISYPHUS_LOG_FILE").map(PathBuf::from),
+            cache_capacity_gib: get("SISYPHUS_CACHE_CAPACITY_GIB")
+                .and_then(|v| v.parse::<u64>().ok()),
         }
     }
 }
@@ -361,6 +379,40 @@ mod tests {
 
         std::fs::write(dir.path().join(TOKEN_FILE_NAME), "   ").expect("写空白");
         assert_eq!(read_token(dir.path()), None, "空白 token 视为缺凭据");
+    }
+
+    #[test]
+    fn cache_capacity_defaults_and_respects_override() {
+        let dir = tempfile::tempdir().expect("临时数据目录");
+        let cli = Overrides {
+            server_url: Some("http://127.0.0.1:50051".into()),
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Overrides::default()
+        };
+        // 缺省：20 GiB（ADR-0012）。
+        let cfg = Config::load(&cli, &Overrides::default()).expect("缺省");
+        assert_eq!(cfg.cache_capacity_gib, DEFAULT_CACHE_CAPACITY_GIB);
+        assert_eq!(
+            cfg.cache_capacity_bytes(),
+            DEFAULT_CACHE_CAPACITY_GIB * 1024 * 1024 * 1024
+        );
+
+        // env 层覆盖。
+        let env = Overrides {
+            cache_capacity_gib: Some(5),
+            ..Overrides::default()
+        };
+        let cfg = Config::load(&cli, &env).expect("env 覆盖");
+        assert_eq!(cfg.cache_capacity_gib, 5);
+
+        // CLI 层压过 env 层；0 = 不限（字节 0）。
+        let cli_override = Overrides {
+            cache_capacity_gib: Some(0),
+            ..cli.clone()
+        };
+        let cfg = Config::load(&cli_override, &env).expect("CLI 胜 env");
+        assert_eq!(cfg.cache_capacity_gib, 0, "0 = 不限");
+        assert_eq!(cfg.cache_capacity_bytes(), 0);
     }
 
     #[test]

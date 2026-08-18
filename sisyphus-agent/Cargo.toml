@@ -30,6 +30,13 @@ clap.workspace = true
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json"] }
 serde.workspace = true
 serde_json.workspace = true
+# 缓存 files 哈希后缀（ADR-0012：声明顺序拼接文件内容 sha256 前 12 位 hex）+
+# 升级包 sha256 校验（upgrader 批次）。workspace 已有——server auth 面同依赖。
+sha2.workspace = true
+# 跨平台文件锁（ADR-0012：per-key 锁；restore 共享读锁 / save 独占锁）。
+# fs2 的维护 fork；纯 Rust（Unix libc / Windows windows-sys，均已为本 crate 依赖），
+# 6 目标交叉编译面（ADR-0010）可负担。仅开 sync feature——不拖 tokio/async-std。
+fs4 = { version = "1.1", default-features = false, features = ["sync"] }
 # 日志缓冲输出字节的 base64 落盘（ADR-0013：jsonl 行内保二进制安全；
 # workspace 已有——server auth 面同依赖，零新增 crate，纯 Rust）。
 # alloc feature：decode_vec 需要（std = alloc，直接开 std）。

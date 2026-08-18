@@ -253,16 +253,57 @@ fn spawn_agent(
         ws_root.clone(),
     ));
     let ws_state = Workspace::new(ws_root).with_usage(sampler.clone());
+    let cache_state = sisyphus_agent::cache::Cache::new(cfg.cache_dir(), cfg.cache_capacity_bytes());
     let agent = Agent::with_channel_config(
         cfg,
         channel_cfg(server_url, token, data_dir),
         ws_state.clone(),
         sampler,
+        cache_state,
     );
     let ws = agent.workspace_state();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let task = tokio::spawn(agent.run(shutdown_rx));
     (shutdown_tx, ws, task)
+}
+
+/// 装配组合根并 spawn `Agent::run`，额外返回缓存共享状态（cache 集成测试用它
+/// 预置/观察真实缓存目录）。与 `spawn_agent` 同款 + cache 状态。
+fn spawn_agent_cache(
+    data_dir: &Path,
+    server_url: String,
+    token: Option<&str>,
+) -> (
+    watch::Sender<bool>,
+    Workspace,
+    sisyphus_agent::cache::Cache,
+    tokio::task::JoinHandle<()>,
+) {
+    let cfg = config::Config::load(
+        &Overrides {
+            server_url: Some(server_url.clone()),
+            data_dir: Some(data_dir.to_path_buf()),
+            ..Overrides::default()
+        },
+        &Overrides::default(),
+    )
+    .expect("配置");
+    let ws_root = cfg.workspaces_dir();
+    let sampler = Arc::new(sisyphus_agent::workspace::WorkspaceSampler::new(ws_root.clone()));
+    let ws_state = Workspace::new(ws_root).with_usage(sampler.clone());
+    let cache_state = sisyphus_agent::cache::Cache::new(cfg.cache_dir(), cfg.cache_capacity_bytes());
+    let agent = Agent::with_channel_config(
+        cfg,
+        channel_cfg(server_url, token, data_dir),
+        ws_state.clone(),
+        sampler,
+        cache_state,
+    );
+    let ws = agent.workspace_state();
+    let cache = agent.cache_state();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let task = tokio::spawn(agent.run(shutdown_rx));
+    (shutdown_tx, ws, cache, task)
 }
 
 /// 构造一个 shell 步骤的 JobSpec。
@@ -298,6 +339,44 @@ fn shell_spec(
             downloads: vec![],
             caches: vec![],
             secrets: secrets.into_iter().map(str::to_string).collect(),
+            scm_credential: None,
+            labels: vec![],
+            retry_count: 0,
+            allow_failure: false,
+        }))),
+    }
+}
+
+/// 构造一个 shell 步骤的 JobSpec，附带缓存声明（ADR-0012 集成测试用）。
+fn shell_spec_with_caches(
+    job_id: &str,
+    pipeline: &str,
+    job: &str,
+    command: &str,
+    caches: Vec<sisyphus_proto::agent::CacheSpec>,
+) -> ChannelMessage {
+    ChannelMessage {
+        kind: Some(Kind::JobSpec(Box::new(JobSpec {
+            job_id: job_id.to_string(),
+            pipeline_name: pipeline.into(),
+            job_name: job.into(),
+            build_number: 1,
+            attempt: 0,
+            log_limit_bytes: 0,
+            steps: vec![JobStep {
+                name: "step-0".into(),
+                seq: 0,
+                kind: Some(StepKind::Shell(ShellStep {
+                    command: command.into(),
+                })),
+            }],
+            env: HashMap::new(),
+            exec_env: None,
+            timeout_minutes: 0,
+            uploads: vec![],
+            downloads: vec![],
+            caches,
+            secrets: vec![],
             scm_credential: None,
             labels: vec![],
             retry_count: 0,
@@ -1459,4 +1538,394 @@ async fn container_checkout_step_clones_into_mounted_workspace() {
     shutdown_tx.send(true).expect("关闭");
     agent_task.await.expect("agent 退出");
     server_task.abort();
+}
+
+// ============================================================
+// 缓存 restore/save 时机与往返（ADR-0012 集成验收）
+// ============================================================
+
+/// AC（ADR-0012 时机 + 往返 + 跨任务复用）：job A 成功 → save 缓存；job B 同
+/// pipeline 不同 job（独立工作区）restore → 命中（out 由 restore 拷入全新工作区）。
+/// save 仅成功后；restore 内容与 save 内容逐字节一致（朴素拷贝往返）。
+///
+/// 命令刻意只用 `echo ... > out` / `echo ok`——sh / cmd / pwsh 三种默认解释器
+/// 均认（`>` 两侧留空格 pwsh 才当重定向）；不在 shell 里判 HIT/MISS，改由测试
+/// 直接读工作区文件断言 restore 结果。
+#[tokio::test]
+async fn cache_save_on_success_and_restore_across_jobs() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, ws, cache, agent_task) =
+        spawn_agent_cache(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
+
+    let caches = vec![sisyphus_proto::agent::CacheSpec {
+        key: "shared".into(),
+        paths: vec!["out".into()],
+        files: vec![],
+    }];
+
+    // job A：写 out → 成功 → save 缓存（paths=[out]）。job 名 "seed"。
+    send_downlink(
+        &state,
+        shell_spec_with_caches("job-a", "pipe", "seed", "echo built > out", caches.clone()),
+    )
+    .await;
+    let ack_a = await_ack(&state, "job-a", true).await;
+    assert!(ack_a.error.is_empty());
+    let term_a = await_terminal(&state, "job-a").await;
+    assert_eq!(term_a.phase(), JobPhase::JobSucceeded, "job A 成功");
+    // 缓存已 save：缓存目录存在 + out 非空（含 "built"）。
+    let cache_dir = cache.root().join("pipe").join("shared");
+    wait_until(|| async { cache_dir.join("out").is_file() }).await;
+    let saved = std::fs::read(cache_dir.join("out")).unwrap();
+    assert!(
+        saved.windows(5).any(|w| w == b"built"),
+        "save 拷入了 out（内容含 built）：{:?}",
+        String::from_utf8_lossy(&saved)
+    );
+
+    // job B：同 pipeline "pipe"、不同 job "build" → 独立全新工作区（out 不存在）。
+    // restore 在 shell 前 → 从缓存拷入 out；shell 仅 echo ok（不依赖 out）。
+    send_downlink(
+        &state,
+        shell_spec_with_caches("job-b", "pipe", "build", "echo ok", caches.clone()),
+    )
+    .await;
+    let _ = await_ack(&state, "job-b", true).await;
+    let term_b = await_terminal(&state, "job-b").await;
+    assert_eq!(term_b.phase(), JobPhase::JobSucceeded);
+    // restore 命中：全新工作区的 out 由 restore 拷入，内容与 save 逐字节一致。
+    let b_ws = ws.find("pipe", "build").expect("resolve job B 工作区");
+    wait_until(|| async { b_ws.join("out").is_file() }).await;
+    let restored = std::fs::read(b_ws.join("out")).unwrap();
+    assert_eq!(
+        restored, saved,
+        "restore 拷入的内容与 save 一致（朴素拷贝往返）"
+    );
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// AC（ADR-0012 多 job 并行不踩踏）：两个 job 同 pipeline、不同 job（独立工作区）、
+/// 同缓存 key 并发 save → 独占锁串行化、last-writer-wins、无损坏/无 panic、
+/// registry 一致（单条）。并发经通道下发两帧、await 两者终态。
+#[tokio::test]
+async fn cache_parallel_jobs_same_key_no_stomp() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, _ws, cache, agent_task) =
+        spawn_agent_cache(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
+
+    let caches = vec![sisyphus_proto::agent::CacheSpec {
+        key: "shared".into(),
+        paths: vec!["out".into()],
+        files: vec![],
+    }];
+    // 两 job 并发：各写不同内容到 out + save 同 key。独占锁串行 save。
+    send_downlink(
+        &state,
+        shell_spec_with_caches("job-p1", "pipe", "p1", "echo v1 > out", caches.clone()),
+    )
+    .await;
+    send_downlink(
+        &state,
+        shell_spec_with_caches("job-p2", "pipe", "p2", "echo v2 > out", caches.clone()),
+    )
+    .await;
+    let _ = await_ack(&state, "job-p1", true).await;
+    let _ = await_ack(&state, "job-p2", true).await;
+    let t1 = await_terminal(&state, "job-p1").await;
+    let t2 = await_terminal(&state, "job-p2").await;
+    assert_eq!(t1.phase(), JobPhase::JobSucceeded, "job-p1 成功");
+    assert_eq!(t2.phase(), JobPhase::JobSucceeded, "job-p2 成功");
+
+    // last-writer-wins：缓存仅一条，out 内容为 v1 或 v2 之一（无损坏）。
+    let cache_out = cache.root().join("pipe").join("shared").join("out");
+    wait_until(|| async { cache_out.is_file() }).await;
+    let content = std::fs::read(&cache_out).unwrap();
+    assert!(
+        content.windows(2).any(|w| w == b"v1") || content.windows(2).any(|w| w == b"v2"),
+        "缓存内容为 v1 或 v2（last-writer-wins）：{:?}",
+        String::from_utf8_lossy(&content)
+    );
+    // registry 一致：同 key 并发 save → 单条；记账大小 = out 文件大小。
+    assert_eq!(
+        cache.cache_bytes(),
+        content.len() as i64,
+        "registry 记账与落盘一致（单条，last-writer-wins）"
+    );
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// AC（ADR-0012 失败不 save）：shell 步骤非零退出 → 任务 failed → 不 save 缓存。
+#[tokio::test]
+async fn cache_not_saved_on_failure() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, _ws, cache, agent_task) =
+        spawn_agent_cache(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
+
+    send_downlink(
+        &state,
+        shell_spec_with_caches(
+            "job-f",
+            "pipe",
+            "job",
+            &exit_cmd(3),
+            vec![sisyphus_proto::agent::CacheSpec {
+                key: "k".into(),
+                paths: vec!["out".into()],
+                files: vec![],
+            }],
+        ),
+    )
+    .await;
+    let _ = await_ack(&state, "job-f", true).await;
+    let term = await_terminal(&state, "job-f").await;
+    assert_eq!(term.phase(), JobPhase::JobFailed, "shell 非零退出 → failed");
+    // 失败不 save：缓存目录不存在、registry 空。
+    let cache_dir = cache.root().join("pipe").join("k");
+    assert!(!cache_dir.exists(), "失败不 save 缓存");
+    assert_eq!(cache.cache_bytes(), 0, "registry 无条目");
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// AC（ADR-0012「取消/超时/失败一律不 save」——取消分支）：长睡眠 job 带缓存声明
+/// → running → 取消 → cancelled 终态 → 缓存不 save（目录不建、registry 空）。取消在
+/// 步骤 wait 中电平触发、进程树终止、run_steps 早返回跳过 save_caches。
+#[tokio::test]
+async fn cache_not_saved_on_cancel() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, _ws, cache, agent_task) =
+        spawn_agent_cache(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
+
+    send_downlink(
+        &state,
+        shell_spec_with_caches(
+            "job-cancel",
+            "pipe",
+            "job",
+            &sleep_cmd(),
+            vec![sisyphus_proto::agent::CacheSpec {
+                key: "k".into(),
+                paths: vec!["out".into()],
+                files: vec![],
+            }],
+        ),
+    )
+    .await;
+    await_ack(&state, "job-cancel", true).await;
+    wait_until(|| async {
+        state
+            .statuses()
+            .iter()
+            .any(|s| s.job_id == "job-cancel" && s.phase() == JobPhase::JobRunning)
+    })
+    .await;
+
+    // 下发取消（build 级，job_id 同）。
+    send_downlink(
+        &state,
+        ChannelMessage {
+            kind: Some(Kind::Cancel(CancelBuild {
+                build_id: "1".into(),
+                job_id: "job-cancel".into(),
+            })),
+        },
+    )
+    .await;
+    let terminal = await_terminal(&state, "job-cancel").await;
+    assert_eq!(terminal.phase(), JobPhase::JobCancelled, "取消 → cancelled");
+
+    // 取消不 save：缓存目录不存在、registry 空。
+    let cache_dir = cache.root().join("pipe").join("k");
+    assert!(!cache_dir.exists(), "取消不 save 缓存");
+    assert_eq!(cache.cache_bytes(), 0, "registry 无条目");
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// AC（ADR-0012 files 缺失 = fail-fast 点名）：caches 声明 files 但工作区无该
+/// 文件 → 任务立即失败，detail 点名缺失文件。
+#[tokio::test]
+async fn cache_files_missing_fails_fast_naming_file() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, _ws, _cache, agent_task) =
+        spawn_agent_cache(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
+
+    // 无 checkout 步骤 → restore 在首步骤前；声明 files=[Cargo.lock] 但工作区空
+    // → fail-fast。
+    send_downlink(
+        &state,
+        shell_spec_with_caches(
+            "job-ff",
+            "pipe",
+            "job",
+            "echo should-not-run",
+            vec![sisyphus_proto::agent::CacheSpec {
+                key: "rust".into(),
+                paths: vec!["out".into()],
+                files: vec!["Cargo.lock".into()],
+            }],
+        ),
+    )
+    .await;
+    let _ = await_ack(&state, "job-ff", true).await;
+    let term = await_terminal(&state, "job-ff").await;
+    assert_eq!(term.phase(), JobPhase::JobFailed, "files 缺失 fail-fast");
+    assert!(
+        term.detail.contains("Cargo.lock"),
+        "detail 点名缺失文件：{}",
+        term.detail
+    );
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// AC（ADR-0012 restore 在最后一个 checkout 后、其余步骤前）：checkout 出
+/// `Cargo.lock` → restore 据 lockfile 哈希命中（预先用同 lockfile 内容 seed 缓存）
+/// → 后续 shell 步骤前 out 已由 restore 拷入。证明 restore 在 checkout 后、
+/// files 哈希取自 checkout 后的 lockfile。
+#[tokio::test]
+async fn cache_restore_after_checkout_hits_using_lockfile_hash() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let (repo, sha) = local_git_repo_with_lockfile(dir.path(), "src-repo");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, ws, cache, agent_task) =
+        spawn_agent_cache(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
+
+    // 预先 seed 缓存：临时工作区放与仓库同内容 `Cargo.lock`（=b"lock-v1\n"，逐字
+    // 节一致——files 哈希才相同）+ out=b"cached"，save 一条含 out 的缓存。
+    let seed_ws = tempfile::tempdir().expect("seed 工作区");
+    std::fs::write(seed_ws.path().join("Cargo.lock"), b"lock-v1\n").expect("写 lockfile");
+    std::fs::write(seed_ws.path().join("out"), b"cached").expect("写 out");
+    cache
+        .save(
+            "pipe",
+            &sisyphus_proto::agent::CacheSpec {
+                key: "rust".into(),
+                paths: vec!["out".into()],
+                files: vec!["Cargo.lock".into()],
+            },
+            seed_ws.path(),
+        )
+        .await;
+
+    // 下发 [checkout, shell]：checkout 出 Cargo.lock（lock-v1\n）→ restore 据哈希
+    // 命中（与 seed 同哈希）→ shell 前 out 已拷入。shell 仅 echo ok（不依赖 out）。
+    let spec = ChannelMessage {
+        kind: Some(Kind::JobSpec(Box::new(JobSpec {
+            job_id: "job-co".to_string(),
+            pipeline_name: "pipe".into(),
+            job_name: "job".into(),
+            build_number: 1,
+            attempt: 0,
+            log_limit_bytes: 0,
+            steps: vec![
+                JobStep {
+                    name: "step-0".into(),
+                    seq: 0,
+                    kind: Some(StepKind::Checkout(CheckoutStep {
+                        vcs: VcsType::VcsGit as i32,
+                        repo_url: repo.to_string_lossy().to_string(),
+                        r#ref: "main".into(),
+                        commit: sha.clone(),
+                        submodules: false,
+                    })),
+                },
+                JobStep {
+                    name: "step-1".into(),
+                    seq: 1,
+                    kind: Some(StepKind::Shell(ShellStep {
+                        command: "echo ok".into(),
+                    })),
+                },
+            ],
+            env: HashMap::new(),
+            exec_env: None,
+            timeout_minutes: 0,
+            uploads: vec![],
+            downloads: vec![],
+            caches: vec![sisyphus_proto::agent::CacheSpec {
+                key: "rust".into(),
+                paths: vec!["out".into()],
+                files: vec!["Cargo.lock".into()],
+            }],
+            secrets: vec![],
+            scm_credential: None,
+            labels: vec![],
+            retry_count: 0,
+            allow_failure: false,
+        }))),
+    };
+    send_downlink(&state, spec).await;
+    let _ = await_ack(&state, "job-co", true).await;
+    let term = await_terminal(&state, "job-co").await;
+    assert_eq!(term.phase(), JobPhase::JobSucceeded, "checkout + restore + shell 成功");
+    // restore 命中：工作区 out 由缓存拷入（=b"cached"，seed 的精确内容）。
+    let co_ws = ws.find("pipe", "job").expect("resolve 工作区");
+    wait_until(|| async { co_ws.join("out").is_file() }).await;
+    assert_eq!(
+        std::fs::read(co_ws.join("out")).unwrap(),
+        b"cached",
+        "restore 在 checkout 后据 lockfile 哈希命中"
+    );
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// 创建本地 git 仓库并返回其绝对路径 + HEAD commit sha（含一个提交文件
+/// `Cargo.lock` = b"lock-v1\n"——供 cache files 哈希集成测试）。
+fn local_git_repo_with_lockfile(parent: &Path, name: &str) -> (PathBuf, String) {
+    let repo = parent.join(name);
+    std::fs::create_dir_all(&repo).expect("建 repo 目录");
+    let git = |args: &[&str]| {
+        let out = StdCommand::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {:?} 失败：{}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    };
+    git(&["init", "--quiet"]);
+    git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git(&["config", "user.email", "test@sisyphus.local"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("Cargo.lock"), "lock-v1\n").expect("写 lockfile");
+    git(&["add", "Cargo.lock"]);
+    git(&["commit", "--quiet", "-m", "v1"]);
+    let sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    (repo, sha)
 }

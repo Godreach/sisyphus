@@ -33,6 +33,7 @@ use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 
+use crate::cache::Cache;
 use crate::logbuf::LogBuffer;
 use crate::workspace::Workspace;
 
@@ -503,6 +504,7 @@ pub async fn run_connection(
     logbuf: &LogBuffer,
     runner_uplink: &crate::runner::RunnerUplink,
     workspace: &Workspace,
+    cache: &Cache,
 ) -> Result<(), ChannelError> {
     let channel = tonic::transport::Endpoint::from_shared(cfg.server_url.clone())
         .map_err(|e| ChannelError(format!("无效 server-url {}：{e}", cfg.server_url)))?
@@ -599,6 +601,9 @@ pub async fn run_connection(
     // workspace Handle 的列表响应经此单 writer 外送，断线置 None（断线不重发
     // 列表查询，UI 可重发）。
     workspace.set_live(Some(out_tx.clone())).await;
+    // 缓存列表响应上行（ADR-0012）：同款活体注入——连接期内 cache Handle 的
+    // 列表响应经此单 writer 外送，断线置 None。
+    cache.set_live(Some(out_tx.clone())).await;
     // runner 上行链路（ADR-0008/0013）：JobAck/JobStatus 活体发送 + 离线终态
     // 缓冲。set_live 先于 flush_pending——离线期间完成的终态经此 sender 补发
     // （< orphan 宽限窗口；超宽限由 Server orphan grace 兜底）。
@@ -621,11 +626,13 @@ pub async fn run_connection(
 
     // 心跳循环：15s 一报，附带磁盘占用（ADR-0019）。独立 task——连接期内
     // 与 reader 并行；流结束由外层 abort。工作区占用从 [`Workspace`] 的低频
-    // 采样取最近值（卷级 + 缓存来自 disk 采样器，工作区来自 workspace 采样）。
+    // 采样取最近值；缓存占用从 [`Cache`] 的 registry 记账取（卷级来自 disk
+    // 采样器，工作区/缓存分别从各自来源覆盖）。
     let heartbeat_tx = out_tx.clone();
     let heartbeat_interval = cfg.heartbeat_interval;
     let disk = cfg.disk.clone();
     let workspace_hb = workspace.clone();
+    let cache_hb = cache.clone();
     let heartbeat = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(heartbeat_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -633,6 +640,7 @@ pub async fn run_connection(
             ticker.tick().await;
             let mut usage = disk.sample();
             usage.workspace_bytes = workspace_hb.workspace_bytes();
+            usage.cache_bytes = cache_hb.cache_bytes();
             let msg = ChannelMessage {
                 kind: Some(Kind::Heartbeat(Heartbeat { disk: Some(usage) })),
             };
@@ -648,6 +656,7 @@ pub async fn run_connection(
     let result = read_and_dispatch(&mut inbound, dispatch).await;
     logbuf.set_live(None).await;
     workspace.set_live(None).await;
+    cache.set_live(None).await;
     runner_uplink.set_live(None).await;
     heartbeat.abort();
     writer.abort();

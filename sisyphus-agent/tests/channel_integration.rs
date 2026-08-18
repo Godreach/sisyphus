@@ -26,8 +26,8 @@ use sisyphus_agent::Agent;
 use sisyphus_agent::channel::{Backoff, ChannelConfig, PlatformDiskSampler, StaticLabels};
 use sisyphus_agent::config::{self, Overrides};
 use sisyphus_proto::agent::{
-    CacheCommand, ChannelMessage, Handshake, JobReported, UpgradeCommand, Version,
-    WorkspaceCommand, WorkspaceList,
+    CacheCommand, CacheDeleteRequest, CacheList, ChannelMessage, Handshake, JobReported,
+    UpgradeCommand, Version, WorkspaceCommand, WorkspaceList,
     agent_channel_server::{AgentChannel, AgentChannelServer},
     cache_command::Kind as CacheKind,
     channel_message::Kind,
@@ -97,6 +97,8 @@ struct FakeState {
     log_batches: Mutex<Vec<sisyphus_proto::agent::LogBatch>>,
     /// 收到的工作区列表响应（WorkspaceList，列表/清理集成断言面）。
     workspace_lists: Mutex<Vec<WorkspaceList>>,
+    /// 收到的缓存列表响应（CacheList，列表/删除集成断言面，ADR-0012）。
+    cache_lists: Mutex<Vec<CacheList>>,
     /// 活动会话的下行发送器（测试注入下行指令用）。
     sessions: Mutex<Vec<mpsc::Sender<Result<ChannelMessage, Status>>>>,
     /// 断开信号：会话读取任务 select 监听，触发即关流（模拟 Server 中途掉线）。
@@ -129,6 +131,9 @@ impl FakeState {
     }
     fn workspace_lists(&self) -> Vec<WorkspaceList> {
         self.workspace_lists.lock().expect("锁").clone()
+    }
+    fn cache_lists(&self) -> Vec<CacheList> {
+        self.cache_lists.lock().expect("锁").clone()
     }
     fn last_session_tx(&self) -> mpsc::Sender<Result<ChannelMessage, Status>> {
         self.sessions
@@ -263,6 +268,9 @@ impl AgentChannel for FakeServer {
                             Some(Kind::WorkspaceList(l)) => {
                                 state.workspace_lists.lock().expect("锁").push(l)
                             }
+                            Some(Kind::CacheList(l)) => {
+                                state.cache_lists.lock().expect("锁").push(l)
+                            }
                             _ => {}
                         }
                     }
@@ -305,6 +313,7 @@ fn fake_state(expect_token: Option<&str>, server_version: Version) -> Arc<FakeSt
         reported: Mutex::new(Vec::new()),
         log_batches: Mutex::new(Vec::new()),
         workspace_lists: Mutex::new(Vec::new()),
+        cache_lists: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
         drop_signal: watch::channel(false).0,
     })
@@ -352,11 +361,13 @@ fn spawn_agent(
     )
     .expect("配置");
     let (ws_state, ws_sampler) = build_workspace(&cfg);
+    let cache_state = build_cache(&cfg);
     let agent = Agent::with_channel_config(
         cfg,
         channel_config(server_url, token, data_dir),
         ws_state,
         ws_sampler,
+        cache_state,
     );
     let receipts = agent.receipts();
     let logbuf = agent.logbuf();
@@ -389,14 +400,52 @@ fn spawn_agent_ws(
     )
     .expect("配置");
     let (ws_state, ws_sampler) = build_workspace(&cfg);
+    let cache_state = build_cache(&cfg);
     let mut ch_cfg = channel_config(server_url, token, data_dir);
     ch_cfg.workspace_sample_interval = sample_interval;
-    let agent = Agent::with_channel_config(cfg, ch_cfg, ws_state, ws_sampler);
+    let agent = Agent::with_channel_config(cfg, ch_cfg, ws_state, ws_sampler, cache_state);
     let receipts = agent.receipts();
     let ws = agent.workspace_state();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let task = tokio::spawn(agent.run(shutdown_rx));
     (shutdown_tx, ws, receipts, task)
+}
+
+/// 组装组合根并 spawn `Agent::run`，额外返回缓存共享状态（集成测试用它
+/// 在真实文件系统上 save/restore/列表/删除缓存目录）。与 `spawn_agent_ws`
+/// 同款 + cache 状态。
+fn spawn_agent_cache(
+    data_dir: &Path,
+    server_url: String,
+    token: Option<&str>,
+    sample_interval: Duration,
+) -> (
+    watch::Sender<bool>,
+    sisyphus_agent::workspace::Workspace,
+    sisyphus_agent::cache::Cache,
+    sisyphus_agent::ReceiptLog,
+    tokio::task::JoinHandle<()>,
+) {
+    let cfg = config::Config::load(
+        &Overrides {
+            server_url: Some(server_url.clone()),
+            data_dir: Some(data_dir.to_path_buf()),
+            ..Overrides::default()
+        },
+        &Overrides::default(),
+    )
+    .expect("配置");
+    let (ws_state, ws_sampler) = build_workspace(&cfg);
+    let cache_state = build_cache(&cfg);
+    let mut ch_cfg = channel_config(server_url, token, data_dir);
+    ch_cfg.workspace_sample_interval = sample_interval;
+    let agent = Agent::with_channel_config(cfg, ch_cfg, ws_state, ws_sampler, cache_state);
+    let receipts = agent.receipts();
+    let ws = agent.workspace_state();
+    let cache = agent.cache_state();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let task = tokio::spawn(agent.run(shutdown_rx));
+    (shutdown_tx, ws, cache, receipts, task)
 }
 
 /// 装配工作区共享状态 + 低频采样器（挂 usage），与 `Agent::new` 同款。
@@ -414,6 +463,12 @@ fn build_workspace(
     (state, sampler)
 }
 
+/// 装配缓存共享状态（ADR-0012），与 `Agent::new` 同款：缓存根 + 容量上限
+/// （默认 20 GiB；cache 集成测试用 `Cache::new` 直构小容量覆盖）。
+fn build_cache(cfg: &config::Config) -> sisyphus_agent::cache::Cache {
+    sisyphus_agent::cache::Cache::new(cfg.cache_dir(), cfg.cache_capacity_bytes())
+}
+
 /// 直接驱动单次连接（不经 Agent::run 重连循环）——认证/版本拒绝的断言面。
 async fn connect_once(
     server_url: String,
@@ -425,6 +480,7 @@ async fn connect_once(
     let logbuf =
         sisyphus_agent::logbuf::LogBuffer::new(data_dir.join("logbuf"), Duration::from_secs(60));
     let workspace = sisyphus_agent::workspace::Workspace::new(data_dir.join("workspaces"));
+    let cache = sisyphus_agent::cache::Cache::new(data_dir.join("cache"), 0);
     let runner_uplink = sisyphus_agent::runner::RunnerUplink::new();
     sisyphus_agent::channel::run_connection(
         &cfg,
@@ -433,6 +489,7 @@ async fn connect_once(
         &logbuf,
         &runner_uplink,
         &workspace,
+        &cache,
     )
     .await
 }
@@ -741,6 +798,7 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
     let workspace_a = std::sync::Arc::new(sisyphus_agent::workspace::Workspace::new(
         dir.path().join("workspaces"),
     ));
+    let cache_a = std::sync::Arc::new(sisyphus_agent::cache::Cache::new(dir.path().join("cache"), 0));
     let (cfg_ha, dispatch_ha, logbuf_ha) = (cfg_a.clone(), dispatch_a.clone(), logbuf.clone());
     let runner_uplink_a = sisyphus_agent::runner::RunnerUplink::new();
     let conn_a = tokio::spawn(async move {
@@ -751,6 +809,7 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
             &logbuf_ha,
             &runner_uplink_a,
             &workspace_a,
+            &cache_a,
         )
         .await
     });
@@ -793,6 +852,7 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
     let workspace_b = std::sync::Arc::new(sisyphus_agent::workspace::Workspace::new(
         dir.path().join("workspaces"),
     ));
+    let cache_b = std::sync::Arc::new(sisyphus_agent::cache::Cache::new(dir.path().join("cache"), 0));
     let (cfg_hb, dispatch_hb, logbuf_hb) = (cfg_b.clone(), dispatch_b.clone(), logbuf.clone());
     let runner_uplink_b = sisyphus_agent::runner::RunnerUplink::new();
     let conn_b = tokio::spawn(async move {
@@ -803,6 +863,7 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
             &logbuf_hb,
             &runner_uplink_b,
             &workspace_b,
+            &cache_b,
         )
         .await
     });
@@ -1060,6 +1121,174 @@ async fn workspace_usage_sample_visible_in_heartbeat() {
         disk.volumes.first().is_some_and(|v| v.total_bytes > 0),
         "卷级占用仍真实采样"
     );
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// 缓存列表指令（ADR-0012 集成验收）：fake Server 下发 `CacheListRequest` →
+/// Agent 遍历 registry + 落盘核对、上行 `CacheList`（key/大小/最近使用）。在
+/// Agent 的缓存根上真实 save 两条缓存，断言 fake 收到的列表含真名 + 大小。
+#[tokio::test]
+async fn cache_list_command_reports_real_entries() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+
+    let (shutdown_tx, _ws, cache, _receipts, agent_task) = spawn_agent_cache(
+        dir.path(),
+        format!("http://{addr}"),
+        Some("sisa_abc"),
+        Duration::from_secs(60),
+    );
+
+    // 在 Agent 的缓存根上真实 save 两条缓存（经 Cache::save，落 registry）。
+    let seed_ws = tempfile::tempdir().expect("seed 工作区");
+    std::fs::write(seed_ws.path().join("out"), b"hello").expect("写");
+    cache
+        .save(
+            "pipe-a",
+            &sisyphus_proto::agent::CacheSpec {
+                key: "k1".into(),
+                paths: vec!["out".into()],
+                files: vec![],
+            },
+            seed_ws.path(),
+        )
+        .await;
+    std::fs::write(seed_ws.path().join("out"), b"world!").expect("写");
+    cache
+        .save(
+            "pipe-b",
+            &sisyphus_proto::agent::CacheSpec {
+                key: "k2".into(),
+                paths: vec!["out".into()],
+                files: vec![],
+            },
+            seed_ws.path(),
+        )
+        .await;
+    // restore pipe-a/k1 一次（ADR-0012：restore 刷新 LRU 时钟；save-only 的 k2
+    // 仍 last_used=0）。列表据此区分「被复用过」与「仅存未用」。
+    let restore_ws = tempfile::tempdir().expect("restore 工作区");
+    let _ = cache
+        .restore(
+            "pipe-a",
+            &sisyphus_proto::agent::CacheSpec {
+                key: "k1".into(),
+                paths: vec!["out".into()],
+                files: vec![],
+            },
+            restore_ws.path(),
+        )
+        .await;
+
+    // 等连接建立后下发列表指令。
+    wait_until(|| async { !state.sessions.lock().expect("锁").is_empty() }).await;
+    let tx = state.last_session_tx();
+    tx.send(Ok(ChannelMessage {
+        kind: Some(Kind::CacheCmd(CacheCommand {
+            kind: Some(CacheKind::List(Default::default())),
+        })),
+    }))
+    .await
+    .expect("下发列表指令");
+
+    // fake 收到 CacheList，含两条、真名 + 大小。
+    wait_until(|| async { !state.cache_lists().is_empty() }).await;
+    let list = &state.cache_lists()[0];
+    assert_eq!(list.entries.len(), 2, "两条缓存都列出");
+    let mut entries = list.entries.clone();
+    entries.sort_by_key(|a| (a.pipeline.clone(), a.key.clone()));
+    assert_eq!((entries[0].pipeline.clone(), entries[0].key.clone()), ("pipe-a".into(), "k1".into()));
+    assert_eq!(entries[0].size_bytes, 5, "大小取自 registry");
+    assert_eq!((entries[1].pipeline.clone(), entries[1].key.clone()), ("pipe-b".into(), "k2".into()));
+    assert_eq!(entries[1].size_bytes, 6);
+    // ADR-0012 时钟：被 restore 过的 k1 时钟 > 0；仅 save 的 k2 从未 restore = 0。
+    assert!(
+        entries[0].last_used_at_ms > 0,
+        "k1 被 restore 刷新时钟 > 0"
+    );
+    assert_eq!(
+        entries[1].last_used_at_ms, 0,
+        "k2 仅 save 未 restore = 0（save 不刷新时钟）"
+    );
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// 缓存删除指令（ADR-0012 集成验收）：单 key 删除 + 全清两态，作用于真实
+/// 文件系统，经 fake Server 往返。
+#[tokio::test]
+async fn cache_delete_command_single_and_clear() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+
+    let (shutdown_tx, _ws, cache, _receipts, agent_task) = spawn_agent_cache(
+        dir.path(),
+        format!("http://{addr}"),
+        Some("sisa_abc"),
+        Duration::from_secs(60),
+    );
+
+    let seed_ws = tempfile::tempdir().expect("seed 工作区");
+    std::fs::write(seed_ws.path().join("out"), b"x").expect("写");
+    cache
+        .save(
+            "pipe-a",
+            &sisyphus_proto::agent::CacheSpec {
+                key: "k1".into(),
+                paths: vec!["out".into()],
+                files: vec![],
+            },
+            seed_ws.path(),
+        )
+        .await;
+    cache
+        .save(
+            "pipe-b",
+            &sisyphus_proto::agent::CacheSpec {
+                key: "k2".into(),
+                paths: vec!["out".into()],
+                files: vec![],
+            },
+            seed_ws.path(),
+        )
+        .await;
+    let k1_dir = cache.root().join("pipe-a").join("k1");
+    let k2_dir = cache.root().join("pipe-b").join("k2");
+    wait_until(|| async { k1_dir.exists() && k2_dir.exists() }).await;
+
+    let tx = {
+        wait_until(|| async { !state.sessions.lock().expect("锁").is_empty() }).await;
+        state.last_session_tx()
+    };
+
+    // 单 key 删除 k1（点名真完整 key）。
+    tx.send(Ok(ChannelMessage {
+        kind: Some(Kind::CacheCmd(CacheCommand {
+            kind: Some(CacheKind::Delete(CacheDeleteRequest { key: "k1".into() })),
+        })),
+    }))
+    .await
+    .expect("下发单 key 删除");
+    wait_until(|| async { !k1_dir.exists() }).await;
+    assert!(k2_dir.exists(), "k2 保留");
+
+    // 全清（key 空）。
+    tx.send(Ok(ChannelMessage {
+        kind: Some(Kind::CacheCmd(CacheCommand {
+            kind: Some(CacheKind::Delete(CacheDeleteRequest { key: String::new() })),
+        })),
+    }))
+    .await
+    .expect("下发全清");
+    wait_until(|| async { !k2_dir.exists() }).await;
+    assert_eq!(cache.cache_bytes(), 0, "全清后 registry 空");
 
     shutdown_tx.send(true).expect("关闭");
     agent_task.await.expect("agent 退出");

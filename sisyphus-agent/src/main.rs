@@ -38,6 +38,10 @@ struct Args {
     /// SISYPHUS_LOG_FILE 设置）
     #[arg(long)]
     log_file: Option<PathBuf>,
+    /// 缓存容量上限（ADR-0012：单位 GiB，0 = 不限，默认 20；也可经
+    /// SISYPHUS_CACHE_CAPACITY_GIB 设置）
+    #[arg(long)]
+    cache_capacity_gib: Option<u64>,
 }
 
 impl From<&Args> for Overrides {
@@ -49,6 +53,7 @@ impl From<&Args> for Overrides {
             workspace_root: args.workspace_root.clone(),
             log_level: args.log_level.clone(),
             log_file: args.log_file.clone(),
+            cache_capacity_gib: args.cache_capacity_gib,
         }
     }
 }
