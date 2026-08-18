@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use channel::ChannelConfig;
 use tokio::sync::{RwLock, mpsc, watch};
+use workspace::Workspace;
 
 use crate::logbuf::{DEFAULT_GRACE, LogBuffer};
 
@@ -44,6 +45,11 @@ pub struct Agent {
     /// 日志 seq 缓冲（ADR-0007/0013：先落盘再发出、断线累计、重连幂等重放、
     /// 终态宽限删除/孤儿补传后删除）。
     logbuf: LogBuffer,
+    /// 工作区共享状态（ADR-0011：根 + 活体上行 + 占用采样源；`run_connection`
+    /// 持引用 set_live/读采样）。
+    workspace_state: Workspace,
+    /// 工作区占用采样器（低频后台遍历；`run` 用 channel_cfg 的间隔 spawn）。
+    workspace_sampler: Arc<workspace::WorkspaceSampler>,
     /// 各模块占位句柄（真实执行随后续批次换入）。
     runner: runner::Handle,
     workspace: workspace::Handle,
@@ -55,8 +61,13 @@ pub struct Agent {
 
 impl Agent {
     /// 以默认通道参数（15s 心跳、1s/×2/60s/±20% 退避）装配组合根。
-    /// token 从数据目录读取（缺 = 无凭据连接，被拒后退避重试）。
+    /// token 从数据目录读取（缺 = 无凭据连接，被拒后退避重试）。工作区采样
+    /// 用默认 10 分钟间隔（ADR-0011/0019）。
     pub fn new(config: config::Config) -> Self {
+        // 工作区共享状态 + 低频采样器（喂心跳 workspace_bytes）。
+        let workspace_state = Workspace::new(config.workspaces_dir());
+        let workspace_sampler = Arc::new(workspace::WorkspaceSampler::new(config.workspaces_dir()));
+        let workspace_state = workspace_state.with_usage(workspace_sampler.clone());
         let channel_cfg = ChannelConfig {
             server_url: config.server_url.clone(),
             token: config::read_token(&config.data_dir),
@@ -64,13 +75,20 @@ impl Agent {
             backoff: channel::Backoff::new(),
             labels: Arc::new(channel::PlatformLabels),
             disk: Arc::new(channel::PlatformDiskSampler::new(config.data_dir.clone())),
+            workspace_sample_interval: workspace::DEFAULT_WORKSPACE_SAMPLE_INTERVAL,
         };
-        Self::with_channel_config(config, channel_cfg)
+        Self::with_channel_config(config, channel_cfg, workspace_state, workspace_sampler)
     }
 
     /// 以指定通道参数装配（测试注入短心跳/短退避/固定采样求确定性）。
-    /// 日志缓冲用默认宽限（1 分钟，ADR-0013）。
-    pub fn with_channel_config(config: config::Config, channel_cfg: ChannelConfig) -> Self {
+    /// 日志缓冲用默认宽限（1 分钟，ADR-0013）。工作区采样间隔取自
+    /// `channel_cfg.workspace_sample_interval`。
+    pub fn with_channel_config(
+        config: config::Config,
+        channel_cfg: ChannelConfig,
+        workspace_state: Workspace,
+        workspace_sampler: Arc<workspace::WorkspaceSampler>,
+    ) -> Self {
         // 分派通道：各模块持有接收端，reader 持有发送端。
         let (runner_tx, runner_rx) = mpsc::channel(channel::DISPATCH_CAPACITY);
         let (upgrader_tx, upgrader_rx) = mpsc::channel(channel::DISPATCH_CAPACITY);
@@ -84,14 +102,18 @@ impl Agent {
         };
         let receipts = ReceiptLog::default();
         let logbuf = LogBuffer::new(config.logbuf_dir(), DEFAULT_GRACE);
+        // Handle 持一份工作区状态克隆（与组合根共享内部；run_connection 用根上那份）。
+        let handle_state = workspace_state.clone();
         Self {
             config,
             channel_cfg,
             dispatch,
             in_flight: Arc::new(RwLock::new(Vec::new())),
             logbuf,
+            workspace_state,
+            workspace_sampler,
             runner: runner::Handle::new(runner_rx, receipts.clone()),
-            workspace: workspace::Handle::new(workspace_rx, receipts.clone()),
+            workspace: workspace::Handle::new(workspace_rx, handle_state, receipts.clone()),
             cache: cache::Handle::new(cache_rx, receipts.clone()),
             upgrader: upgrader::Handle::new(upgrader_rx, receipts.clone()),
             receipts,
@@ -108,6 +130,11 @@ impl Agent {
         self.receipts.clone()
     }
 
+    /// 工作区共享状态（集成测试用它 resolve/清理真实工作区目录、读采样）。
+    pub fn workspace_state(&self) -> Workspace {
+        self.workspace_state.clone()
+    }
+
     /// 常驻运行：占位模块循环 + 通道重连循环。断线即指数退避重连、永久
     /// 重试不自杀（认证拒绝/版本拒连/网络失败一律重试，日志写明原因）。
     /// `shutdown` 收到 `true` 时退出（测试/将来服务化用；生产主进程常驻）。
@@ -117,6 +144,13 @@ impl Agent {
         let workspace_task = tokio::spawn(self.workspace.run());
         let cache_task = tokio::spawn(self.cache.run());
         let upgrader_task = tokio::spawn(self.upgrader.run());
+
+        // 工作区占用采样循环（ADR-0011/0019：低频后台遍历，spawn 先采样一次；
+        // 间隔取自 channel_cfg——测试注入短间隔避免真实 10 分钟 sleep）。
+        let sampler_task = self
+            .workspace_sampler
+            .clone()
+            .spawn(self.channel_cfg.workspace_sample_interval);
 
         let mut backoff = self.channel_cfg.backoff.clone();
         loop {
@@ -130,6 +164,7 @@ impl Agent {
                     &self.dispatch,
                     self.in_flight.clone(),
                     &self.logbuf,
+                    &self.workspace_state,
                 ) => r,
                 _ = shutdown_requested(&mut shutdown) => break,
             };
@@ -153,6 +188,7 @@ impl Agent {
         workspace_task.abort();
         cache_task.abort();
         upgrader_task.abort();
+        sampler_task.abort();
     }
 }
 

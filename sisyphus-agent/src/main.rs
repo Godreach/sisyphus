@@ -27,6 +27,10 @@ struct Args {
     /// 数据目录（默认 ~/.sisyphus-agent；也可经 SISYPHUS_DATA_DIR 设置）
     #[arg(long)]
     data_dir: Option<PathBuf>,
+    /// 工作区根（默认 <data>/workspaces；也可经 SISYPHUS_AGENT_WORKSPACE_ROOT
+    /// 设置。ADR-0011：`<根>/<pipeline>/<job>/` 布局）
+    #[arg(long)]
+    workspace_root: Option<PathBuf>,
     /// 日志级别（默认 info；也可经 SISYPHUS_LOG_LEVEL 设置；RUST_LOG 整体胜出）
     #[arg(long)]
     log_level: Option<String>,
@@ -42,6 +46,7 @@ impl From<&Args> for Overrides {
             server_url: args.server_url.clone(),
             api_url: args.api_url.clone(),
             data_dir: args.data_dir.clone(),
+            workspace_root: args.workspace_root.clone(),
             log_level: args.log_level.clone(),
             log_file: args.log_file.clone(),
         }

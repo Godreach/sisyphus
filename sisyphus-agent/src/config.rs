@@ -40,6 +40,9 @@ pub struct Config {
     pub api_url: Option<String>,
     /// 数据目录（默认 `~/.sisyphus-agent`）。
     pub data_dir: PathBuf,
+    /// 工作区根（ADR-0011：`SISYPHUS_AGENT_WORKSPACE_ROOT` 覆盖，缺省
+    /// `<data_dir>/workspaces/`）。布局 `<根>/<pipeline>/<job>/` 的根。
+    pub workspace_root: PathBuf,
     /// 日志级别（trace/debug/info/warn/error）。
     pub log_level: String,
     /// 可选追加写 JSON 的运行日志文件（ADR-0019：不自管轮转）。
@@ -72,10 +75,34 @@ impl Config {
             return Err(ConfigError::InvalidLogLevel(log_level));
         }
 
+        // 工作区根（ADR-0011）：环境变量覆盖优先，缺省取数据目录下的
+        // `workspaces/` 子目录。覆盖层在此缝上收口（与 server-url 同纪律），
+        // 下游 workspace 模块只读 `Config::workspace_root`，不再触碰环境变量。
+        let workspace_root = match pick_path(&cli.workspace_root, &env.workspace_root) {
+            Some(path) => path,
+            None => data_dir.join(WORKSPACES_DIR),
+        };
+        // 工作区根存在性确保（覆盖到外部路径时数据目录布局不会自动建它）；
+        // workspace 模块 resolve 亦 mkdir -p，此处保证采样器有目录可遍历。
+        std::fs::create_dir_all(&workspace_root)?;
+
+        // 安全护栏（ADR-0011「清理永不触碰缓存目录」）：工作区根不得与缓存根
+        // （`<data>/cache/`）重叠或互相包含——否则 `WorkspaceClean` 的删树会越界
+        // 删到缓存（如把 `SISYPHUS_AGENT_WORKSPACE_ROOT` 指到 `<data>` 或
+        // `<data>/cache`）。默认兄弟布局天然满足；覆盖到外部路径时在此强校验。
+        let cache_root = data_dir.join(CACHE_DIR);
+        if overlaps(&workspace_root, &cache_root) {
+            return Err(ConfigError::WorkspaceRootOverlapsCache {
+                workspace_root,
+                cache_root,
+            });
+        }
+
         Ok(Config {
             server_url,
             api_url,
             data_dir,
+            workspace_root,
             log_level,
             log_file: pick_path(&cli.log_file, &env.log_file),
         })
@@ -91,9 +118,10 @@ impl Config {
         self.data_dir.join(AGENT_JSON_FILE_NAME)
     }
 
-    /// 工作区根（ADR-0011：`<根>/<pipeline>/<job>/` 布局）。
+    /// 工作区根（ADR-0011：`<根>/<pipeline>/<job>/` 布局；环境变量
+    /// `SISYPHUS_AGENT_WORKSPACE_ROOT` 可覆盖，缺省 `<data>/workspaces/`）。
     pub fn workspaces_dir(&self) -> PathBuf {
-        self.data_dir.join(WORKSPACES_DIR)
+        self.workspace_root.clone()
     }
 
     /// 缓存根（ADR-0012：registry.json 记账落此）。
@@ -116,6 +144,9 @@ pub struct Overrides {
     pub api_url: Option<String>,
     /// 数据目录覆盖（相对路径按相对当前工作目录解析）。
     pub data_dir: Option<PathBuf>,
+    /// 工作区根覆盖（ADR-0011：`SISYPHUS_AGENT_WORKSPACE_ROOT`，缺省
+    /// `<data>/workspaces/`）。
+    pub workspace_root: Option<PathBuf>,
     /// 日志级别覆盖。
     pub log_level: Option<String>,
     /// 日志文件覆盖。
@@ -134,6 +165,7 @@ impl Overrides {
             server_url: get("SISYPHUS_SERVER_URL"),
             api_url: get("SISYPHUS_API_URL"),
             data_dir: get("SISYPHUS_DATA_DIR").map(PathBuf::from),
+            workspace_root: get("SISYPHUS_AGENT_WORKSPACE_ROOT").map(PathBuf::from),
             log_level: get("SISYPHUS_LOG_LEVEL"),
             log_file: get("SISYPHUS_LOG_FILE").map(PathBuf::from),
         }
@@ -149,6 +181,14 @@ pub enum ConfigError {
     InvalidLogLevel(String),
     /// 找不到家目录（默认数据目录的基准）。
     NoHomeDir,
+    /// 工作区根与缓存根重叠或互相包含（ADR-0011：清理永不触碰缓存；覆盖配置
+    /// 把工作区根指到缓存根或其祖先/后代会让全清越界删缓存）。
+    WorkspaceRootOverlapsCache {
+        /// 工作区根。
+        workspace_root: PathBuf,
+        /// 缓存根。
+        cache_root: PathBuf,
+    },
     /// 数据目录或配置文件 IO 失败。
     Io(std::io::Error),
 }
@@ -164,6 +204,16 @@ impl std::fmt::Display for ConfigError {
                 write!(f, "日志级别非法：{v}（期望 trace/debug/info/warn/error）")
             }
             ConfigError::NoHomeDir => write!(f, "找不到家目录（默认数据目录 ~/.sisyphus-agent 的基准）"),
+            ConfigError::WorkspaceRootOverlapsCache {
+                workspace_root,
+                cache_root,
+            } => write!(
+                f,
+                "工作区根 {} 与缓存根 {} 重叠或互相包含（ADR-0011：清理永不触碰缓存；\
+                 请把 SISYPHUS_AGENT_WORKSPACE_ROOT 指到缓存根之外的独立目录）",
+                workspace_root.display(),
+                cache_root.display()
+            ),
             ConfigError::Io(e) => write!(f, "数据目录 IO 失败：{e}"),
         }
     }
@@ -205,6 +255,19 @@ pub fn read_token(data_dir: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// 两条路径是否重叠：相等、或一条是另一条的祖先（互相包含）。canonicalize
+/// 解析真实路径（消除 `.`/`..`/符号链接/盘符大小写差异）；任一不存在返回
+/// `false`（缺省布局下两者都已 create_dir_all，存在性由调用方保证）。
+fn overlaps(a: &Path, b: &Path) -> bool {
+    let Some(a) = a.canonicalize().ok() else {
+        return false;
+    };
+    let Some(b) = b.canonicalize().ok() else {
+        return false;
+    };
+    a == b || a.starts_with(&b) || b.starts_with(&a)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +291,7 @@ mod tests {
             data_dir: Some(dir.path().to_path_buf()),
             log_level: Some("debug".into()),
             log_file: Some(dir.path().join("agent.log")),
+            ..Overrides::default()
         };
         let cfg = Config::load(&cli, &Overrides::default()).expect("CLI 层完整");
 
@@ -295,5 +359,82 @@ mod tests {
 
         std::fs::write(dir.path().join(TOKEN_FILE_NAME), "   ").expect("写空白");
         assert_eq!(read_token(dir.path()), None, "空白 token 视为缺凭据");
+    }
+
+    #[test]
+    fn workspace_root_defaults_under_data_and_respects_override() {
+        // 缺省：工作区根 = 数据目录下的 workspaces/（ADR-0011）。
+        let dir = tempfile::tempdir().expect("临时数据目录");
+        let cli = Overrides {
+            server_url: Some("http://127.0.0.1:50051".into()),
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Overrides::default()
+        };
+        let cfg = Config::load(&cli, &Overrides::default()).expect("缺省");
+        assert_eq!(cfg.workspace_root, dir.path().join(WORKSPACES_DIR));
+        assert!(cfg.workspace_root.is_dir(), "缺省工作区根随加载创建");
+        assert_eq!(cfg.workspaces_dir(), cfg.workspace_root);
+
+        // 覆盖：环境变量层把工作区根指到数据目录之外的独立目录。
+        let external = tempfile::tempdir().expect("外部工作区根");
+        let env = Overrides {
+            workspace_root: Some(external.path().to_path_buf()),
+            ..Overrides::default()
+        };
+        let cfg = Config::load(&cli, &env).expect("覆盖");
+        assert_eq!(cfg.workspace_root, external.path(), "env 层工作区根胜出");
+        assert!(cfg.workspace_root.is_dir(), "外部工作区根随加载创建");
+
+        // CLI 层压过 env 层。
+        let cli_override = Overrides {
+            workspace_root: Some(dir.path().join("cli-ws").to_path_buf()),
+            ..cli.clone()
+        };
+        let cfg = Config::load(&cli_override, &env).expect("CLI 胜 env");
+        assert_eq!(cfg.workspace_root, dir.path().join("cli-ws"));
+    }
+
+    #[test]
+    fn workspace_root_overlapping_cache_is_rejected() {
+        let dir = tempfile::tempdir().expect("临时数据目录");
+        let base = Overrides {
+            server_url: Some("http://127.0.0.1:50051".into()),
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Overrides::default()
+        };
+        // 把工作区根指到缓存根本身 → 重叠，拒收（清理会越界删缓存）。
+        let cache_root = dir.path().join(CACHE_DIR);
+        let env = Overrides {
+            workspace_root: Some(cache_root.clone()),
+            ..Overrides::default()
+        };
+        let err = Config::load(&base, &env).expect_err("工作区根=缓存根应拒收");
+        assert!(matches!(err, ConfigError::WorkspaceRootOverlapsCache { .. }));
+
+        // 把工作区根指到数据目录（缓存的祖先）→ 互相包含，拒收
+        // （全清会删 <data>/cache）。
+        let env = Overrides {
+            workspace_root: Some(dir.path().to_path_buf()),
+            ..Overrides::default()
+        };
+        let err = Config::load(&base, &env).expect_err("工作区根包含缓存根应拒收");
+        assert!(matches!(err, ConfigError::WorkspaceRootOverlapsCache { .. }));
+
+        // 工作区根嵌在缓存根之下 → 互相包含，拒收（缓存清理会删工作区）。
+        let env = Overrides {
+            workspace_root: Some(dir.path().join(CACHE_DIR).join("ws")),
+            ..Overrides::default()
+        };
+        let err = Config::load(&base, &env).expect_err("工作区根在缓存根下应拒收");
+        assert!(matches!(err, ConfigError::WorkspaceRootOverlapsCache { .. }));
+
+        // 独立外部目录 → 接受。
+        let external = tempfile::tempdir().expect("外部工作区根");
+        let env = Overrides {
+            workspace_root: Some(external.path().to_path_buf()),
+            ..Overrides::default()
+        };
+        let cfg = Config::load(&base, &env).expect("独立目录应接受");
+        assert_eq!(cfg.workspace_root, external.path());
     }
 }

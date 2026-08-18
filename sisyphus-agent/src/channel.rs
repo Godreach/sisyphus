@@ -32,6 +32,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 
 use crate::logbuf::LogBuffer;
+use crate::workspace::Workspace;
 
 /// 心跳间隔（ADR-0007：15s 一报；与 Server 侧 `HEARTBEAT_INTERVAL_MS` 同值）。
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
@@ -350,6 +351,9 @@ pub struct ChannelConfig {
     pub labels: Arc<dyn LabelSource>,
     /// 磁盘占用采样器。
     pub disk: Arc<dyn DiskSampler>,
+    /// 工作区占用采样间隔（ADR-0011/0019：低频后台遍历，默认 10 分钟；
+    /// 测试可注入短间隔避免真实 sleep）。
+    pub workspace_sample_interval: Duration,
 }
 
 /// 下行分派：单 reader 按消息类型投递到各模块（占位 handle 可收；真实
@@ -398,6 +402,7 @@ pub async fn run_connection(
     dispatch: &Dispatch,
     in_flight: Arc<RwLock<Vec<String>>>,
     logbuf: &LogBuffer,
+    workspace: &Workspace,
 ) -> Result<(), ChannelError> {
     let channel = tonic::transport::Endpoint::from_shared(cfg.server_url.clone())
         .map_err(|e| ChannelError(format!("无效 server-url {}：{e}", cfg.server_url)))?
@@ -488,6 +493,10 @@ pub async fn run_connection(
     // 追加活体转发与重放发送的到达交错由 Server 按 seq 幂等落库吸收——最终
     // 状态恒正确，符合「不做 per-batch ack 等待」的补传语义（ADR-0013）。
     logbuf.set_live(Some(out_tx.clone())).await;
+    // 工作区列表响应上行（ADR-0011）：与 logbuf 同款活体注入——连接期内
+    // workspace Handle 的列表响应经此单 writer 外送，断线置 None（断线不重发
+    // 列表查询，UI 可重发）。
+    workspace.set_live(Some(out_tx.clone())).await;
     for msg in logbuf
         .replay_all()
         .await
@@ -503,19 +512,21 @@ pub async fn run_connection(
     }
 
     // 心跳循环：15s 一报，附带磁盘占用（ADR-0019）。独立 task——连接期内
-    // 与 reader 并行；流结束由外层 abort。
+    // 与 reader 并行；流结束由外层 abort。工作区占用从 [`Workspace`] 的低频
+    // 采样取最近值（卷级 + 缓存来自 disk 采样器，工作区来自 workspace 采样）。
     let heartbeat_tx = out_tx.clone();
     let heartbeat_interval = cfg.heartbeat_interval;
     let disk = cfg.disk.clone();
+    let workspace_hb = workspace.clone();
     let heartbeat = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(heartbeat_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
+            let mut usage = disk.sample();
+            usage.workspace_bytes = workspace_hb.workspace_bytes();
             let msg = ChannelMessage {
-                kind: Some(Kind::Heartbeat(Heartbeat {
-                    disk: Some(disk.sample()),
-                })),
+                kind: Some(Kind::Heartbeat(Heartbeat { disk: Some(usage) })),
             };
             if heartbeat_tx.send(msg).await.is_err() {
                 break;
@@ -528,6 +539,7 @@ pub async fn run_connection(
     // 重连时重放补传。
     let result = read_and_dispatch(&mut inbound, dispatch).await;
     logbuf.set_live(None).await;
+    workspace.set_live(None).await;
     heartbeat.abort();
     writer.abort();
     result
