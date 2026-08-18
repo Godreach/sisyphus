@@ -192,12 +192,13 @@ impl BuildRepo {
             serde_json::to_string(&input.snapshot).map_err(StoreError::DefinitionJson)?;
         let mut tx = self.pool.begin().await?;
 
-        let max: Option<i64> =
-            sqlx::query_scalar("SELECT MAX(number) FROM builds WHERE project_id = ? AND pipeline_name = ?")
-                .bind(input.project_id)
-                .bind(&input.pipeline_name)
-                .fetch_optional(&mut *tx)
-                .await?;
+        let max: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(number) FROM builds WHERE project_id = ? AND pipeline_name = ?",
+        )
+        .bind(input.project_id)
+        .bind(&input.pipeline_name)
+        .fetch_optional(&mut *tx)
+        .await?;
         let number = max.unwrap_or(0) + 1;
 
         let result = sqlx::query(
@@ -250,12 +251,7 @@ impl BuildRepo {
     /// 即 queued→running 时刻）。进终态记 `finished_at`；Cancelled 另记
     /// `cancelled_at`。已是终态或行不存在返回 `false`（调用侧 404 / 状态
     /// 竞态裁决）。
-    pub async fn transition(
-        &self,
-        id: i64,
-        to: BuildStatus,
-        now: i64,
-    ) -> Result<bool, StoreError> {
+    pub async fn transition(&self, id: i64, to: BuildStatus, now: i64) -> Result<bool, StoreError> {
         let finished = to.is_terminal().then_some(now);
         let cancelled = (to == BuildStatus::Cancelled).then_some(now);
         let started = (to == BuildStatus::Running).then_some(now);
@@ -497,35 +493,36 @@ impl BuildRepo {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<BuildRow>, StoreError> {
-        let rows = match status {
-            Some(status) => sqlx::query_as::<_, BuildTuple>(
-                "SELECT id, project_id, pipeline_name, number, status, trigger, trigger_detail,
+        let rows =
+            match status {
+                Some(status) => sqlx::query_as::<_, BuildTuple>(
+                    "SELECT id, project_id, pipeline_name, number, status, trigger, trigger_detail,
                         attempt, snapshot, started_at, finished_at, cancelled_at, updated_at
                  FROM builds
                  WHERE project_id = ? AND pipeline_name = ? AND status = ?
                  ORDER BY number DESC LIMIT ? OFFSET ?",
-            )
-            .bind(project_id)
-            .bind(pipeline_name)
-            .bind(status.as_str())
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?,
-            None => sqlx::query_as::<_, BuildTuple>(
-                "SELECT id, project_id, pipeline_name, number, status, trigger, trigger_detail,
+                )
+                .bind(project_id)
+                .bind(pipeline_name)
+                .bind(status.as_str())
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await?,
+                None => sqlx::query_as::<_, BuildTuple>(
+                    "SELECT id, project_id, pipeline_name, number, status, trigger, trigger_detail,
                         attempt, snapshot, started_at, finished_at, cancelled_at, updated_at
                  FROM builds
                  WHERE project_id = ? AND pipeline_name = ?
                  ORDER BY number DESC LIMIT ? OFFSET ?",
-            )
-            .bind(project_id)
-            .bind(pipeline_name)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?,
-        };
+                )
+                .bind(project_id)
+                .bind(pipeline_name)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await?,
+            };
         rows.into_iter().map(BuildRow::from_tuple).collect()
     }
 
@@ -538,22 +535,26 @@ impl BuildRepo {
         status: Option<BuildStatus>,
     ) -> Result<i64, StoreError> {
         let count: i64 = match status {
-            Some(status) => sqlx::query_scalar(
-                "SELECT COUNT(*) FROM builds
+            Some(status) => {
+                sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM builds
                  WHERE project_id = ? AND pipeline_name = ? AND status = ?",
-            )
-            .bind(project_id)
-            .bind(pipeline_name)
-            .bind(status.as_str())
-            .fetch_one(&self.pool)
-            .await?,
-            None => sqlx::query_scalar(
-                "SELECT COUNT(*) FROM builds WHERE project_id = ? AND pipeline_name = ?",
-            )
-            .bind(project_id)
-            .bind(pipeline_name)
-            .fetch_one(&self.pool)
-            .await?,
+                )
+                .bind(project_id)
+                .bind(pipeline_name)
+                .bind(status.as_str())
+                .fetch_one(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM builds WHERE project_id = ? AND pipeline_name = ?",
+                )
+                .bind(project_id)
+                .bind(pipeline_name)
+                .fetch_one(&self.pool)
+                .await?
+            }
         };
         Ok(count)
     }
@@ -561,19 +562,19 @@ impl BuildRepo {
 
 /// builds 行元组（列形态唯一收敛点，免逐查询散落 `Row::get`）。
 type BuildTuple = (
-    i64,          // id
-    i64,          // project_id
-    String,       // pipeline_name
-    i64,          // number
-    String,       // status
-    String,       // trigger
-    String,       // trigger_detail
-    i32,          // attempt
-    String,       // snapshot
-    Option<i64>,  // started_at
-    Option<i64>,  // finished_at
-    Option<i64>,  // cancelled_at
-    i64,          // updated_at
+    i64,         // id
+    i64,         // project_id
+    String,      // pipeline_name
+    i64,         // number
+    String,      // status
+    String,      // trigger
+    String,      // trigger_detail
+    i32,         // attempt
+    String,      // snapshot
+    Option<i64>, // started_at
+    Option<i64>, // finished_at
+    Option<i64>, // cancelled_at
+    i64,         // updated_at
 );
 
 impl BuildRow {
@@ -600,11 +601,11 @@ impl BuildRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sisyphus_model::pipeline::Revision;
     use sisyphus_model::pipeline::{
         EnvVar, ExecutionEnv, Job, Parameter, ParameterType, ParameterValue, Pipeline, Shell,
         Stage, Step,
     };
-    use sisyphus_model::pipeline::Revision;
 
     use crate::store::jobs::{JobRepo, JobStatus};
     use crate::store::projects::{NewProject, ProjectRepo, ScmType};
@@ -725,11 +726,14 @@ mod tests {
             (1, 2, 3),
             "同 pipeline 构建号从 1 递增"
         );
-        assert_eq!((a.status, b.status, c.status), (
-            BuildStatus::Queued,
-            BuildStatus::Queued,
-            BuildStatus::Queued,
-        ));
+        assert_eq!(
+            (a.status, b.status, c.status),
+            (
+                BuildStatus::Queued,
+                BuildStatus::Queued,
+                BuildStatus::Queued,
+            )
+        );
         assert_eq!(a.attempt, 1);
         assert_eq!(a.trigger, TriggerSource::Manual);
         assert_eq!(b.trigger, TriggerSource::Cron);
@@ -848,10 +852,11 @@ mod tests {
         assert_eq!(head.id, first.id);
 
         // 第一条提升 running 后：running_build 命中，队头变为第二条。
-        assert!(repo
-            .transition(first.id, BuildStatus::Running, 1_100)
-            .await
-            .expect("提升"));
+        assert!(
+            repo.transition(first.id, BuildStatus::Running, 1_100)
+                .await
+                .expect("提升")
+        );
         let running = repo
             .running_build(project_id, "release")
             .await
@@ -907,7 +912,11 @@ mod tests {
             "运行中不得再放行"
         );
         assert_eq!(
-            repo.get(second.id).await.expect("查").expect("应存在").status,
+            repo.get(second.id)
+                .await
+                .expect("查")
+                .expect("应存在")
+                .status,
             BuildStatus::Queued
         );
 
@@ -930,7 +939,11 @@ mod tests {
             "second 运行中，third 继续排队"
         );
         assert_eq!(
-            repo.get(third.id).await.expect("查").expect("应存在").status,
+            repo.get(third.id)
+                .await
+                .expect("查")
+                .expect("应存在")
+                .status,
             BuildStatus::Queued,
             "third 仍在排队"
         );
@@ -946,19 +959,21 @@ mod tests {
             .expect("开始");
 
         // queued→running：记 started_at；终态前可再迁移。
-        assert!(repo
-            .transition(row.id, BuildStatus::Running, 1_000)
-            .await
-            .expect("进运行"));
+        assert!(
+            repo.transition(row.id, BuildStatus::Running, 1_000)
+                .await
+                .expect("进运行")
+        );
         let running = repo.get(row.id).await.expect("查").expect("应存在");
         assert_eq!(running.started_at, Some(1_000));
         assert_eq!(running.finished_at, None);
 
         // running→succeeded：记 finished_at、不记 cancelled_at。
-        assert!(repo
-            .transition(row.id, BuildStatus::Succeeded, 2_000)
-            .await
-            .expect("终态"));
+        assert!(
+            repo.transition(row.id, BuildStatus::Succeeded, 2_000)
+                .await
+                .expect("终态")
+        );
         let done = repo.get(row.id).await.expect("查").expect("应存在");
         assert_eq!(done.status, BuildStatus::Succeeded);
         assert_eq!(done.finished_at, Some(2_000));
@@ -966,10 +981,12 @@ mod tests {
         assert_eq!(done.started_at, Some(1_000), "首启时刻保留");
 
         // 终态吸收：已 succeeded 不可再迁移（返回 false、状态不变）。
-        assert!(!repo
-            .transition(row.id, BuildStatus::Failed, 3_000)
-            .await
-            .expect("终态迁移应拒绝"));
+        assert!(
+            !repo
+                .transition(row.id, BuildStatus::Failed, 3_000)
+                .await
+                .expect("终态迁移应拒绝")
+        );
         assert_eq!(
             repo.get(row.id).await.expect("查").expect("应存在").status,
             BuildStatus::Succeeded
@@ -985,14 +1002,16 @@ mod tests {
             .await
             .expect("开始");
 
-        assert!(repo
-            .transition(row.id, BuildStatus::Running, 1_000)
-            .await
-            .expect("进运行"));
-        assert!(repo
-            .transition(row.id, BuildStatus::Cancelled, 2_000)
-            .await
-            .expect("取消"));
+        assert!(
+            repo.transition(row.id, BuildStatus::Running, 1_000)
+                .await
+                .expect("进运行")
+        );
+        assert!(
+            repo.transition(row.id, BuildStatus::Cancelled, 2_000)
+                .await
+                .expect("取消")
+        );
         let done = repo.get(row.id).await.expect("查").expect("应存在");
         assert_eq!(done.status, BuildStatus::Cancelled);
         assert_eq!(done.cancelled_at, Some(2_000));
@@ -1004,10 +1023,11 @@ mod tests {
             .start(start_build(project_id, TriggerSource::Manual))
             .await
             .expect("排队构建");
-        assert!(repo
-            .transition(queued.id, BuildStatus::Cancelled, 3_000)
-            .await
-            .expect("排队中取消"));
+        assert!(
+            repo.transition(queued.id, BuildStatus::Cancelled, 3_000)
+                .await
+                .expect("排队中取消")
+        );
         let done = repo.get(queued.id).await.expect("查").expect("应存在");
         assert_eq!(done.cancelled_at, Some(3_000));
         assert_eq!(done.started_at, None, "从未运行不得有开始时刻");
@@ -1023,14 +1043,16 @@ mod tests {
             .start(start_build(project_id, TriggerSource::Manual))
             .await
             .expect("开始");
-        assert!(repo
-            .transition(row.id, BuildStatus::Running, 1_000)
-            .await
-            .expect("进运行"));
-        assert!(repo
-            .transition(row.id, BuildStatus::Failed, 2_000)
-            .await
-            .expect("失败"));
+        assert!(
+            repo.transition(row.id, BuildStatus::Running, 1_000)
+                .await
+                .expect("进运行")
+        );
+        assert!(
+            repo.transition(row.id, BuildStatus::Failed, 2_000)
+                .await
+                .expect("失败")
+        );
         let snapshot_before = row.snapshot.clone();
 
         let rerun = repo
@@ -1051,10 +1073,11 @@ mod tests {
             .start(start_build(project_id, TriggerSource::Manual))
             .await
             .expect("新构建");
-        assert!(repo
-            .transition(running.id, BuildStatus::Running, 3_000)
-            .await
-            .expect("进运行"));
+        assert!(
+            repo.transition(running.id, BuildStatus::Running, 3_000)
+                .await
+                .expect("进运行")
+        );
         assert!(
             repo.rerun_from_failed(running.id)
                 .await
@@ -1128,10 +1151,12 @@ mod tests {
         jobs.transition(j0b.id, JobStatus::Running, None, None, 1_000)
             .await
             .expect("j0b 运行");
-        assert!(builds
-            .transition(row.id, BuildStatus::Running, 1_000)
-            .await
-            .expect("构建运行"));
+        assert!(
+            builds
+                .transition(row.id, BuildStatus::Running, 1_000)
+                .await
+                .expect("构建运行")
+        );
 
         // j0b 失败 → 级联：j0b 所在阶段未完成任务 cancelled、后续阶段
         // skipped、构建 failed。
@@ -1144,10 +1169,8 @@ mod tests {
             .expect("级联");
 
         let after = jobs.list_by_build(row.id).await.expect("任务清单");
-        let by_name: std::collections::HashMap<&str, JobStatus> = after
-            .iter()
-            .map(|j| (j.name.as_str(), j.status))
-            .collect();
+        let by_name: std::collections::HashMap<&str, JobStatus> =
+            after.iter().map(|j| (j.name.as_str(), j.status)).collect();
         assert_eq!(by_name["j0a"], JobStatus::Succeeded, "已成功任务保留");
         assert_eq!(by_name["j0b"], JobStatus::Failed, "失败任务记失败");
         assert_eq!(by_name["j1"], JobStatus::Skipped, "后续阶段跳过");
@@ -1215,10 +1238,7 @@ mod tests {
             .list_page(project_id, "release", None, 2, 2)
             .await
             .expect("页");
-        assert_eq!(
-            page.iter().map(|b| b.number).collect::<Vec<_>>(),
-            vec![1]
-        );
+        assert_eq!(page.iter().map(|b| b.number).collect::<Vec<_>>(), vec![1]);
 
         // 总数与状态过滤计数。
         assert_eq!(
@@ -1245,16 +1265,14 @@ mod tests {
             .list_page(project_id, "release", Some(BuildStatus::Failed), 10, 0)
             .await
             .expect("页");
-        assert_eq!(
-            page.iter().map(|b| b.number).collect::<Vec<_>>(),
-            vec![2]
-        );
+        assert_eq!(page.iter().map(|b| b.number).collect::<Vec<_>>(), vec![2]);
         // 无命中状态 → 空。
-        assert!(repo
-            .list_page(project_id, "release", Some(BuildStatus::Cancelled), 10, 0)
-            .await
-            .expect("页")
-            .is_empty());
+        assert!(
+            repo.list_page(project_id, "release", Some(BuildStatus::Cancelled), 10, 0)
+                .await
+                .expect("页")
+                .is_empty()
+        );
 
         // 跨 pipeline 隔离：另一 pipeline 的构建不计入本 pipeline 列表/计数。
         let other = repo

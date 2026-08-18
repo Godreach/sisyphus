@@ -24,10 +24,21 @@ pub fn spawn_notifier(bus: EventBus) -> tokio::task::JoinHandle<()> {
                 Ok(event) if is_notifiable_terminal(&event) => {
                     // 留位：notify 批次在此取构建快照 notification 配置并发送
                     //（失败必发、成功可配，ADR-0006）。
-                    let Event::BuildStatus { build_id, number, status, .. } = event else {
+                    let Event::BuildStatus {
+                        build_id,
+                        number,
+                        status,
+                        ..
+                    } = event
+                    else {
                         unreachable!("is_notifiable_terminal 已过滤非 BuildStatus");
                     };
-                    tracing::trace!(build_id, number, status = status.as_str(), "构建终态事件（通知挂接点，本批不发送）");
+                    tracing::trace!(
+                        build_id,
+                        number,
+                        status = status.as_str(),
+                        "构建终态事件（通知挂接点，本批不发送）"
+                    );
                 }
                 // 可丢热通知：Lagged/Closed 直接忽略、继续收。
                 Ok(_) | Err(_) => continue,
@@ -61,10 +72,17 @@ mod tests {
             BuildStatus::Cancelled,
             BuildStatus::Timeout,
         ] {
-            assert!(is_notifiable_terminal(&terminal_event(status)), "{status:?} 为终态");
+            assert!(
+                is_notifiable_terminal(&terminal_event(status)),
+                "{status:?} 为终态"
+            );
         }
-        assert!(!is_notifiable_terminal(&terminal_event(BuildStatus::Running)));
-        assert!(!is_notifiable_terminal(&terminal_event(BuildStatus::Queued)));
+        assert!(!is_notifiable_terminal(&terminal_event(
+            BuildStatus::Running
+        )));
+        assert!(!is_notifiable_terminal(&terminal_event(
+            BuildStatus::Queued
+        )));
         assert!(!is_notifiable_terminal(&Event::JobStatus {
             job_id: 1,
             build_id: 1,

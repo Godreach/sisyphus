@@ -56,16 +56,16 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sisyphus_proto::agent::{
-    CacheCommand, CacheEntry, CacheList, CacheSpec, ChannelMessage, channel_message::Kind,
-    cache_command::Kind as CacheKind,
+    CacheCommand, CacheEntry, CacheList, CacheSpec, ChannelMessage,
+    cache_command::Kind as CacheKind, channel_message::Kind,
 };
 use tokio::sync::{RwLock, mpsc};
 
@@ -348,7 +348,9 @@ impl Cache {
         let pipeline = pipeline.to_string();
         let spec = spec.clone();
         let ws = ws_dir.to_path_buf();
-        match tokio::task::spawn_blocking(move || cache.restore_blocking(&pipeline, &spec, &ws)).await {
+        match tokio::task::spawn_blocking(move || cache.restore_blocking(&pipeline, &spec, &ws))
+            .await
+        {
             Ok(inner) => inner,
             Err(join) => {
                 tracing::error!(error = %join, "restore 任务 panic，当 miss 继续");
@@ -418,7 +420,9 @@ impl Cache {
         let pipeline = pipeline.to_string();
         let spec = spec.clone();
         let ws = ws_dir.to_path_buf();
-        if let Err(join) = tokio::task::spawn_blocking(move || cache.save_blocking(&pipeline, &spec, &ws)).await {
+        if let Err(join) =
+            tokio::task::spawn_blocking(move || cache.save_blocking(&pipeline, &spec, &ws)).await
+        {
             tracing::error!(error = %join, "save 任务 panic");
         }
     }
@@ -616,9 +620,7 @@ impl Cache {
             Some(CacheKind::Delete(req)) => {
                 let cache = self.clone();
                 let key = req.key;
-                if let Err(join) =
-                    tokio::task::spawn_blocking(move || cache.delete(&key)).await
-                {
+                if let Err(join) = tokio::task::spawn_blocking(move || cache.delete(&key)).await {
                     tracing::error!(error = %join, "缓存删除任务 panic");
                 }
             }
@@ -736,10 +738,7 @@ pub enum RestoreError {
 /// per-key 锁文件路径：`<key 目录>.lock`（与 key 目录同级，在 pipeline 目录里）。
 fn lock_path(dir: &Path) -> Option<PathBuf> {
     let name = dir.file_name()?.to_str()?;
-    Some(
-        dir.parent()?
-            .join(format!("{name}{LOCK_SUFFIX}")),
-    )
+    Some(dir.parent()?.join(format!("{name}{LOCK_SUFFIX}")))
 }
 
 /// 打开锁文件并阻塞加锁（`shared` = 共享读 / `false` = 独占写）。创建即开
@@ -786,10 +785,7 @@ fn open_lock_try(dir: &Path) -> Option<std::fs::File> {
 
 /// save 临时目录路径：`<key 目录>.tmp-<uuid>`（与 key 目录同级）。
 fn tmp_dir(dir: &Path) -> PathBuf {
-    let name = dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("cache");
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("cache");
     let suffix = tmp_suffix();
     dir.parent()
         .unwrap_or_else(|| Path::new(""))
@@ -850,9 +846,7 @@ fn deduped_paths<'a>(ws: &Path, existing: &[&'a String]) -> Vec<&'a String> {
     for p in sorted {
         let pp = ws.join(p);
         // 已列入的祖先若存在，则 p 被其覆盖 → 跳过。
-        let covered = deduped
-            .iter()
-            .any(|a| pp.starts_with(ws.join(a)));
+        let covered = deduped.iter().any(|a| pp.starts_with(ws.join(a)));
         if !covered {
             deduped.push(p);
         }
@@ -978,9 +972,9 @@ impl Handle {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
     use super::*;
     use sisyphus_proto::agent::CacheDeleteRequest;
+    use std::time::Duration;
 
     /// 临时缓存根 + Cache（容量 0 = 不限，纯逻辑/restore/save 用）。
     fn cache_dir() -> (tempfile::TempDir, Cache) {
@@ -1029,7 +1023,10 @@ mod tests {
     #[test]
     fn full_key_appends_hash_or_passthrough() {
         assert_eq!(full_key("rust-deps", None), "rust-deps");
-        assert_eq!(full_key("rust-deps", Some("abc123def456")), "rust-deps-abc123def456");
+        assert_eq!(
+            full_key("rust-deps", Some("abc123def456")),
+            "rust-deps-abc123def456"
+        );
     }
 
     #[test]
@@ -1050,10 +1047,7 @@ mod tests {
         let long = "a".repeat(300);
         let name = key_dir_name(&long, Some("0123456789ab"));
         assert!(name.len() <= MAX_DIR_NAME_LEN, "目录名 <= 255");
-        assert!(
-            name.ends_with("-0123456789ab"),
-            "哈希后缀完整保留：{name}"
-        );
+        assert!(name.ends_with("-0123456789ab"), "哈希后缀完整保留：{name}");
         // 用户段被截到 242：242 + 1(-) + 12 = 255。
         assert_eq!(name.len(), MAX_DIR_NAME_LEN);
     }
@@ -1085,9 +1079,10 @@ mod tests {
         );
         assert!(cache.root().join("pipe").join("k").is_dir(), "缓存目录已写");
         // registry.json 落盘可读。
-        let reg: Registry =
-            serde_json::from_str(&std::fs::read_to_string(cache.root().join(REGISTRY_FILE)).unwrap())
-                .unwrap();
+        let reg: Registry = serde_json::from_str(
+            &std::fs::read_to_string(cache.root().join(REGISTRY_FILE)).unwrap(),
+        )
+        .unwrap();
         assert_eq!(reg.entries.len(), 1);
         let e = reg.entries.values().next().unwrap();
         assert_eq!(e.pipeline, "pipe");
@@ -1099,19 +1094,21 @@ mod tests {
 
         // restore 命中刷新时钟为 now（ADR-0012 时钟定义）。
         let ws2 = tempfile::tempdir().expect("restore 工作区");
-        cache.restore_blocking(
-            "pipe",
-            &CacheSpec {
-                key: "k".into(),
-                paths: vec!["out".into()],
-                files: vec![],
-            },
-            ws2.path(),
+        cache
+            .restore_blocking(
+                "pipe",
+                &CacheSpec {
+                    key: "k".into(),
+                    paths: vec!["out".into()],
+                    files: vec![],
+                },
+                ws2.path(),
+            )
+            .unwrap();
+        let reg: Registry = serde_json::from_str(
+            &std::fs::read_to_string(cache.root().join(REGISTRY_FILE)).unwrap(),
         )
         .unwrap();
-        let reg: Registry =
-            serde_json::from_str(&std::fs::read_to_string(cache.root().join(REGISTRY_FILE)).unwrap())
-                .unwrap();
         let e = reg.entries.values().next().unwrap();
         assert!(e.last_used_at_ms > 0, "restore 命中刷新时钟");
 
@@ -1386,7 +1383,10 @@ mod tests {
         );
         // 总 100，上限 60 → 需淘汰 40。最老的 old（40）恰好补足 → 只淘汰 old。
         let order = eviction_order(&entries, 60, "p/new");
-        assert_eq!(order.iter().map(|s| s.as_str()).collect::<Vec<_>>(), vec!["p/old"]);
+        assert_eq!(
+            order.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            vec!["p/old"]
+        );
 
         // 上限 20 → 淘汰 old(40) 还不够（剩 60 > 20）→ 再淘汰 mid(30)（剩 30 > 20）
         // → 再淘汰... 但 new 排除。候选只剩 old+mid。
@@ -1426,7 +1426,10 @@ mod tests {
         );
         // 总 110，上限 50 → 淘汰 other（10）仍超（100 > 50），但 just 排除 → 无更多候选。
         let order = eviction_order(&entries, 50, "p/just");
-        assert_eq!(order.iter().map(|s| s.as_str()).collect::<Vec<_>>(), vec!["p/other"]);
+        assert_eq!(
+            order.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            vec!["p/other"]
+        );
     }
 
     #[tokio::test]
@@ -1486,7 +1489,10 @@ mod tests {
             "mid 也被淘汰回到上限内"
         );
         assert!(cache.root().join("pipe").join("new").exists(), "new 保留");
-        assert!(cache.root().join("pipe").join("newest").exists(), "newest 保留");
+        assert!(
+            cache.root().join("pipe").join("newest").exists(),
+            "newest 保留"
+        );
     }
 
     /// AC（ADR-0012「淘汰跳过被锁 key」）：对最老的缓存持共享读锁（模拟一个
@@ -1646,8 +1652,14 @@ mod tests {
         let mut entries = cache.list();
         entries.sort_by_key(|a| (a.pipeline.clone(), a.key.clone()));
         assert_eq!(entries.len(), 2);
-        assert_eq!((entries[0].pipeline.clone(), entries[0].key.clone()), ("pipe-a".into(), "k1".into()));
-        assert_eq!((entries[1].pipeline.clone(), entries[1].key.clone()), ("pipe-b".into(), "k2".into()));
+        assert_eq!(
+            (entries[0].pipeline.clone(), entries[0].key.clone()),
+            ("pipe-a".into(), "k1".into())
+        );
+        assert_eq!(
+            (entries[1].pipeline.clone(), entries[1].key.clone()),
+            ("pipe-b".into(), "k2".into())
+        );
         assert_eq!(entries[0].size_bytes, 4);
 
         // 单 key 删除（点名真完整 key）。
@@ -1682,9 +1694,10 @@ mod tests {
         let entries = cache.list();
         assert!(entries.is_empty(), "落盘核对剔除幽灵条目");
         // registry 已 persist 清理。
-        let reg: Registry =
-            serde_json::from_str(&std::fs::read_to_string(cache.root().join(REGISTRY_FILE)).unwrap())
-                .unwrap();
+        let reg: Registry = serde_json::from_str(
+            &std::fs::read_to_string(cache.root().join(REGISTRY_FILE)).unwrap(),
+        )
+        .unwrap();
         assert!(reg.entries.is_empty());
     }
 

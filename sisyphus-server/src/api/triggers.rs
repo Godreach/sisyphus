@@ -338,7 +338,9 @@ fn build_spec_for_create(
             let Some(cron) = &req.cron else {
                 return Err(missing_spec("cron", "cron"));
             };
-            let spec = CronSpec { expr: cron.expr.clone() };
+            let spec = CronSpec {
+                expr: cron.expr.clone(),
+            };
             validate_cron_spec(&spec)?;
             Ok((TriggerKind::Cron, spec.to_json()))
         }
@@ -348,7 +350,9 @@ fn build_spec_for_create(
                 .as_ref()
                 .and_then(|p| p.interval_minutes)
                 .unwrap_or(state.poll_interval_minutes);
-            let spec = PollSpec { interval_minutes: interval };
+            let spec = PollSpec {
+                interval_minutes: interval,
+            };
             validate_poll_spec(&spec)?;
             Ok((TriggerKind::Poll, spec.to_json()))
         }
@@ -370,7 +374,9 @@ fn build_spec_for_patch(
             let Some(cron) = &req.cron else {
                 return Ok(None);
             };
-            let spec = CronSpec { expr: cron.expr.clone() };
+            let spec = CronSpec {
+                expr: cron.expr.clone(),
+            };
             validate_cron_spec(&spec)?;
             Ok(Some(spec.to_json()))
         }
@@ -382,7 +388,9 @@ fn build_spec_for_patch(
                 return Ok(None);
             };
             let interval = poll.interval_minutes.unwrap_or(state.poll_interval_minutes);
-            let spec = PollSpec { interval_minutes: interval };
+            let spec = PollSpec {
+                interval_minutes: interval,
+            };
             validate_poll_spec(&spec)?;
             Ok(Some(spec.to_json()))
         }
@@ -474,7 +482,9 @@ mod tests {
             crate::config::Overrides::default(),
         )
         .expect("目录布局");
-        let pool = crate::store::bootstrap(dir.path()).await.expect("bootstrap");
+        let pool = crate::store::bootstrap(dir.path())
+            .await
+            .expect("bootstrap");
         let state = AppState::new(pool, false, MasterKey::generate(), default);
         // AppState 不持有 dir；存进静态槽防过早清理（目录活到进程退出）。
         LEAK.lock().unwrap().push(dir);
@@ -499,14 +509,17 @@ mod tests {
             kind: TriggerKindDto::Poll,
             enabled: Some(true),
             cron: None,
-            poll: Some(PollSpecInputDto { interval_minutes: interval }),
+            poll: Some(PollSpecInputDto {
+                interval_minutes: interval,
+            }),
         }
     }
 
     #[tokio::test]
     async fn build_spec_for_create_cron_validates() {
         let state = state_with_poll_default(5).await;
-        let (kind, spec) = build_spec_for_create(&state, &cron_req("0 2 * * *")).expect("合法 cron");
+        let (kind, spec) =
+            build_spec_for_create(&state, &cron_req("0 2 * * *")).expect("合法 cron");
         assert_eq!(kind, TriggerKind::Cron);
         assert!(spec.contains("0 2 * * *"));
         // 坏 cron → 422。
@@ -522,7 +535,9 @@ mod tests {
             kind: TriggerKindDto::Poll,
             enabled: Some(true),
             cron: None,
-            poll: Some(PollSpecInputDto { interval_minutes: None }),
+            poll: Some(PollSpecInputDto {
+                interval_minutes: None,
+            }),
         };
         let (kind, spec) = build_spec_for_create(&state, &req).expect("合法 poll");
         assert_eq!(kind, TriggerKind::Poll);
@@ -566,14 +581,18 @@ mod tests {
         let req = PatchTriggerRequest {
             enabled: None,
             cron: None,
-            poll: Some(PollSpecInputDto { interval_minutes: Some(5) }),
+            poll: Some(PollSpecInputDto {
+                interval_minutes: Some(5),
+            }),
         };
         let err = build_spec_for_patch(&state, TriggerKindDto::Cron, &req).unwrap_err();
         assert_eq!(err.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
         // 路径 kind=poll，body 给 cron spec → 422。
         let req = PatchTriggerRequest {
             enabled: None,
-            cron: Some(CronSpecDto { expr: "0 2 * * *".into() }),
+            cron: Some(CronSpecDto {
+                expr: "0 2 * * *".into(),
+            }),
             poll: None,
         };
         let err = build_spec_for_patch(&state, TriggerKindDto::Poll, &req).unwrap_err();
@@ -581,7 +600,9 @@ mod tests {
         // 匹配的 spec 合法 → Some。
         let req = PatchTriggerRequest {
             enabled: None,
-            cron: Some(CronSpecDto { expr: "0 6 * * *".into() }),
+            cron: Some(CronSpecDto {
+                expr: "0 6 * * *".into(),
+            }),
             poll: None,
         };
         let spec = build_spec_for_patch(&state, TriggerKindDto::Cron, &req)
@@ -590,9 +611,11 @@ mod tests {
         assert!(spec.contains("0 6 * * *"));
         // 不改 spec → None。
         let req = PatchTriggerRequest::default();
-        assert!(build_spec_for_patch(&state, TriggerKindDto::Cron, &req)
-            .expect("空 patch")
-            .is_none());
+        assert!(
+            build_spec_for_patch(&state, TriggerKindDto::Cron, &req)
+                .expect("空 patch")
+                .is_none()
+        );
     }
 
     #[test]

@@ -246,11 +246,7 @@ impl Config {
     /// 从数据目录加载启动配置：确保目录布局、生成/读取 config.toml、
     /// 与环境变量及 CLI 覆盖层合并（ADR-0010）。环境变量层由调用方注入
     /// （生产路径传 [`Overrides::from_env`]，测试传空层保证封闭）。
-    pub fn load(
-        data_dir: PathBuf,
-        cli: Overrides,
-        env: Overrides,
-    ) -> Result<Config, ConfigError> {
+    pub fn load(data_dir: PathBuf, cli: Overrides, env: Overrides) -> Result<Config, ConfigError> {
         // 数据目录布局（ADR-0010）：数据库文件落在根，产物与迁移备份各占子目录。
         for sub in [ARTIFACTS_DIR, BACKUPS_DIR] {
             std::fs::create_dir_all(data_dir.join(sub))?;
@@ -272,11 +268,7 @@ impl Config {
 impl Overrides {
     /// 读 `SISYPHUS_` 前缀环境变量层（ADR-0010；薄适配，语义在 merge 缝上测试）。
     pub fn from_env() -> Overrides {
-        let get = |key: &str| {
-            std::env::var(key)
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        };
+        let get = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
         Overrides {
             rest_addr: get("SISYPHUS_REST_ADDR"),
             grpc_addr: get("SISYPHUS_GRPC_ADDR"),
@@ -301,15 +293,22 @@ pub fn merge(
             .or_else(|| file.map(str::to_string))
     };
 
-    let rest_addr = pick(&cli.rest_addr, &env.rest_addr, file.server.rest_addr.as_deref())
-        .unwrap_or_else(|| DEFAULT_REST_ADDR.to_string());
-    let grpc_addr = pick(&cli.grpc_addr, &env.grpc_addr, file.server.grpc_addr.as_deref())
-        .unwrap_or_else(|| DEFAULT_GRPC_ADDR.to_string());
+    let rest_addr = pick(
+        &cli.rest_addr,
+        &env.rest_addr,
+        file.server.rest_addr.as_deref(),
+    )
+    .unwrap_or_else(|| DEFAULT_REST_ADDR.to_string());
+    let grpc_addr = pick(
+        &cli.grpc_addr,
+        &env.grpc_addr,
+        file.server.grpc_addr.as_deref(),
+    )
+    .unwrap_or_else(|| DEFAULT_GRPC_ADDR.to_string());
     let log_level = pick(&cli.log_level, &env.log_level, file.log.level.as_deref())
         .unwrap_or_else(|| DEFAULT_LOG_LEVEL.to_string());
-    let log_format =
-        pick(&cli.log_format, &env.log_format, file.log.format.as_deref())
-            .unwrap_or_else(|| DEFAULT_LOG_FORMAT.to_string());
+    let log_format = pick(&cli.log_format, &env.log_format, file.log.format.as_deref())
+        .unwrap_or_else(|| DEFAULT_LOG_FORMAT.to_string());
 
     // 注册开关：CLI/env 覆盖层是文本（布尔语义在此收口），文件层是原生
     // toml 布尔，内置默认关（ADR-0014：内网由全局 admin 建号）。
@@ -467,8 +466,8 @@ mod tests {
             triggers: TriggersFile::default(),
         };
 
-        let cfg = merge(PathBuf::from("/tmp/data"), &cli, &env, &file)
-            .expect("各层齐全时合并应成功");
+        let cfg =
+            merge(PathBuf::from("/tmp/data"), &cli, &env, &file).expect("各层齐全时合并应成功");
 
         // CLI 压过环境变量与文件。
         assert_eq!(cfg.grpc_addr, "127.0.0.1:60001");
@@ -500,7 +499,10 @@ mod tests {
             &file_abs,
         )
         .expect("文件层绝对路径");
-        assert_eq!(cfg.master_key_path, PathBuf::from("/secure/volume/master.key"));
+        assert_eq!(
+            cfg.master_key_path,
+            PathBuf::from("/secure/volume/master.key")
+        );
 
         // 文件层相对路径：按相对数据目录解析。
         let file_rel = FileConfig {
@@ -544,7 +546,10 @@ mod tests {
             &FileConfig::default(),
         )
         .expect("默认");
-        assert_eq!(cfg.master_key_path, PathBuf::from("/tmp/data").join(MASTER_KEY_FILE_NAME));
+        assert_eq!(
+            cfg.master_key_path,
+            PathBuf::from("/tmp/data").join(MASTER_KEY_FILE_NAME)
+        );
     }
 
     #[test]
@@ -556,8 +561,13 @@ mod tests {
             },
             ..FileConfig::default()
         };
-        let cfg = merge(PathBuf::from("/tmp/data"), &Overrides::default(), &Overrides::default(), &file_on)
-            .expect("文件层开启应生效");
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file_on,
+        )
+        .expect("文件层开启应生效");
         assert!(cfg.registration_enabled, "文件层压过内置默认关");
 
         // env 层常见拼写全收（CLI/env 是文本，布尔语义在 merge 收口）。
@@ -592,7 +602,12 @@ mod tests {
             ..Overrides::default()
         };
         assert!(matches!(
-            merge(PathBuf::from("/tmp/data"), &Overrides::default(), &env, &file_on),
+            merge(
+                PathBuf::from("/tmp/data"),
+                &Overrides::default(),
+                &env,
+                &file_on
+            ),
             Err(ConfigError::InvalidBool(_))
         ));
     }
@@ -602,8 +617,13 @@ mod tests {
         let file = parse_toml(sample_toml()).expect("样例必须是合法 toml");
 
         // 样例值与内置默认一致——「生成即用」不改变启动行为的前提。
-        let cfg = merge(PathBuf::from("/tmp/data"), &Overrides::default(), &Overrides::default(), &file)
-            .expect("样例合并应成功");
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file,
+        )
+        .expect("样例合并应成功");
         assert_eq!(cfg.rest_addr, DEFAULT_REST_ADDR);
         assert_eq!(cfg.grpc_addr, DEFAULT_GRPC_ADDR);
         assert_eq!(cfg.log_level, DEFAULT_LOG_LEVEL);
@@ -619,7 +639,11 @@ mod tests {
         );
 
         // 带注释：样例要能当作文档读。
-        assert!(sample_toml().lines().any(|l| l.trim_start().starts_with('#')));
+        assert!(
+            sample_toml()
+                .lines()
+                .any(|l| l.trim_start().starts_with('#'))
+        );
     }
 
     /// 票 B2c-T4：`[scheduler] orphan_grace_minutes` 文件层可配；负值按 0
@@ -740,7 +764,12 @@ mod tests {
             ..Overrides::default()
         };
         assert!(matches!(
-            merge(PathBuf::from("/tmp/data"), &bad_addr, &Overrides::default(), &FileConfig::default()),
+            merge(
+                PathBuf::from("/tmp/data"),
+                &bad_addr,
+                &Overrides::default(),
+                &FileConfig::default()
+            ),
             Err(ConfigError::InvalidAddr(_))
         ));
 
@@ -749,7 +778,12 @@ mod tests {
             ..Overrides::default()
         };
         assert!(matches!(
-            merge(PathBuf::from("/tmp/data"), &bad_level, &Overrides::default(), &FileConfig::default()),
+            merge(
+                PathBuf::from("/tmp/data"),
+                &bad_level,
+                &Overrides::default(),
+                &FileConfig::default()
+            ),
             Err(ConfigError::InvalidLogValue(_))
         ));
 
@@ -758,7 +792,12 @@ mod tests {
             ..Overrides::default()
         };
         assert!(matches!(
-            merge(PathBuf::from("/tmp/data"), &bad_format, &Overrides::default(), &FileConfig::default()),
+            merge(
+                PathBuf::from("/tmp/data"),
+                &bad_format,
+                &Overrides::default(),
+                &FileConfig::default()
+            ),
             Err(ConfigError::InvalidLogValue(_))
         ));
     }

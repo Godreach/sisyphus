@@ -22,20 +22,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use sisyphus_agent::Agent;
 use sisyphus_agent::channel::{Backoff, ChannelConfig, PlatformDiskSampler, StaticLabels};
 use sisyphus_agent::config::{self, Overrides};
 use sisyphus_proto::agent::{
-    CacheCommand, CacheDeleteRequest, CacheList, ChannelMessage, Handshake, JobPhase,
-    JobReported, JobSpec, JobStep, ShellStep, UpgradeCommand, UpgradePhase,
-    Version, WorkspaceCommand, WorkspaceList,
+    CacheCommand, CacheDeleteRequest, CacheList, ChannelMessage, Handshake, JobPhase, JobReported,
+    JobSpec, JobStep, ShellStep, UpgradeCommand, UpgradePhase, Version, WorkspaceCommand,
+    WorkspaceList,
     agent_channel_server::{AgentChannel, AgentChannelServer},
     cache_command::Kind as CacheKind,
     channel_message::Kind,
     job_step::Kind as StepKind,
     workspace_command::Kind as WorkspaceKind,
 };
-use sha2::{Digest, Sha256};
 use tokio::sync::{RwLock, mpsc, watch};
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::{Request, Response, Status, Streaming};
@@ -826,7 +826,10 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
     let workspace_a = std::sync::Arc::new(sisyphus_agent::workspace::Workspace::new(
         dir.path().join("workspaces"),
     ));
-    let cache_a = std::sync::Arc::new(sisyphus_agent::cache::Cache::new(dir.path().join("cache"), 0));
+    let cache_a = std::sync::Arc::new(sisyphus_agent::cache::Cache::new(
+        dir.path().join("cache"),
+        0,
+    ));
     let (cfg_ha, dispatch_ha, logbuf_ha) = (cfg_a.clone(), dispatch_a.clone(), logbuf.clone());
     let runner_uplink_a = sisyphus_agent::runner::RunnerUplink::new();
     let upgrade_uplink_a = sisyphus_agent::upgrader::UpgradeUplink::new();
@@ -882,7 +885,10 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
     let workspace_b = std::sync::Arc::new(sisyphus_agent::workspace::Workspace::new(
         dir.path().join("workspaces"),
     ));
-    let cache_b = std::sync::Arc::new(sisyphus_agent::cache::Cache::new(dir.path().join("cache"), 0));
+    let cache_b = std::sync::Arc::new(sisyphus_agent::cache::Cache::new(
+        dir.path().join("cache"),
+        0,
+    ));
     let (cfg_hb, dispatch_hb, logbuf_hb) = (cfg_b.clone(), dispatch_b.clone(), logbuf.clone());
     let runner_uplink_b = sisyphus_agent::runner::RunnerUplink::new();
     let upgrade_uplink_b = sisyphus_agent::upgrader::UpgradeUplink::new();
@@ -1233,15 +1239,18 @@ async fn cache_list_command_reports_real_entries() {
     assert_eq!(list.entries.len(), 2, "两条缓存都列出");
     let mut entries = list.entries.clone();
     entries.sort_by_key(|a| (a.pipeline.clone(), a.key.clone()));
-    assert_eq!((entries[0].pipeline.clone(), entries[0].key.clone()), ("pipe-a".into(), "k1".into()));
+    assert_eq!(
+        (entries[0].pipeline.clone(), entries[0].key.clone()),
+        ("pipe-a".into(), "k1".into())
+    );
     assert_eq!(entries[0].size_bytes, 5, "大小取自 registry");
-    assert_eq!((entries[1].pipeline.clone(), entries[1].key.clone()), ("pipe-b".into(), "k2".into()));
+    assert_eq!(
+        (entries[1].pipeline.clone(), entries[1].key.clone()),
+        ("pipe-b".into(), "k2".into())
+    );
     assert_eq!(entries[1].size_bytes, 6);
     // ADR-0012 时钟：被 restore 过的 k1 时钟 > 0；仅 save 的 k2 从未 restore = 0。
-    assert!(
-        entries[0].last_used_at_ms > 0,
-        "k1 被 restore 刷新时钟 > 0"
-    );
+    assert!(entries[0].last_used_at_ms > 0, "k1 被 restore 刷新时钟 > 0");
     assert_eq!(
         entries[1].last_used_at_ms, 0,
         "k2 仅 save 未 restore = 0（save 不刷新时钟）"
@@ -1441,11 +1450,10 @@ fn upgrade_deps(
     spawn_seen: &SpawnSeen,
 ) -> sisyphus_agent::upgrader::UpgradeDeps {
     std::fs::write(bin, b"OLD").expect("写旧二进制");
-    let downloader: Arc<dyn sisyphus_agent::upgrader::Downloader> =
-        Arc::new(FakeDownloader {
-            bytes: dl_bytes,
-            seen: dl_seen.clone(),
-        });
+    let downloader: Arc<dyn sisyphus_agent::upgrader::Downloader> = Arc::new(FakeDownloader {
+        bytes: dl_bytes,
+        seen: dl_seen.clone(),
+    });
     let spawner: Arc<dyn sisyphus_agent::upgrader::Spawner> = Arc::new(FakeSpawner {
         results: spawn_results,
         next: Arc::new(Mutex::new(0)),
@@ -1595,7 +1603,9 @@ async fn upgrade_drains_running_job_and_rejects_new_jobs() {
             steps: vec![JobStep {
                 name: "s".into(),
                 seq: 0,
-                kind: Some(StepKind::Shell(ShellStep { command: "exit 0".into() })),
+                kind: Some(StepKind::Shell(ShellStep {
+                    command: "exit 0".into(),
+                })),
             }],
             ..Default::default()
         }))),
@@ -1665,11 +1675,16 @@ async fn upgrade_download_failure_keeps_old_via_channel() {
     .expect("下发升级指令");
 
     // 下载失败上报（Downloading + error）。
-    wait_until(|| async { has_upgrade_phase(&state, UpgradePhase::UpgradeDownloading, "下载失败") })
-        .await;
+    wait_until(|| async {
+        has_upgrade_phase(&state, UpgradePhase::UpgradeDownloading, "下载失败")
+    })
+    .await;
     // 保持旧版、不换入、不 spawn。
     assert_eq!(std::fs::read(&bin).unwrap(), b"OLD", "下载失败保持旧版");
-    assert!(!Path::new(&format!("{}.old", bin.display())).exists(), "未换入，无 .old");
+    assert!(
+        !Path::new(&format!("{}.old", bin.display())).exists(),
+        "未换入，无 .old"
+    );
     assert!(
         spawn_seen.lock().expect("锁").is_empty(),
         "下载失败不 spawn"
@@ -1716,7 +1731,10 @@ async fn upgrade_sha_mismatch_keeps_old_via_channel() {
     })
     .await;
     assert_eq!(std::fs::read(&bin).unwrap(), b"OLD", "校验失败保持旧版");
-    assert!(!Path::new(&format!("{}.old", bin.display())).exists(), "未换入");
+    assert!(
+        !Path::new(&format!("{}.old", bin.display())).exists(),
+        "未换入"
+    );
     assert!(
         spawn_seen.lock().expect("锁").is_empty(),
         "校验失败不 spawn"

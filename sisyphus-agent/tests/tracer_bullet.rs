@@ -26,6 +26,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use sisyphus_agent::Agent;
 use sisyphus_agent::channel::{Backoff, ChannelConfig, PlatformDiskSampler, StaticLabels};
 use sisyphus_agent::config::{self, Overrides};
@@ -33,15 +34,15 @@ use sisyphus_agent::register::{persist_token, register};
 use sisyphus_agent::upgrader::{DownloadError, Downloader, SpawnFailure, Spawner, UpgradeDeps};
 use sisyphus_agent::workspace::Workspace;
 use sisyphus_proto::agent::{
-    CacheCommand, CacheSpec, ChannelMessage, CheckoutStep, Handshake, JobAck, JobPhase, JobReported,
-    JobSpec, JobStatus, JobStep, ShellStep, UpgradeCommand, UpgradePhase, Version,
-    WorkspaceCommand, WorkspaceListRequest, agent_channel_server::{AgentChannel, AgentChannelServer},
+    CacheCommand, CacheSpec, ChannelMessage, CheckoutStep, Handshake, JobAck, JobPhase,
+    JobReported, JobSpec, JobStatus, JobStep, ShellStep, UpgradeCommand, UpgradePhase, Version,
+    WorkspaceCommand, WorkspaceListRequest,
+    agent_channel_server::{AgentChannel, AgentChannelServer},
     cache_command::Kind as CacheKind,
     channel_message::Kind,
     job_step::Kind as StepKind,
     workspace_command::Kind as WorkspaceKind,
 };
-use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::{Request, Response, Status, Streaming};
@@ -69,7 +70,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// 与 workspace 同版本（兼容窗口内）。
 fn version(major: u32, minor: u32, patch: u32) -> Version {
-    Version { major, minor, patch }
+    Version {
+        major,
+        minor,
+        patch,
+    }
 }
 
 // ============================================================
@@ -103,7 +108,8 @@ impl RegisterStub {
                 let _ = reader.read_line(&mut line);
                 loop {
                     let mut header = String::new();
-                    if reader.read_line(&mut header).is_err() || header == "\r\n" || header == "\n" {
+                    if reader.read_line(&mut header).is_err() || header == "\r\n" || header == "\n"
+                    {
                         break;
                     }
                     if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") {
@@ -235,11 +241,7 @@ impl AgentChannel for FakeServer {
             .and_then(|s| s.strip_prefix("Bearer "))
             .map(str::trim)
             .map(str::to_string);
-        state
-            .token_present
-            .lock()
-            .expect("锁")
-            .push(auth.is_some());
+        state.token_present.lock().expect("锁").push(auth.is_some());
         if auth.as_deref() != Some(state.expect_token.as_str()) {
             return Err(Status::unauthenticated("fake: Agent token 无效或缺失"));
         }
@@ -285,29 +287,29 @@ impl AgentChannel for FakeServer {
             let mut drop_rx = state.drop_signal.subscribe();
             loop {
                 tokio::select! {
-                    _ = drop_rx.changed() => {
-        // 强制断连：经 downlink 显式送一帧 Status 错误（而非依赖 END_STREAM）。
-        // tonic/hyper 客户端连接任务在上行有未确认数据时可能不处理 downlink 的
-        // END_STREAM；显式 Status 错误帧使 agent 的 inbound.message() 返 Err，
-        // read_and_dispatch 即返 → run_connection 退避重连（与生产面真实网络
-        // 断连同形：TCP 错误即返）。
-        let _ = tx.send(Err(Status::internal("fake: 模拟断连"))).await;
-        break
-    }
-                    msg = inbound.message() => {
-                        let Ok(Some(msg)) = msg else { break };
-                        match msg.kind {
-                            Some(Kind::JobReported(r)) => state.reported.lock().expect("锁").push(r),
-                            Some(Kind::LogBatch(b)) => state.log_batches.lock().expect("锁").push(b),
-                            Some(Kind::JobAck(a)) => state.acks.lock().expect("锁").push(a),
-                            Some(Kind::JobStatus(s)) => state.statuses.lock().expect("锁").push(s),
-                            Some(Kind::UpgradeStatus(u)) => state.upgrade_statuses.lock().expect("锁").push(u),
-                            Some(Kind::WorkspaceList(l)) => state.workspace_lists.lock().expect("锁").push(l),
-                            Some(Kind::CacheList(l)) => state.cache_lists.lock().expect("锁").push(l),
-                            _ => {}
-                        }
-                    }
+                                _ = drop_rx.changed() => {
+                    // 强制断连：经 downlink 显式送一帧 Status 错误（而非依赖 END_STREAM）。
+                    // tonic/hyper 客户端连接任务在上行有未确认数据时可能不处理 downlink 的
+                    // END_STREAM；显式 Status 错误帧使 agent 的 inbound.message() 返 Err，
+                    // read_and_dispatch 即返 → run_connection 退避重连（与生产面真实网络
+                    // 断连同形：TCP 错误即返）。
+                    let _ = tx.send(Err(Status::internal("fake: 模拟断连"))).await;
+                    break
                 }
+                                msg = inbound.message() => {
+                                    let Ok(Some(msg)) = msg else { break };
+                                    match msg.kind {
+                                        Some(Kind::JobReported(r)) => state.reported.lock().expect("锁").push(r),
+                                        Some(Kind::LogBatch(b)) => state.log_batches.lock().expect("锁").push(b),
+                                        Some(Kind::JobAck(a)) => state.acks.lock().expect("锁").push(a),
+                                        Some(Kind::JobStatus(s)) => state.statuses.lock().expect("锁").push(s),
+                                        Some(Kind::UpgradeStatus(u)) => state.upgrade_statuses.lock().expect("锁").push(u),
+                                        Some(Kind::WorkspaceList(l)) => state.workspace_lists.lock().expect("锁").push(l),
+                                        Some(Kind::CacheList(l)) => state.cache_lists.lock().expect("锁").push(l),
+                                        _ => {}
+                                    }
+                                }
+                            }
             }
         });
 
@@ -442,18 +444,12 @@ struct FakeDownloader {
 }
 #[tonic::async_trait]
 impl Downloader for FakeDownloader {
-    async fn download(
-        &self,
-        url: &str,
-        token: Option<&str>,
-    ) -> Result<Vec<u8>, DownloadError> {
+    async fn download(&self, url: &str, token: Option<&str>) -> Result<Vec<u8>, DownloadError> {
         self.seen
             .lock()
             .expect("锁")
             .push((url.to_string(), token.map(str::to_string)));
-        self.bytes
-            .clone()
-            .map_err(DownloadError)
+        self.bytes.clone().map_err(DownloadError)
     }
 }
 
@@ -464,11 +460,7 @@ struct FakeSpawner {
 }
 #[tonic::async_trait]
 impl Spawner for FakeSpawner {
-    async fn spawn(
-        &self,
-        bin: &Path,
-        _args: Vec<String>,
-    ) -> Result<(), SpawnFailure> {
+    async fn spawn(&self, bin: &Path, _args: Vec<String>) -> Result<(), SpawnFailure> {
         self.recorded.lock().expect("锁").push(bin.to_path_buf());
         let mut idx = self.next.lock().expect("锁");
         let i = *idx;
@@ -555,12 +547,7 @@ fn sleep_cmd() -> String {
 
 /// 构造 tracer bullet 的 JobSpec：checkout + sleep（跨离线窗口）+ 写缓存文件 + 输出 "buffered"。
 /// 缓存声明 paths=["cacheable"]（save 仅成功后；restore 在末个 checkout 后即 step 1 前）。
-fn tracer_spec(
-    job_id: &str,
-    repo_url: &str,
-    sha: &str,
-    caches: Vec<CacheSpec>,
-) -> ChannelMessage {
+fn tracer_spec(job_id: &str, repo_url: &str, sha: &str, caches: Vec<CacheSpec>) -> ChannelMessage {
     let write_cacheable = if cfg!(unix) {
         "echo content > cacheable".to_string()
     } else {
@@ -590,12 +577,16 @@ fn tracer_spec(
                 JobStep {
                     name: "sleep".into(),
                     seq: 1,
-                    kind: Some(StepKind::Shell(ShellStep { command: sleep_cmd() })),
+                    kind: Some(StepKind::Shell(ShellStep {
+                        command: sleep_cmd(),
+                    })),
                 },
                 JobStep {
                     name: "write-cacheable".into(),
                     seq: 2,
-                    kind: Some(StepKind::Shell(ShellStep { command: write_cacheable })),
+                    kind: Some(StepKind::Shell(ShellStep {
+                        command: write_cacheable,
+                    })),
                 },
                 JobStep {
                     name: "echo-buffered".into(),
@@ -715,12 +706,8 @@ async fn b3_tracer_bullet_full_chain() {
 
     let state = fake_state(token, version(1, 0, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
-    let (shutdown_tx, ws, cache, agent_task) = spawn_agent(
-        dir.path(),
-        format!("http://{addr}"),
-        Some(token),
-        deps,
-    );
+    let (shutdown_tx, ws, cache, agent_task) =
+        spawn_agent(dir.path(), format!("http://{addr}"), Some(token), deps);
 
     // === 相位 3：握手认证（经注册换得的 token） ===
     wait_until(|| async { !state.handshakes().is_empty() }).await;
@@ -810,7 +797,10 @@ async fn b3_tracer_bullet_full_chain() {
     let ws_dir = ws
         .resolve("tracer-pipe", "tracer-job")
         .expect("resolve 工作区");
-    assert!(ws_dir.join("hello.txt").is_file(), "checkout 检出 hello.txt");
+    assert!(
+        ws_dir.join("hello.txt").is_file(),
+        "checkout 检出 hello.txt"
+    );
     // 缓存 save 仅成功后：cacheable 已 save 到缓存目录。
     let cache_dir = cache.root().join("tracer-pipe").join("tracer-cache");
     wait_until(|| async { cache_dir.join("cacheable").is_file() }).await;

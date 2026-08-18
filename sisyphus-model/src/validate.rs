@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::pipeline::{CacheSpec, ExecutionEnv, Job, ParameterType, Pipeline};
-use crate::when;
 use crate::variables;
+use crate::when;
 
 /// 校验错误：`path` 为定位用的字段路径（如 `stages[0].jobs[1].caches[0].key`）。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -107,8 +107,7 @@ fn validate_job(errors: &mut Vec<ValidationError>, path: &str, job: &Job) {
     }
 
     // env 键与机密名冲突（ADR-0015）
-    let secret_names: std::collections::HashSet<&String> =
-        job.secrets.iter().collect();
+    let secret_names: std::collections::HashSet<&String> = job.secrets.iter().collect();
     for e in &job.env {
         if secret_names.contains(&e.name) {
             errors.push(ValidationError::new(
@@ -276,7 +275,10 @@ mod tests {
             choices: vec![],
         });
         let errs = validate(&p).unwrap_err();
-        assert!(errs.iter().any(|e| e.message.contains("必填参数必须带默认值")));
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("必填参数必须带默认值"))
+        );
     }
 
     #[test]
@@ -313,7 +315,10 @@ mod tests {
         let mut p = base_pipeline();
         p.stages[0].when = Some("${SISY_WORKSPACE} == \"/x\"".into());
         let errs = validate(&p).unwrap_err();
-        assert!(errs.iter().any(|e| e.message.contains("禁用 ${SISY_WORKSPACE}")));
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("禁用 ${SISY_WORKSPACE}"))
+        );
     }
 
     #[test]
@@ -333,7 +338,10 @@ mod tests {
             when: Some("${SISY_WORKSPACE} == \"/x\"".into()),
         });
         let errs = validate(&p).unwrap_err();
-        assert!(errs.iter().any(|e| e.message.contains("禁用 ${SISY_WORKSPACE}")));
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("禁用 ${SISY_WORKSPACE}"))
+        );
     }
 
     #[test]
@@ -357,7 +365,10 @@ mod tests {
             files: vec![],
         });
         let errs = validate(&p).unwrap_err();
-        assert!(errs.iter().any(|e| e.message.contains("仅允许 workspace 相对路径")));
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("仅允许 workspace 相对路径"))
+        );
     }
 
     #[test]
@@ -392,7 +403,10 @@ mod tests {
             path: "/absolute/path".into(),
         });
         let errs = validate(&p).unwrap_err();
-        assert!(errs.iter().any(|e| e.message.contains("workspace 相对路径")));
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("workspace 相对路径"))
+        );
     }
 
     #[test]

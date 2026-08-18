@@ -54,11 +54,19 @@ mod tests {
         assert!(peer_too_new(&newer, &VERSION));
         // minor/patch 任一更大也判过新（semver 全序）。
         assert!(peer_too_new(
-            &Version { major: 1, minor: 1, patch: 0 },
+            &Version {
+                major: 1,
+                minor: 1,
+                patch: 0
+            },
             &VERSION
         ));
         assert!(peer_too_new(
-            &Version { major: 1, minor: 0, patch: 1 },
+            &Version {
+                major: 1,
+                minor: 0,
+                patch: 1
+            },
             &VERSION
         ));
     }

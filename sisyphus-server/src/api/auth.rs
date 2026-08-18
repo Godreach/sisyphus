@@ -162,9 +162,7 @@ pub async fn register(
 ) -> Result<(StatusCode, Json<MeResponse>), ApiError> {
     // 开关判定先行（关时对任何输入一律 403，不借校验错误泄露开关状态）。
     if !state.registration_enabled {
-        return Err(ApiError::forbidden(
-            "注册开关未开启：账号由全局管理员创建",
-        ));
+        return Err(ApiError::forbidden("注册开关未开启：账号由全局管理员创建"));
     }
     if state.users.count().await? == 0 {
         return Err(ApiError::forbidden(
@@ -175,7 +173,10 @@ pub async fn register(
     validate_new_account(&req.username, &req.password)?;
 
     let hash = hash_password(&req.password).await;
-    let user = state.users.create(req.username.trim(), &hash, false).await?;
+    let user = state
+        .users
+        .create(req.username.trim(), &hash, false)
+        .await?;
     // 审计（票 B2b-T7）：自注册建号与全局 admin 建号同为 user_created
     // （detail 同形态：记目标用户名）。
     state
@@ -589,7 +590,13 @@ fn insert_set_cookie(resp: &mut Response, cookie: &str) {
 async fn record_login_success(state: &AppState, username: &str, now: i64) -> Result<(), ApiError> {
     state
         .audit
-        .insert(now, username, crate::store::audit::AuditEvent::LoginSuccess, None, None)
+        .insert(
+            now,
+            username,
+            crate::store::audit::AuditEvent::LoginSuccess,
+            None,
+            None,
+        )
         .await?;
     Ok(())
 }
@@ -599,7 +606,13 @@ async fn record_login_success(state: &AppState, username: &str, now: i64) -> Res
 async fn record_login_failure(state: &AppState, username: &str, now: i64) -> Result<(), ApiError> {
     state
         .audit
-        .insert(now, username, crate::store::audit::AuditEvent::LoginFailure, None, None)
+        .insert(
+            now,
+            username,
+            crate::store::audit::AuditEvent::LoginFailure,
+            None,
+            None,
+        )
         .await?;
     Ok(())
 }
@@ -670,7 +683,10 @@ mod tests {
     #[test]
     fn validate_new_account_enforces_username_charset_and_min_password() {
         assert!(validate_new_account("root", "12345678").is_ok());
-        assert!(validate_new_account("  alice.dev-2  ", "12345678").is_ok(), "trim 后合法");
+        assert!(
+            validate_new_account("  alice.dev-2  ", "12345678").is_ok(),
+            "trim 后合法"
+        );
         // 长口令无复杂度要求：纯数字也过。
         assert!(validate_new_account("root", "12345678901234567890").is_ok());
         // 64 字符上限边界。
@@ -680,7 +696,11 @@ mod tests {
         // 422 且定位 username。
         for bad in ["", "   ", "张三", "a/b", "a b", &"a".repeat(65)] {
             let err = validate_new_account(bad, "12345678").unwrap_err();
-            assert_eq!(err.status_code(), StatusCode::UNPROCESSABLE_ENTITY, "{bad:?}");
+            assert_eq!(
+                err.status_code(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{bad:?}"
+            );
             assert_eq!(
                 username_issue(bad).expect("同输入应产生 issue").path,
                 "username",
@@ -692,7 +712,9 @@ mod tests {
         let err = validate_new_account("root", "short").unwrap_err();
         assert_eq!(err.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
-            password_issue("password", "short").expect("短密码应产生 issue").path,
+            password_issue("password", "short")
+                .expect("短密码应产生 issue")
+                .path,
             "password"
         );
 

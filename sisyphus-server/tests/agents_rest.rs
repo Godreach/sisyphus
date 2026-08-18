@@ -15,7 +15,9 @@ async fn login_as_regular(app: &TestApp, admin_cookie: &str, username: &str) -> 
         app,
         "POST",
         "/api/v1/users",
-        Some(format!(r#"{{"username": "{username}", "password": "alice-password-1"}}"#)),
+        Some(format!(
+            r#"{{"username": "{username}", "password": "alice-password-1"}}"#
+        )),
         Some(admin_cookie),
     )
     .await;
@@ -24,7 +26,9 @@ async fn login_as_regular(app: &TestApp, admin_cookie: &str, username: &str) -> 
         app,
         "POST",
         "/api/v1/auth/login",
-        Some(format!(r#"{{ "username": "{username}", "password": "alice-password-1" }}"#)),
+        Some(format!(
+            r#"{{ "username": "{username}", "password": "alice-password-1" }}"#
+        )),
         None,
     )
     .await;
@@ -34,7 +38,14 @@ async fn login_as_regular(app: &TestApp, admin_cookie: &str, username: &str) -> 
 
 /// 建 Agent 条目（返回响应体 JSON；断言 201 + 凭据形态）。
 async fn create_agent(app: &TestApp, cookie: &str, body: &str) -> serde_json::Value {
-    let resp = req_with_cookie(app, "POST", "/api/v1/agents", Some(body.into()), Some(cookie)).await;
+    let resp = req_with_cookie(
+        app,
+        "POST",
+        "/api/v1/agents",
+        Some(body.into()),
+        Some(cookie),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::CREATED, "建条目应 201");
     body_json(resp).await
 }
@@ -54,7 +65,11 @@ async fn agents_require_global_admin() {
         ("GET", "/api/v1/agents", None),
         ("POST", "/api/v1/agents", Some(r#"{"name": "linux-1"}"#)),
         ("GET", "/api/v1/agents/linux-1", None),
-        ("PATCH", "/api/v1/agents/linux-1", Some(r#"{"disabled": true}"#)),
+        (
+            "PATCH",
+            "/api/v1/agents/linux-1",
+            Some(r#"{"disabled": true}"#),
+        ),
     ] {
         let resp = req_with_cookie(
             &app,
@@ -125,11 +140,12 @@ async fn create_returns_token_and_register_code_plaintext_once() {
     );
 
     // 审计（ADR-0015：Agent 建立 + 注册码签发入账；detail 只记名）。
-    let events: Vec<(String, String)> =
-        sqlx::query_as("SELECT actor, event_type FROM audit_log WHERE event_type = 'agent_created'")
-            .fetch_all(&app.pool)
-            .await
-            .expect("直查审计");
+    let events: Vec<(String, String)> = sqlx::query_as(
+        "SELECT actor, event_type FROM audit_log WHERE event_type = 'agent_created'",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .expect("直查审计");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].0, "admin", "操作人实名");
     let audit_body = body_json(get_with_cookie(&app, "/api/v1/audit", &cookie).await).await;
@@ -159,14 +175,27 @@ async fn create_validates_name_labels_and_concurrency() {
     for (body, issue_path) in [
         (r#"{"name": "   "}"#, "name"),
         (r#"{"name": "a/b"}"#, "name"),
-        (r#"{"name": "linux-1", "max_concurrency": 0}"#, "max_concurrency"),
+        (
+            r#"{"name": "linux-1", "max_concurrency": 0}"#,
+            "max_concurrency",
+        ),
         (
             r#"{"name": "linux-1", "custom_labels": ["region"]}"#,
             "custom_labels",
         ),
-        (r#"{"name": "linux-1", "custom_labels": ["=cn"]}"#, "custom_labels"),
+        (
+            r#"{"name": "linux-1", "custom_labels": ["=cn"]}"#,
+            "custom_labels",
+        ),
     ] {
-        let resp = req_with_cookie(&app, "POST", "/api/v1/agents", Some(body.into()), Some(&cookie)).await;
+        let resp = req_with_cookie(
+            &app,
+            "POST",
+            "/api/v1/agents",
+            Some(body.into()),
+            Some(&cookie),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
         let json = body_json(resp).await;
         assert_eq!(json["code"], "VALIDATION_FAILED");
@@ -179,7 +208,14 @@ async fn create_validates_name_labels_and_concurrency() {
 
     // 重名：409。
     create_agent(&app, &cookie, r#"{"name": "linux-1"}"#).await;
-    let resp = req_with_cookie(&app, "POST", "/api/v1/agents", Some(r#"{"name": "linux-1"}"#.into()), Some(&cookie)).await;
+    let resp = req_with_cookie(
+        &app,
+        "POST",
+        "/api/v1/agents",
+        Some(r#"{"name": "linux-1"}"#.into()),
+        Some(&cookie),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 }
 
@@ -213,16 +249,19 @@ async fn list_and_detail_show_slots_and_disk_usage() {
 async fn patch_disables_kicks_and_edits_spec() {
     let app = test_app().await;
     let cookie = setup_and_login(&app).await;
-    create_agent(&app, &cookie, r#"{"name": "linux-1", "max_concurrency": 1}"#).await;
+    create_agent(
+        &app,
+        &cookie,
+        r#"{"name": "linux-1", "max_concurrency": 1}"#,
+    )
+    .await;
 
     // 改槽位 + 自定义标签（整组替换）。
     let resp = req_with_cookie(
         &app,
         "PATCH",
         "/api/v1/agents/linux-1",
-        Some(
-            r#"{"max_concurrency": 3, "custom_labels": ["region=eu", "gpu=nvidia"]}"#.into(),
-        ),
+        Some(r#"{"max_concurrency": 3, "custom_labels": ["region=eu", "gpu=nvidia"]}"#.into()),
         Some(&cookie),
     )
     .await;
@@ -247,15 +286,17 @@ async fn patch_disables_kicks_and_edits_spec() {
     assert_eq!(resp.status(), StatusCode::OK);
     let disabled = body_json(resp).await;
     assert_eq!(disabled["disabled"], true);
-    assert_eq!(disabled["online"], false, "停用不改变在线标记（踢线由认证面承载）");
+    assert_eq!(
+        disabled["online"], false,
+        "停用不改变在线标记（踢线由认证面承载）"
+    );
 
     // 审计（ADR-0015：停用即吊销 token 入账）。
-    let disabled_rows: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM audit_log WHERE event_type = 'agent_disabled'",
-    )
-    .fetch_one(&app.pool)
-    .await
-    .expect("直查审计");
+    let disabled_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE event_type = 'agent_disabled'")
+            .fetch_one(&app.pool)
+            .await
+            .expect("直查审计");
     assert_eq!(disabled_rows, 1);
 
     // 启用恢复。
@@ -268,12 +309,11 @@ async fn patch_disables_kicks_and_edits_spec() {
     )
     .await;
     assert_eq!(body_json(resp).await["disabled"], false);
-    let enabled_rows: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM audit_log WHERE event_type = 'agent_enabled'",
-    )
-    .fetch_one(&app.pool)
-    .await
-    .expect("直查审计");
+    let enabled_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE event_type = 'agent_enabled'")
+            .fetch_one(&app.pool)
+            .await
+            .expect("直查审计");
     assert_eq!(enabled_rows, 1);
 
     // 编辑校验：槽位 0 422；不存在的 Agent 404。
@@ -363,7 +403,13 @@ async fn register_rejects_invalid_used_expired_and_disabled() {
 
     // 已用（先正常兑一次）：409。
     let ok_body = format!(r#"{{"name": "linux-1", "register_code": "{register_code}"}}"#);
-    let resp = req(&app, "POST", "/api/v1/agent/register", Some(ok_body.clone())).await;
+    let resp = req(
+        &app,
+        "POST",
+        "/api/v1/agent/register",
+        Some(ok_body.clone()),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK, "先兑一次");
     let resp = req(&app, "POST", "/api/v1/agent/register", Some(ok_body)).await;
     assert_eq!(resp.status(), StatusCode::CONFLICT, "已用应 409");

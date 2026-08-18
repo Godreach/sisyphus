@@ -145,7 +145,13 @@ async fn get_trigger(app: &TestApp, cookie: &str, pipeline: &str, kind: &str) ->
     .await
 }
 
-async fn patch_trigger(app: &TestApp, cookie: &str, pipeline: &str, kind: &str, body: &str) -> Response {
+async fn patch_trigger(
+    app: &TestApp,
+    cookie: &str,
+    pipeline: &str,
+    kind: &str,
+    body: &str,
+) -> Response {
     req_with_cookie(
         app,
         "PATCH",
@@ -256,7 +262,10 @@ async fn poll_enable_resets_baseline() {
     assert_eq!(resp.status(), StatusCode::OK);
     let poll = body_json(resp).await;
     assert_eq!(poll["enabled"], true);
-    assert!(poll["baseline_commit"].is_null(), "启用重置基线（下次探测重记）");
+    assert!(
+        poll["baseline_commit"].is_null(),
+        "启用重置基线（下次探测重记）"
+    );
 }
 
 /// AC：runner 档不足（触发器管理需项目 admin 档）→ 403。
@@ -350,7 +359,11 @@ async fn invalid_spec_is_422() {
         r#"{ "kind": "cron", "cron": { "expr": "0 2 * *" } }"#,
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "坏 cron 422");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "坏 cron 422"
+    );
     // 坏 poll：节奏 0。
     let resp = create_trigger(
         &app,
@@ -359,10 +372,18 @@ async fn invalid_spec_is_422() {
         r#"{ "kind": "poll", "poll": { "interval_minutes": 0 } }"#,
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "坏 poll 422");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "坏 poll 422"
+    );
     // cron 缺 spec → 422。
     let resp = create_trigger(&app, &admin, "release", r#"{ "kind": "cron" }"#).await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "cron 缺 spec 422");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "cron 缺 spec 422"
+    );
 
     // 建合法 cron 后：patch 给 poll spec（与 kind 不匹配）→ 422。
     create_trigger(&app, &admin, "release", CRON_BODY).await;
@@ -386,13 +407,7 @@ async fn invalid_spec_is_422() {
 async fn poll_interval_defaults_to_config_when_omitted() {
     let (app, admin, _alice, _bob, _carol, _dave) = fixture().await;
     // poll spec 不给 interval → 取 config 默认 5。
-    let resp = create_trigger(
-        &app,
-        &admin,
-        "release",
-        r#"{ "kind": "poll", "poll": {} }"#,
-    )
-    .await;
+    let resp = create_trigger(&app, &admin, "release", r#"{ "kind": "poll", "poll": {} }"#).await;
     assert_eq!(resp.status(), StatusCode::CREATED);
     let poll = body_json(resp).await;
     assert_eq!(poll["spec"]["interval_minutes"], 5, "缺省取 config 默认");

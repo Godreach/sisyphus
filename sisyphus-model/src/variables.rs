@@ -26,10 +26,7 @@ pub fn is_builtin(name: &str) -> bool {
 
 /// 变量名是否合法（用于未定义变量检测与校验信息）。
 pub fn is_valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// 变量值查询函数：给定变量名返回其值（`None` = 未定义）。
@@ -54,10 +51,7 @@ pub enum UndefinedPolicy {
 
 impl<'a> Resolver<'a> {
     /// 新建解析器。
-    pub fn new(
-        lookup: impl Fn(&str) -> Option<String> + 'a,
-        undefined: UndefinedPolicy,
-    ) -> Self {
+    pub fn new(lookup: impl Fn(&str) -> Option<String> + 'a, undefined: UndefinedPolicy) -> Self {
         Self {
             lookup: Box::new(lookup),
             undefined,

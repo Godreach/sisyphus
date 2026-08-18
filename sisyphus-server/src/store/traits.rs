@@ -61,7 +61,7 @@ pub trait LogStore {
 
     /// 自 `from_seq` 起读取 chunk（SSE `from=<seq>` 回放/续传与整份下载共用，ADR-0013）。
     async fn read_from(&self, loc: LogLocation, from_seq: u64)
-        -> Result<Vec<LogChunk>, StoreError>;
+    -> Result<Vec<LogChunk>, StoreError>;
 }
 
 /// 产物字节存取缝（ADR-0004：本地磁盘布局；ADR-0007：独立 HTTP 端点消费流）。

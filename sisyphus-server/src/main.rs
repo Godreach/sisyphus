@@ -134,10 +134,13 @@ async fn main() {
     let trigger_engine = sisyphus_server::trigger::TriggerEngine::new(
         state.engine.clone(),
         pool.clone(),
-        Arc::new(sisyphus_server::scm::UnimplementedProbe) as Arc<dyn sisyphus_server::scm::ScmProbe>,
+        Arc::new(sisyphus_server::scm::UnimplementedProbe)
+            as Arc<dyn sisyphus_server::scm::ScmProbe>,
     );
     let trigger_task = tokio::spawn(async move {
-        trigger_engine.run(sisyphus_server::trigger::TRIGGER_LOOP_INTERVAL).await;
+        trigger_engine
+            .run(sisyphus_server::trigger::TRIGGER_LOOP_INTERVAL)
+            .await;
     });
 
     // 双端口先绑定再 serve（ADR-0005 端口合并策略推迟，各自独立监听）：

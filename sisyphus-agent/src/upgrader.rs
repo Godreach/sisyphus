@@ -609,17 +609,11 @@ impl Handle {
         while let Some(msg) = self.rx.recv().await {
             match msg.kind {
                 Some(Kind::Upgrade(cmd)) => {
-                    self.receipts
-                        .lock()
-                        .expect("观测锁")
-                        .push("upgrade".into());
+                    self.receipts.lock().expect("观测锁").push("upgrade".into());
                     self.perform_upgrade(cmd).await;
                 }
                 _ => {
-                    self.receipts
-                        .lock()
-                        .expect("观测锁")
-                        .push("other".into());
+                    self.receipts.lock().expect("观测锁").push("other".into());
                     tracing::warn!(?msg, "upgrader 收到非升级指令，忽略");
                 }
             }
@@ -637,9 +631,16 @@ impl Handle {
         self.gate.wait_drained(&self.in_flight).await;
 
         // 2. 下载。
-        self.uplink.report(UpgradePhase::UpgradeDownloading, "").await;
+        self.uplink
+            .report(UpgradePhase::UpgradeDownloading, "")
+            .await;
         let url = resolve_download_url(self.api_url.as_deref(), &cmd.download_url);
-        let bytes = match self.deps.downloader.download(&url, self.token.as_deref()).await {
+        let bytes = match self
+            .deps
+            .downloader
+            .download(&url, self.token.as_deref())
+            .await
+        {
             Ok(b) => b,
             Err(e) => {
                 self.uplink
@@ -667,7 +668,10 @@ impl Handle {
             Ok(p) => p,
             Err(e) => {
                 self.uplink
-                    .report(UpgradePhase::UpgradeSwapping, &format!("写临时文件失败：{e}"))
+                    .report(
+                        UpgradePhase::UpgradeSwapping,
+                        &format!("写临时文件失败：{e}"),
+                    )
                     .await;
                 return;
             }
@@ -681,7 +685,9 @@ impl Handle {
         }
 
         // 5. spawn 新进程（继承参数与环境）+ 甄别；连续 3 次启动失败退回 .old。
-        self.uplink.report(UpgradePhase::UpgradeRestarting, "").await;
+        self.uplink
+            .report(UpgradePhase::UpgradeRestarting, "")
+            .await;
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut state = load_state(&self.agent_json_path);
         // 新升级（包名不同）→ 失败计数清零（ADR-0017：连续 3 次是同一次升级内
@@ -757,7 +763,6 @@ impl Handle {
         }
     }
 }
-
 
 // ============================================================
 // 单元测试（纯逻辑 + 真实 FS + 注入 fake；TDD 红→绿）
@@ -968,11 +973,7 @@ mod tests {
     }
     #[async_trait]
     impl Downloader for FakeDownloader {
-        async fn download(
-            &self,
-            url: &str,
-            token: Option<&str>,
-        ) -> Result<Vec<u8>, DownloadError> {
+        async fn download(&self, url: &str, token: Option<&str>) -> Result<Vec<u8>, DownloadError> {
             self.seen
                 .lock()
                 .expect("锁")
@@ -1201,10 +1202,18 @@ mod tests {
         };
         fx.handle.perform_upgrade(cmd).await;
 
-        assert_eq!(std::fs::read(&fx.cur).unwrap(), b"OLD", "3 次失败后退回旧版");
+        assert_eq!(
+            std::fs::read(&fx.cur).unwrap(),
+            b"OLD",
+            "3 次失败后退回旧版"
+        );
         assert!(!old_path(&fx.cur).exists(), "退回后 .old 已挪回当前");
         assert_eq!(fx.spawn_seen.lock().expect("锁").len(), 3, "重试 3 次");
-        assert!(has_phase(&mut fx.up_rx, UpgradePhase::UpgradeFallback, "退回"));
+        assert!(has_phase(
+            &mut fx.up_rx,
+            UpgradePhase::UpgradeFallback,
+            "退回"
+        ));
         assert_eq!(load_state(&fx.agent_json).consecutive_start_failures, 0);
     }
 
@@ -1214,7 +1223,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("临时目录");
         let bytes = b"NEW-BIN".to_vec();
         let sha = sha256_hex(&bytes);
-        let mut fx = fixture(dir.path(), Ok(bytes), vec![Err("boom".into()), Ok(())], vec![], true).await;
+        let mut fx = fixture(
+            dir.path(),
+            Ok(bytes),
+            vec![Err("boom".into()), Ok(())],
+            vec![],
+            true,
+        )
+        .await;
 
         let cmd = UpgradeCommand {
             package_name: "agent-1.0.1".into(),
@@ -1223,8 +1239,16 @@ mod tests {
         };
         fx.handle.perform_upgrade(cmd).await;
 
-        assert_eq!(std::fs::read(&fx.cur).unwrap(), b"NEW-BIN", "重试成功已换新");
-        assert_eq!(fx.spawn_seen.lock().expect("锁").len(), 2, "重试 1 次后成功");
+        assert_eq!(
+            std::fs::read(&fx.cur).unwrap(),
+            b"NEW-BIN",
+            "重试成功已换新"
+        );
+        assert_eq!(
+            fx.spawn_seen.lock().expect("锁").len(),
+            2,
+            "重试 1 次后成功"
+        );
         assert!(
             fx.exit_rx.as_ref().is_some_and(|r| *r.borrow()),
             "成功后置退出信号"
@@ -1270,7 +1294,11 @@ mod tests {
             3,
             "换包清零后从头计，重试满 3 次"
         );
-        assert!(has_phase(&mut fx.up_rx, UpgradePhase::UpgradeFallback, "退回"));
+        assert!(has_phase(
+            &mut fx.up_rx,
+            UpgradePhase::UpgradeFallback,
+            "退回"
+        ));
         // 退回后计数清零、last_package 仍记 B。
         let state = load_state(&fx.agent_json);
         assert_eq!(state.consecutive_start_failures, 0, "退回后计数清零");
@@ -1314,7 +1342,11 @@ mod tests {
             1,
             "同包续传沿用计数 2，1 次失败即退回"
         );
-        assert!(has_phase(&mut fx.up_rx, UpgradePhase::UpgradeFallback, "退回"));
+        assert!(has_phase(
+            &mut fx.up_rx,
+            UpgradePhase::UpgradeFallback,
+            "退回"
+        ));
     }
 
     /// AC：排空——在途非空时 perform_upgrade 阻塞在排空；释放 + 通知后继续下载，
@@ -1324,7 +1356,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("临时目录");
         let bytes = b"NEW-BIN".to_vec();
         let sha = sha256_hex(&bytes);
-        let mut fx = fixture(dir.path(), Ok(bytes), vec![Ok(())], vec!["job-1".into()], false).await;
+        let mut fx = fixture(
+            dir.path(),
+            Ok(bytes),
+            vec![Ok(())],
+            vec!["job-1".into()],
+            false,
+        )
+        .await;
         // 取出共享观测 + 在途集 + 闸门克隆（handle 将被 move 进 spawn 任务）。
         let dl_seen = fx.dl_seen.clone();
         let gate = fx.gate.clone();
@@ -1391,7 +1430,11 @@ mod tests {
         panic!("未在 1s 内等到阶段 {phase:?} 含 {contains:?}");
     }
 
-    fn has_phase(rx: &mut mpsc::Receiver<ChannelMessage>, phase: UpgradePhase, contains: &str) -> bool {
+    fn has_phase(
+        rx: &mut mpsc::Receiver<ChannelMessage>,
+        phase: UpgradePhase,
+        contains: &str,
+    ) -> bool {
         while let Ok(msg) = rx.try_recv() {
             if let Some(Kind::UpgradeStatus(s)) = msg.kind
                 && s.phase == phase as i32

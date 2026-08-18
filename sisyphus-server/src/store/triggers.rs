@@ -123,7 +123,8 @@ impl TriggerRepo {
             Err(e) if is_unique_violation(&e) => {
                 return Err(StoreError::Unique(format!(
                     "触发器已存在：{}:{}",
-                    input.pipeline_name, input.kind.as_str(),
+                    input.pipeline_name,
+                    input.kind.as_str(),
                 )));
             }
             Err(e) => return Err(e.into()),
@@ -284,17 +285,17 @@ impl TriggerRepo {
 
 /// triggers 行元组（列形态唯一收敛点，免逐查询散落 `Row::get`）。
 type TriggerTuple = (
-    i64,           // id
-    i64,           // project_id
-    String,        // pipeline_name
-    String,        // kind
-    String,        // spec
-    bool,          // enabled
+    i64,            // id
+    i64,            // project_id
+    String,         // pipeline_name
+    String,         // kind
+    String,         // spec
+    bool,           // enabled
     Option<String>, // baseline_commit
-    Option<i64>,   // last_probe_at
+    Option<i64>,    // last_probe_at
     Option<String>, // last_probe_error
-    i64,           // created_at
-    i64,           // updated_at
+    i64,            // created_at
+    i64,            // updated_at
 );
 
 impl TriggerRow {
@@ -417,11 +418,12 @@ mod tests {
             .expect("清单");
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].kind, TriggerKind::Cron, "按 kind 排序稳定");
-        assert!(repo
-            .get_by_key(project_id, "release", TriggerKind::Cron)
-            .await
-            .expect("查")
-            .is_some());
+        assert!(
+            repo.get_by_key(project_id, "release", TriggerKind::Cron)
+                .await
+                .expect("查")
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -434,19 +436,17 @@ mod tests {
             .expect("建");
 
         // 只改配置（enabled None 不动）。
-        assert!(repo
-            .update(cron.id, Some(r#"{"expr":"0 6 * * 1-5"}"#), None)
-            .await
-            .expect("改配置"));
+        assert!(
+            repo.update(cron.id, Some(r#"{"expr":"0 6 * * 1-5"}"#), None)
+                .await
+                .expect("改配置")
+        );
         let row = repo.get(cron.id).await.expect("查").expect("应存在");
         assert!(row.spec.contains("0 6 * * 1-5"));
         assert!(row.enabled, "enabled 未动");
 
         // 只改启停（spec None 不动）。
-        assert!(repo
-            .update(cron.id, None, Some(false))
-            .await
-            .expect("停用"));
+        assert!(repo.update(cron.id, None, Some(false)).await.expect("停用"));
         let row = repo.get(cron.id).await.expect("查").expect("应存在");
         assert!(!row.enabled);
         assert!(row.spec.contains("0 6 * * 1-5"), "spec 未动");
@@ -467,42 +467,53 @@ mod tests {
             .expect("建 poll");
 
         // 基线：创建/启用时探测当前 head 写入，不触发（本缝只落库）。
-        assert!(repo
-            .record_baseline(poll.id, "abc123", 1_000)
-            .await
-            .expect("记基线"));
+        assert!(
+            repo.record_baseline(poll.id, "abc123", 1_000)
+                .await
+                .expect("记基线")
+        );
         let row = repo.get(poll.id).await.expect("查").expect("应存在");
         assert_eq!(row.baseline_commit.as_deref(), Some("abc123"));
         assert_eq!(row.last_probe_at, Some(1_000));
         assert_eq!(row.last_probe_error, None, "记基线清历史错误");
 
         // 探测成功：清错误（baseline 不动——基线一旦记录持续生效）。
-        assert!(repo
-            .record_probe(poll.id, 2_000, None)
-            .await
-            .expect("探测成功"));
+        assert!(
+            repo.record_probe(poll.id, 2_000, None)
+                .await
+                .expect("探测成功")
+        );
         let row = repo.get(poll.id).await.expect("查").expect("应存在");
         assert_eq!(row.last_probe_at, Some(2_000));
         assert_eq!(row.baseline_commit.as_deref(), Some("abc123"));
         assert!(row.last_probe_error.is_none());
 
         // 探测失败：错误记入、继续可探测（不自动禁用、不静默停摆）。
-        assert!(repo
-            .record_probe(poll.id, 3_000, Some("git ls-remote failed"))
-            .await
-            .expect("探测失败"));
+        assert!(
+            repo.record_probe(poll.id, 3_000, Some("git ls-remote failed"))
+                .await
+                .expect("探测失败")
+        );
         let row = repo.get(poll.id).await.expect("查").expect("应存在");
         assert_eq!(row.last_probe_at, Some(3_000));
-        assert_eq!(row.last_probe_error.as_deref(), Some("git ls-remote failed"));
+        assert_eq!(
+            row.last_probe_error.as_deref(),
+            Some("git ls-remote failed")
+        );
         assert!(row.enabled, "探测失败不自动禁用");
-        assert_eq!(row.baseline_commit.as_deref(), Some("abc123"), "基线不受影响");
+        assert_eq!(
+            row.baseline_commit.as_deref(),
+            Some("abc123"),
+            "基线不受影响"
+        );
 
         // 再次成功：错误清空（历史即「最近一次」——完整历史随构建
         // trigger_detail + builds 行呈现，Spec B2c §2 不单独建表）。
-        assert!(repo
-            .record_probe(poll.id, 4_000, None)
-            .await
-            .expect("再探测"));
+        assert!(
+            repo.record_probe(poll.id, 4_000, None)
+                .await
+                .expect("再探测")
+        );
         let row = repo.get(poll.id).await.expect("查").expect("应存在");
         assert!(row.last_probe_error.is_none());
     }

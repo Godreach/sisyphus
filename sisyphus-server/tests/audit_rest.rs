@@ -185,7 +185,10 @@ async fn security_events_land_in_audit_with_actor_and_detail_shape() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT, "销 PAT");
 
     // 机密：建 → 覆写 → 删。
-    for (name, event) in [("DEPLOY_KEY", "secret_created"), ("DEPLOY_KEY", "secret_overwritten")] {
+    for (name, event) in [
+        ("DEPLOY_KEY", "secret_created"),
+        ("DEPLOY_KEY", "secret_overwritten"),
+    ] {
         let resp = req_with_cookie(
             &app,
             "PUT",
@@ -253,7 +256,10 @@ async fn security_events_land_in_audit_with_actor_and_detail_shape() {
     assert_eq!(secret_created["detail"]["secret"], "DEPLOY_KEY");
     let text = serde_json::to_string(&rows).expect("序列化");
     assert!(!text.contains("v-1"), "审计 detail 只记名，值不得出现");
-    assert_eq!(event_of("secret_overwritten")["detail"]["secret"], "DEPLOY_KEY");
+    assert_eq!(
+        event_of("secret_overwritten")["detail"]["secret"],
+        "DEPLOY_KEY"
+    );
     assert_eq!(event_of("secret_deleted")["detail"]["secret"], "DEPLOY_KEY");
 
     // 登出：actor = carol（cookie 会话通道才记）。
@@ -325,13 +331,21 @@ async fn audit_filtering_and_pagination() {
 
     // 非法事件类型：422（不落查询），未知过滤不静默放宽。
     let resp = audit(&app, &admin, "?event=build_started").await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "未知事件 422");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "未知事件 422"
+    );
     assert_eq!(body_json(resp).await["code"], "VALIDATION_FAILED");
 
     // 非法分页：limit=0 / limit=201 422。
     for q in ["?limit=0", "?limit=201", "?offset=-1"] {
         let resp = audit(&app, &admin, q).await;
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{q} 应 422");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{q} 应 422"
+        );
     }
 
     // 分页：limit=2 取最新两笔，offset=2 取下一批；切页不重不漏。
@@ -339,7 +353,11 @@ async fn audit_filtering_and_pagination() {
     let page2 = audit_rows(&app, &admin, "?limit=2&offset=2").await;
     assert_eq!(page1.len(), 2);
     assert_eq!(page2.len(), 2);
-    let ids: Vec<i64> = page1.iter().chain(&page2).map(|r| r["id"].as_i64().expect("id")).collect();
+    let ids: Vec<i64> = page1
+        .iter()
+        .chain(&page2)
+        .map(|r| r["id"].as_i64().expect("id"))
+        .collect();
     assert!(ids.windows(2).all(|w| w[0] > w[1]), "时间倒序、id 递减");
     let all_ids: Vec<i64> = all.iter().map(|r| r["id"].as_i64().expect("id")).collect();
     assert_eq!(ids, all_ids[..4], "前两页即前 4 条，与全量一致（不重不漏）");

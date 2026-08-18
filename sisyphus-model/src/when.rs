@@ -202,9 +202,7 @@ fn tokenize(src: &str) -> Result<Vec<(Token, usize)>, WhenParseError> {
                 {
                     let end = i + 2 + end_rel;
                     let name = &src[i + 2..end];
-                    if name
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                         && !name.is_empty()
                     {
                         tokens.push((Token::Ident(name.to_string()), start));
@@ -307,47 +305,29 @@ impl Parser {
             Some(&Token::Lt) => {
                 self.next();
                 let rhs = self.parse_primary()?;
-                Ok(Expr::Cmp(
-                    CmpOp::Lt,
-                    Box::new(lhs),
-                    Box::new(rhs),
-                ))
+                Ok(Expr::Cmp(CmpOp::Lt, Box::new(lhs), Box::new(rhs)))
             }
             Some(&Token::Le) => {
                 self.next();
                 let rhs = self.parse_primary()?;
-                Ok(Expr::Cmp(
-                    CmpOp::Le,
-                    Box::new(lhs),
-                    Box::new(rhs),
-                ))
+                Ok(Expr::Cmp(CmpOp::Le, Box::new(lhs), Box::new(rhs)))
             }
             Some(&Token::Gt) => {
                 self.next();
                 let rhs = self.parse_primary()?;
-                Ok(Expr::Cmp(
-                    CmpOp::Gt,
-                    Box::new(lhs),
-                    Box::new(rhs),
-                ))
+                Ok(Expr::Cmp(CmpOp::Gt, Box::new(lhs), Box::new(rhs)))
             }
             Some(&Token::Ge) => {
                 self.next();
                 let rhs = self.parse_primary()?;
-                Ok(Expr::Cmp(
-                    CmpOp::Ge,
-                    Box::new(lhs),
-                    Box::new(rhs),
-                ))
+                Ok(Expr::Cmp(CmpOp::Ge, Box::new(lhs), Box::new(rhs)))
             }
             _ => Ok(lhs),
         }
     }
 
     fn parse_primary(&mut self) -> Result<Expr, WhenParseError> {
-        let (tok, _pos) = self
-            .next()
-            .ok_or(WhenParseError::UnexpectedEnd)?;
+        let (tok, _pos) = self.next().ok_or(WhenParseError::UnexpectedEnd)?;
         match tok {
             Token::LParen => {
                 let inner = self.parse_or()?;
@@ -359,15 +339,11 @@ impl Parser {
             Token::Str(s) => Ok(Expr::Literal(s)),
             Token::Num(n) => Ok(Expr::Literal(n.to_string())),
             Token::Ident(name) => Ok(Expr::Var(name)),
-            Token::Exists => {
-                match self.next() {
-                    Some((Token::Ident(name), _)) => Ok(Expr::Exists(name)),
-                    _ => Err(WhenParseError::MissingOperand),
-                }
-            }
-            _ => Err(WhenParseError::Unexpected {
-                pos: 0,
-            }),
+            Token::Exists => match self.next() {
+                Some((Token::Ident(name), _)) => Ok(Expr::Exists(name)),
+                _ => Err(WhenParseError::MissingOperand),
+            },
+            _ => Err(WhenParseError::Unexpected { pos: 0 }),
         }
     }
 }
@@ -453,8 +429,7 @@ fn resolve_str(expr: &Expr, env: &impl Env) -> Result<String, EvalError> {
 
 fn resolve_num(expr: &Expr, env: &impl Env) -> Result<f64, EvalError> {
     let s = resolve_str(expr, env)?;
-    s.parse::<f64>()
-        .map_err(|_| EvalError::NotANumber(s))
+    s.parse::<f64>().map_err(|_| EvalError::NotANumber(s))
 }
 
 /// 便捷实现：把 map 当求值环境。
@@ -471,10 +446,7 @@ pub struct SliceEnv<'a>(pub &'a [(&'a str, &'a str)]);
 
 impl Env for SliceEnv<'_> {
     fn get(&self, name: &str) -> Option<&str> {
-        self.0
-            .iter()
-            .find(|(k, _)| *k == name)
-            .map(|(_, v)| *v)
+        self.0.iter().find(|(k, _)| *k == name).map(|(_, v)| *v)
     }
 }
 
@@ -533,10 +505,19 @@ mod tests {
     fn eval_and_short_circuit() {
         let env = SliceEnv(&[("A", "1")]);
         // 左假即短路，右侧变量未定义也不报错。
-        assert!(!eval(&parse("${A} == \"2\" && ${MISSING} == \"x\"").unwrap(), &env).unwrap());
+        assert!(
+            !eval(
+                &parse("${A} == \"2\" && ${MISSING} == \"x\"").unwrap(),
+                &env
+            )
+            .unwrap()
+        );
         // 右侧变量未定义且左侧为真 → 报错。
         assert!(matches!(
-            eval(&parse("${A} == \"1\" && ${MISSING} == \"x\"").unwrap(), &env),
+            eval(
+                &parse("${A} == \"1\" && ${MISSING} == \"x\"").unwrap(),
+                &env
+            ),
             Err(EvalError::UndefinedVar(_))
         ));
     }
@@ -565,10 +546,12 @@ mod tests {
     #[test]
     fn eval_or() {
         let env = SliceEnv(&[("SISY_BRANCH", "main")]);
-        assert!(eval(
-            &parse("${SISY_BRANCH} == \"main\" || ${MISSING} == \"x\"").unwrap(),
-            &env
-        )
-        .unwrap());
+        assert!(
+            eval(
+                &parse("${SISY_BRANCH} == \"main\" || ${MISSING} == \"x\"").unwrap(),
+                &env
+            )
+            .unwrap()
+        );
     }
 }

@@ -11,7 +11,9 @@ const SNAPSHOT_PATH: &str = "tests/snapshots/openapi.json";
 
 #[test]
 fn openapi_json_matches_committed_snapshot() {
-    let json = ApiDoc::openapi().to_pretty_json().expect("生成 OpenAPI JSON");
+    let json = ApiDoc::openapi()
+        .to_pretty_json()
+        .expect("生成 OpenAPI JSON");
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(SNAPSHOT_PATH);
 
     if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {

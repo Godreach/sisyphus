@@ -130,11 +130,7 @@ pub async fn create(
     let hash = hash_password(&req.password).await;
     let user = state
         .users
-        .create(
-            req.username.trim(),
-            &hash,
-            req.is_admin.unwrap_or(false),
-        )
+        .create(req.username.trim(), &hash, req.is_admin.unwrap_or(false))
         .await?;
     // 审计（票 B2b-T7，ADR-0015）：用户建立——actor 为认证操作人实名，
     // detail 记目标用户名（历史字段永不悬空）。

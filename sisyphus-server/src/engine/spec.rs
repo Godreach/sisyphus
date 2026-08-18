@@ -241,13 +241,11 @@ pub fn assemble(input: &AssembleInput<'_>) -> Result<ResolvedJobSpec, AssembleEr
                     command,
                 }
             }
-            sisyphus_model::pipeline::Step::Checkout { submodules, .. } => {
-                ResolvedStep::Checkout {
-                    seq: seq as i32,
-                    scm: scm.clone(),
-                    submodules: *submodules,
-                }
-            }
+            sisyphus_model::pipeline::Step::Checkout { submodules, .. } => ResolvedStep::Checkout {
+                seq: seq as i32,
+                scm: scm.clone(),
+                submodules: *submodules,
+            },
         };
         steps.push(resolved);
     }
@@ -420,7 +418,9 @@ fn merge_env(pipeline: Vec<EnvVar>, job: Vec<EnvVar>) -> Vec<EnvVar> {
 mod tests {
     use super::*;
     use crate::store::projects::ScmType;
-    use sisyphus_model::pipeline::{Parameter, ParameterType, ParameterValue, Revision, Shell, Step};
+    use sisyphus_model::pipeline::{
+        Parameter, ParameterType, ParameterValue, Revision, Shell, Step,
+    };
 
     fn project() -> Project {
         Project {
@@ -632,14 +632,18 @@ mod tests {
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_str()))
             .collect();
-        assert_eq!(env["CARGO_HOME"], "${SISY_WORKSPACE}/.cargo", "SISY_WORKSPACE 占位保留");
+        assert_eq!(
+            env["CARGO_HOME"], "${SISY_WORKSPACE}/.cargo",
+            "SISY_WORKSPACE 占位保留"
+        );
         assert_eq!(env["MODE"], "release");
         assert_eq!(env["DEPLOY_KEY"], "deploy-value", "机密解密注入 env");
 
         // 机密名清单（审计）+ 隐式容器标签。
         assert_eq!(spec.secrets, vec!["DEPLOY_KEY"]);
         assert!(
-            spec.labels.contains(&"sisyphus/container=docker".to_string()),
+            spec.labels
+                .contains(&"sisyphus/container=docker".to_string()),
             "容器任务隐式追加容器标签"
         );
         assert!(spec.labels.contains(&"sisyphus/os=linux".to_string()));
@@ -682,10 +686,7 @@ mod tests {
             HashMap::new(),
         );
         let err = ctx.assemble().expect_err("缺机密应报错");
-        assert_eq!(
-            err,
-            AssembleError::MissingSecret(vec!["DEPLOY_KEY".into()])
-        );
+        assert_eq!(err, AssembleError::MissingSecret(vec!["DEPLOY_KEY".into()]));
         assert!(err.to_string().contains("DEPLOY_KEY"), "detail 记名");
     }
 
@@ -733,10 +734,19 @@ mod tests {
     #[test]
     fn merge_env_job_overrides_pipeline() {
         let pipeline = vec![
-            EnvVar { name: "A".into(), value: "p".into() },
-            EnvVar { name: "B".into(), value: "p".into() },
+            EnvVar {
+                name: "A".into(),
+                value: "p".into(),
+            },
+            EnvVar {
+                name: "B".into(),
+                value: "p".into(),
+            },
         ];
-        let job = vec![EnvVar { name: "B".into(), value: "j".into() }];
+        let job = vec![EnvVar {
+            name: "B".into(),
+            value: "j".into(),
+        }];
         let merged = merge_env(pipeline, job);
         let map: HashMap<&str, &str> = merged
             .iter()

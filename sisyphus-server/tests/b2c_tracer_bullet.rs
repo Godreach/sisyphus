@@ -53,7 +53,12 @@ async fn harness() -> Harness {
             .join(sisyphus_server::config::MASTER_KEY_FILE_NAME),
     )
     .expect("测试主密钥");
-    let state = AppState::new(pool.clone(), false, master_key, sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES);
+    let state = AppState::new(
+        pool.clone(),
+        false,
+        master_key,
+        sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES,
+    );
     // REST router 与 scheduler/gRPC 共享同一 state（事件总线串起触发→下发）。
     let app = test_app_from_state(state.clone(), dir.path());
 
@@ -239,7 +244,11 @@ async fn report(tx: &mpsc::Sender<ChannelMessage>, job_id: &str, phase: JobPhase
         kind: Some(Kind::JobStatus(ProtoJobStatus {
             job_id: job_id.into(),
             phase: phase as i32,
-            exit_code: Some(if matches!(phase, JobPhase::JobSucceeded) { 0 } else { 1 }),
+            exit_code: Some(if matches!(phase, JobPhase::JobSucceeded) {
+                0
+            } else {
+                1
+            }),
             detail: String::new(),
         })),
     })
@@ -314,9 +323,7 @@ async fn b2c_tracer_bullet_full_chain() {
         .to_string();
 
     // 5. fake Agent 连接（系统标签 os=linux → 在线 + 标签匹配）。
-    let (mut stream, tx) = connect_fake_agent(h.grpc_addr, &token)
-        .await
-        .expect("连接");
+    let (mut stream, tx) = connect_fake_agent(h.grpc_addr, &token).await.expect("连接");
     let first = stream.message().await.expect("recv").expect("msg");
     assert!(matches!(first.kind, Some(Kind::Handshake(_))), "握手回执");
 
@@ -404,10 +411,8 @@ async fn b2c_tracer_bullet_full_chain() {
     let body = body_json(resp).await;
     assert_eq!(body["status"], "succeeded", "重跑续跑至成功");
     let jobs = body["stages"][0]["jobs"].as_array().expect("jobs");
-    let compile_rows: Vec<&serde_json::Value> = jobs
-        .iter()
-        .filter(|j| j["name"] == "compile")
-        .collect();
+    let compile_rows: Vec<&serde_json::Value> =
+        jobs.iter().filter(|j| j["name"] == "compile").collect();
     let attempts: Vec<i64> = compile_rows
         .iter()
         .map(|j| j["attempt"].as_i64().expect("attempt"))
@@ -475,9 +480,7 @@ async fn rest_cancel_running_build_dispatches_cancel_to_agent() {
         .to_string();
 
     // 连 fake Agent、收握手回执。
-    let (mut stream, tx) = connect_fake_agent(h.grpc_addr, &token)
-        .await
-        .expect("连接");
+    let (mut stream, tx) = connect_fake_agent(h.grpc_addr, &token).await.expect("连接");
     let first = stream.message().await.expect("recv").expect("msg");
     assert!(matches!(first.kind, Some(Kind::Handshake(_))));
 
@@ -512,7 +515,11 @@ async fn rest_cancel_running_build_dispatches_cancel_to_agent() {
 
     // fake Agent 收 CancelBuild（经通道下发，build_id + job_id 命中）。
     let cancel = collect_one_cancel(&mut stream).await;
-    assert_eq!(cancel.build_id, build_id.to_string(), "CancelBuild 命中构建");
+    assert_eq!(
+        cancel.build_id,
+        build_id.to_string(),
+        "CancelBuild 命中构建"
+    );
     assert_eq!(cancel.job_id, spec.job_id, "CancelBuild 命中在途任务");
 
     // 构建置 cancelled。

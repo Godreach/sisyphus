@@ -110,7 +110,9 @@ async fn admin_creates_and_lists_users() {
         &app,
         "POST",
         "/api/v1/users",
-        Some(format!(r#"{{ "username": "alice", "password": "{USER_PASSWORD}" }}"#)),
+        Some(format!(
+            r#"{{ "username": "alice", "password": "{USER_PASSWORD}" }}"#
+        )),
         Some(&admin),
     )
     .await;
@@ -143,14 +145,32 @@ async fn user_management_requires_global_admin() {
 
     let cases: &[(&str, &str, &str)] = &[
         ("GET", "/api/v1/users", ""),
-        ("POST", "/api/v1/users", r#"{ "username": "eve", "password": "eve-password-12" }"#),
+        (
+            "POST",
+            "/api/v1/users",
+            r#"{ "username": "eve", "password": "eve-password-12" }"#,
+        ),
         ("PATCH", "/api/v1/users/alice", r#"{ "disabled": true }"#),
-        ("PUT", "/api/v1/users/alice/password", r#"{ "new_password": "whatever-123" }"#),
+        (
+            "PUT",
+            "/api/v1/users/alice/password",
+            r#"{ "new_password": "whatever-123" }"#,
+        ),
     ];
     for (method, path, body) in cases {
         // 未认证：401。
-        let resp = common::req(&app, method, path, (!body.is_empty()).then(|| body.to_string())).await;
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "未认证 {method} {path}");
+        let resp = common::req(
+            &app,
+            method,
+            path,
+            (!body.is_empty()).then(|| body.to_string()),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "未认证 {method} {path}"
+        );
 
         // 已认证非 admin：403。
         let resp = req_with_cookie(
@@ -161,7 +181,11 @@ async fn user_management_requires_global_admin() {
             Some(&alice),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "非 admin {method} {path}");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "非 admin {method} {path}"
+        );
     }
 }
 
@@ -195,7 +219,11 @@ async fn disable_kicks_sessions_and_pats_and_enable_allows_relogin() {
 
     // 同秒踢线：session 与 PAT 下一请求即 401。
     let resp = req_with_cookie(&app, "GET", "/api/v1/auth/me", None, Some(&alice_cookie)).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "禁用后 session 应 401");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "禁用后 session 应 401"
+    );
     let resp = bearer_get(&app, "/api/v1/auth/me", &pat).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "禁用后 PAT 应 401");
 
@@ -231,7 +259,11 @@ async fn disable_kicks_sessions_and_pats_and_enable_allows_relogin() {
 
     // 旧 PAT 不复活（启用不重建凭据，需重新签发）。
     let resp = bearer_get(&app, "/api/v1/auth/me", &pat).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "禁用期删掉的 PAT 不复活");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "禁用期删掉的 PAT 不复活"
+    );
 }
 
 /// 票 B2b-T4 AC：代办重置后旧密码失效、新密码可登录；未知用户 404。
@@ -360,7 +392,11 @@ async fn register_gated_by_config_switch() {
         r#"{ "username": "eve", "password": "eve-password-12" }"#,
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "空库：register 403（先 setup）");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "空库：register 403（先 setup）"
+    );
 
     // setup 建管理员后：自注册成功且为非管理员，可登录。
     common::setup_and_login(&app).await;
@@ -420,7 +456,11 @@ async fn register_enabled_via_toml_file_reaches_router() {
         r#"{ "username": "toml-user", "password": "toml-user-pass-1" }"#,
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "toml 打开后自注册应 201");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "toml 打开后自注册应 201"
+    );
     assert_eq!(body_json(resp).await["is_admin"], false);
 }
 
@@ -437,11 +477,17 @@ async fn user_management_validation_surface() {
             &app,
             "POST",
             "/api/v1/users",
-            Some(format!(r#"{{ "username": "{bad}", "password": "{USER_PASSWORD}" }}"#)),
+            Some(format!(
+                r#"{{ "username": "{bad}", "password": "{USER_PASSWORD}" }}"#
+            )),
             Some(&admin),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad} 应 422");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{bad} 应 422"
+        );
         let body = body_json(resp).await;
         assert!(
             body["detail"]["errors"]
@@ -460,7 +506,11 @@ async fn user_management_validation_surface() {
         Some(&admin),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "缺字段应 422");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "缺字段应 422"
+    );
     let resp = req_with_cookie(
         &app,
         "PATCH",

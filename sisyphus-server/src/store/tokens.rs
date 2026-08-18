@@ -109,11 +109,7 @@ impl PatRepo {
 
     /// 按 id + 属主取一行（票 B2b-T7：吊销前取令牌名落审计 detail）。
     /// 他人 id 一律 `None`（与吊销的「不暴露存在性」同一纪律）。
-    pub async fn get_by_user(
-        &self,
-        user_id: i64,
-        id: i64,
-    ) -> Result<Option<PatRow>, StoreError> {
+    pub async fn get_by_user(&self, user_id: i64, id: i64) -> Result<Option<PatRow>, StoreError> {
         let row = sqlx::query_as::<_, (i64, i64, String, String, Option<i64>, i64)>(
             "SELECT id, user_id, name, token_hash, expires_at, created_at
              FROM personal_access_tokens WHERE id = ? AND user_id = ?",
@@ -362,11 +358,17 @@ mod tests {
         assert_eq!(got.token_hash, hash);
 
         assert!(
-            repo.get_by_user(user_id, row.id + 999).await.expect("查").is_none(),
+            repo.get_by_user(user_id, row.id + 999)
+                .await
+                .expect("查")
+                .is_none(),
             "未知 id 应 None"
         );
         assert!(
-            repo.get_by_user(user_id + 999, row.id).await.expect("查").is_none(),
+            repo.get_by_user(user_id + 999, row.id)
+                .await
+                .expect("查")
+                .is_none(),
             "他人 id 应 None（不暴露存在性）"
         );
     }

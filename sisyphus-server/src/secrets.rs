@@ -75,7 +75,11 @@ impl std::fmt::Display for SecretsError {
         match self {
             SecretsError::Io(e) => write!(f, "密钥文件 IO 错误：{e}"),
             SecretsError::BadKeyFile(path) => {
-                write!(f, "主密钥文件字节长非法（应 {MASTER_KEY_LEN}）：{}", path.display())
+                write!(
+                    f,
+                    "主密钥文件字节长非法（应 {MASTER_KEY_LEN}）：{}",
+                    path.display()
+                )
             }
             SecretsError::Encrypt => write!(f, "加密失败"),
             SecretsError::Decrypt => write!(f, "解密失败（错密钥或密文被篡改）"),
@@ -130,7 +134,8 @@ pub fn decrypt(key: &MasterKey, blob: &[u8]) -> Result<Vec<u8>, SecretsError> {
     let (nonce, ciphertext) = blob[1..].split_at(NONCE_LEN);
 
     let cipher = XChaCha20Poly1305::new(&key.0.into());
-    let nonce = XNonce::from(<[u8; NONCE_LEN]>::try_from(nonce).map_err(|_| SecretsError::BadBlob)?);
+    let nonce =
+        XNonce::from(<[u8; NONCE_LEN]>::try_from(nonce).map_err(|_| SecretsError::BadBlob)?);
     cipher
         .decrypt(&nonce, ciphertext)
         .map_err(|_| SecretsError::Decrypt)
@@ -324,7 +329,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("临时目录");
         let path = dir.path().join("master.key");
         ensure_master_key(&path).expect("生成");
-        let mode = std::fs::metadata(&path).expect("元数据").permissions().mode();
+        let mode = std::fs::metadata(&path)
+            .expect("元数据")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600, "密钥文件仅属主可读写：{mode:o}");
     }
 
@@ -343,7 +351,10 @@ mod tests {
 
         // 不存在文件：IO 错误。
         let missing = dir.path().join("nope.key");
-        assert!(matches!(load_master_key(&missing), Err(SecretsError::Io(_))));
+        assert!(matches!(
+            load_master_key(&missing),
+            Err(SecretsError::Io(_))
+        ));
     }
 
     #[test]

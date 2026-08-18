@@ -6,9 +6,10 @@
 
 use prost::Message;
 use sisyphus_proto::agent::{
+    ChannelMessage, Handshake, JobSpec, Version,
     agent_channel_client::AgentChannelClient,
     agent_channel_server::{AgentChannel, AgentChannelServer},
-    channel_message::Kind, ChannelMessage, Handshake, JobSpec, Version,
+    channel_message::Kind,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -26,9 +27,11 @@ impl AgentChannel for StubServer {
     ) -> Result<Response<Self::ConnectStream>, Status> {
         let inbound = request.get_mut();
         let mut received_job: Option<String> = None;
-        while let Some(msg) = inbound.message().await.map_err(|e| {
-            Status::internal(format!("read inbound: {e}"))
-        })? {
+        while let Some(msg) = inbound
+            .message()
+            .await
+            .map_err(|e| Status::internal(format!("read inbound: {e}")))?
+        {
             match msg.kind {
                 Some(Kind::Handshake(h)) => {
                     assert_eq!(h.agent_version.unwrap().major, 1);
@@ -116,22 +119,18 @@ async fn full_duplex_round_trip_over_inprocess_channel() {
     let serve = async {
         tonic::transport::Server::builder()
             .add_service(AgentChannelServer::new(StubServer))
-            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
-                listener,
-            ))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
             .expect("serve");
     };
     let server_task = tokio::spawn(serve);
 
     // 客户端连接
-    let channel = tonic::transport::Endpoint::from_shared(format!(
-        "http://{addr}"
-    ))
-    .expect("endpoint")
-    .connect()
-    .await
-    .expect("connect");
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+        .expect("endpoint")
+        .connect()
+        .await
+        .expect("connect");
     let mut client = AgentChannelClient::new(channel);
 
     // Agent 上行：握手 + 任务回执

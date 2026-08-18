@@ -290,12 +290,19 @@ mod tests {
         assert_eq!(row.detail, None);
 
         // store 缝直查临时库：落库形态与返回行一致（JSON 文本原样）。
-        let (ts, actor, event_type, project_name, detail): (i64, String, String, Option<String>, Option<String>) =
-            sqlx::query_as("SELECT ts, actor, event_type, project_name, detail FROM audit_log WHERE id = ?")
-                .bind(row.id)
-                .fetch_one(&pool)
-                .await
-                .expect("直查");
+        let (ts, actor, event_type, project_name, detail): (
+            i64,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT ts, actor, event_type, project_name, detail FROM audit_log WHERE id = ?",
+        )
+        .bind(row.id)
+        .fetch_one(&pool)
+        .await
+        .expect("直查");
         assert_eq!(ts, 1_001);
         assert_eq!(actor, "alice");
         assert_eq!(event_type, "login_success");
@@ -321,7 +328,10 @@ mod tests {
                 .expect("记审计");
         }
 
-        let all = repo.query(&AuditQuery::default(), 100, 0).await.expect("全量");
+        let all = repo
+            .query(&AuditQuery::default(), 100, 0)
+            .await
+            .expect("全量");
         assert_eq!(all.len(), 6, "无过滤返回全部");
         // 时间倒序（新在前）。
         assert_eq!(all[0].ts, 600);
@@ -377,7 +387,11 @@ mod tests {
             ..Default::default()
         };
         let rows = repo.query(&q, 100, 0).await.expect("时间+用户");
-        assert_eq!(rows.len(), 1, "alice 在 300 及以后仅一笔（600 是 other 项目那笔）");
+        assert_eq!(
+            rows.len(),
+            1,
+            "alice 在 300 及以后仅一笔（600 是 other 项目那笔）"
+        );
         assert_eq!(rows[0].project_name.as_deref(), Some("other"));
     }
 
@@ -388,27 +402,42 @@ mod tests {
 
         // 同毫秒插入（id 倒序是第二排序键：后插者在前）。
         for i in 0..5 {
-            repo.insert(1_000, &format!("u{i}"), AuditEvent::LoginSuccess, None, None)
-                .await
-                .expect("记审计");
+            repo.insert(
+                1_000,
+                &format!("u{i}"),
+                AuditEvent::LoginSuccess,
+                None,
+                None,
+            )
+            .await
+            .expect("记审计");
         }
 
         // 第一页：limit=2 → 最新两笔（同毫秒按 id 倒序：u4, u3）。
-        let page = repo.query(&AuditQuery::default(), 2, 0).await.expect("页 1");
+        let page = repo
+            .query(&AuditQuery::default(), 2, 0)
+            .await
+            .expect("页 1");
         assert_eq!(
             page.iter().map(|e| e.actor.as_str()).collect::<Vec<_>>(),
             ["u4", "u3"]
         );
 
         // 第二页：offset=2 → u2, u1。
-        let page = repo.query(&AuditQuery::default(), 2, 2).await.expect("页 2");
+        let page = repo
+            .query(&AuditQuery::default(), 2, 2)
+            .await
+            .expect("页 2");
         assert_eq!(
             page.iter().map(|e| e.actor.as_str()).collect::<Vec<_>>(),
             ["u2", "u1"]
         );
 
         // 越界 offset：空页（不报错）。
-        let page = repo.query(&AuditQuery::default(), 2, 10).await.expect("越界");
+        let page = repo
+            .query(&AuditQuery::default(), 2, 10)
+            .await
+            .expect("越界");
         assert!(page.is_empty());
     }
 
@@ -434,7 +463,10 @@ mod tests {
         assert_eq!(count, 2, "append：两次插入即两行");
 
         // 回读与插入等价（查询不改写）。
-        let rows = repo.query(&AuditQuery::default(), 100, 0).await.expect("回读");
+        let rows = repo
+            .query(&AuditQuery::default(), 100, 0)
+            .await
+            .expect("回读");
         assert_eq!(rows.len(), 2);
         for row in &rows {
             assert_eq!(row.ts, 1_000);

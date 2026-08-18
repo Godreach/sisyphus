@@ -265,8 +265,7 @@ impl JobRepo {
                 attempt: row.attempt + 1,
                 spec_json: row.spec_json,
                 agent_id: None,
-                labels: serde_json::from_str(&row.labels)
-                    .map_err(StoreError::DefinitionJson)?,
+                labels: serde_json::from_str(&row.labels).map_err(StoreError::DefinitionJson)?,
                 timeout_minutes: row.timeout_minutes,
                 retry_count: row.retry_count,
                 allow_failure: row.allow_failure,
@@ -278,11 +277,12 @@ impl JobRepo {
     /// 为任务补写 spec 快照（engine 组装完成后落库，审计「当时下发什么」）。
     /// 任务必须仍 queued（已终态不再补写）；返回 false 表示行不存在或已终态。
     pub async fn set_spec(&self, id: i64, spec_json: &str) -> Result<bool, StoreError> {
-        let result = sqlx::query("UPDATE jobs SET spec_json = ? WHERE id = ? AND status = 'queued'")
-            .bind(spec_json)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE jobs SET spec_json = ? WHERE id = ? AND status = 'queued'")
+                .bind(spec_json)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -363,12 +363,7 @@ impl JobRepo {
     /// 调度：任务从 queued → running、占 Agent 槽位（下发未回执前即占，
     /// 防并发重复下发；回执失败由调用侧回收）。返回 false 表示行不存在
     /// 或已非 queued（并发裁决：同时只有一次下发成功）。
-    pub async fn dispatch(
-        &self,
-        id: i64,
-        agent_id: i64,
-        now: i64,
-    ) -> Result<bool, StoreError> {
+    pub async fn dispatch(&self, id: i64, agent_id: i64, now: i64) -> Result<bool, StoreError> {
         let result = sqlx::query(
             "UPDATE jobs
              SET status = 'running', agent_id = ?, started_at = COALESCE(started_at, ?),
@@ -512,7 +507,11 @@ impl JobRepo {
     /// Agent 判离线：该 Agent 的 running 任务全部转 unknown（离线不判死，
     /// 重连回归 running；unknown_at 记此刻起宽限计时，ADR-0008）。返回
     /// 受影响行数。
-    pub async fn agent_offline_to_unknown(&self, agent_id: i64, now: i64) -> Result<u64, StoreError> {
+    pub async fn agent_offline_to_unknown(
+        &self,
+        agent_id: i64,
+        now: i64,
+    ) -> Result<u64, StoreError> {
         let result = sqlx::query(
             "UPDATE jobs
              SET status = 'unknown', unknown_at = ?,
@@ -660,9 +659,9 @@ mod tests {
     use super::*;
     use crate::store::builds::{BuildRepo, StartBuild, TriggerSource};
     use crate::store::projects::{NewProject, ProjectRepo, ScmType};
+    use sisyphus_model::pipeline::Revision;
     use sisyphus_model::pipeline::{Job, Pipeline, Shell, Stage, Step};
     use sisyphus_model::validate::BuildSnapshot;
-    use sisyphus_model::pipeline::Revision;
 
     /// 独立临时目录 + 已迁移库 + 预置项目 + 一个 queued 构建（store 缝形态）。
     async fn fixture() -> (tempfile::TempDir, SqlitePool, i64) {
@@ -811,49 +810,65 @@ mod tests {
         let job = repo.insert(new_job(build_id, "compile")).await.expect("建");
 
         // queued→running：记 started_at。
-        assert!(repo
-            .transition(job.id, JobStatus::Running, None, None, 1_000)
-            .await
-            .expect("进运行"));
+        assert!(
+            repo.transition(job.id, JobStatus::Running, None, None, 1_000)
+                .await
+                .expect("进运行")
+        );
         let running = repo.get(job.id).await.expect("查").expect("应存在");
         assert_eq!(running.started_at, Some(1_000));
 
         // running→unknown（离线不判死）：unknown 不是终态，可再迁移。
-        assert!(repo
-            .transition(job.id, JobStatus::Unknown, None, Some("agent offline"), 2_000)
+        assert!(
+            repo.transition(
+                job.id,
+                JobStatus::Unknown,
+                None,
+                Some("agent offline"),
+                2_000
+            )
             .await
-            .expect("转 unknown"));
+            .expect("转 unknown")
+        );
         let unknown = repo.get(job.id).await.expect("查").expect("应存在");
         assert_eq!(unknown.status, JobStatus::Unknown);
         assert_eq!(unknown.finished_at, None, "unknown 非终态");
         assert_eq!(unknown.unknown_at, Some(2_000), "unknown_at 记宽限计时起点");
 
         // unknown→running（重连回归）：started_at 保留首启时刻、unknown_at 清空。
-        assert!(repo
-            .transition(job.id, JobStatus::Running, None, None, 3_000)
-            .await
-            .expect("回归运行"));
+        assert!(
+            repo.transition(job.id, JobStatus::Running, None, None, 3_000)
+                .await
+                .expect("回归运行")
+        );
         let back = repo.get(job.id).await.expect("查").expect("应存在");
         assert_eq!(back.status, JobStatus::Running);
         assert_eq!(back.started_at, Some(1_000), "首启时刻保留");
-        assert_eq!(back.detail.as_deref(), Some("agent offline"), "历史 detail 保留");
+        assert_eq!(
+            back.detail.as_deref(),
+            Some("agent offline"),
+            "历史 detail 保留"
+        );
         assert_eq!(back.unknown_at, None, "重连回归清空宽限计时");
 
         // running→succeeded：终态、记 finished_at、留退出码。
-        assert!(repo
-            .transition(job.id, JobStatus::Succeeded, Some(0), None, 4_000)
-            .await
-            .expect("成功"));
+        assert!(
+            repo.transition(job.id, JobStatus::Succeeded, Some(0), None, 4_000)
+                .await
+                .expect("成功")
+        );
         let done = repo.get(job.id).await.expect("查").expect("应存在");
         assert_eq!(done.status, JobStatus::Succeeded);
         assert_eq!(done.finished_at, Some(4_000));
         assert_eq!(done.exit_code, Some(0));
 
         // 终态吸收：succeeded 不可再迁移。
-        assert!(!repo
-            .transition(job.id, JobStatus::Failed, None, None, 5_000)
-            .await
-            .expect("终态迁移应拒绝"));
+        assert!(
+            !repo
+                .transition(job.id, JobStatus::Failed, None, None, 5_000)
+                .await
+                .expect("终态迁移应拒绝")
+        );
 
         // 另一任务走 unknown→failed（宽限超时判败路径由调用侧裁决，此处
         // 验迁移本身）与 cancelled/timeout/aborted/skipped 终态。
@@ -861,16 +876,28 @@ mod tests {
         repo.transition(other.id, JobStatus::Running, None, None, 1_000)
             .await
             .expect("进运行");
-        assert!(repo
-            .transition(other.id, JobStatus::Unknown, None, None, 2_000)
+        assert!(
+            repo.transition(other.id, JobStatus::Unknown, None, None, 2_000)
+                .await
+                .expect("转 unknown")
+        );
+        assert!(
+            repo.transition(
+                other.id,
+                JobStatus::Failed,
+                Some(1),
+                Some("orphan timeout"),
+                3_000
+            )
             .await
-            .expect("转 unknown"));
-        assert!(repo
-            .transition(other.id, JobStatus::Failed, Some(1), Some("orphan timeout"), 3_000)
-            .await
-            .expect("宽限超时判败"));
+            .expect("宽限超时判败")
+        );
         assert_eq!(
-            repo.get(other.id).await.expect("查").expect("应存在").status,
+            repo.get(other.id)
+                .await
+                .expect("查")
+                .expect("应存在")
+                .status,
             JobStatus::Failed
         );
 
@@ -892,7 +919,11 @@ mod tests {
                 "{name} 应为终态且不占槽"
             );
             assert_eq!(
-                repo.get(job.id).await.expect("查").expect("应存在").started_at,
+                repo.get(job.id)
+                    .await
+                    .expect("查")
+                    .expect("应存在")
+                    .started_at,
                 None,
                 "排队中直接终态不得有开始时刻（started_at 只属 queued→running）"
             );
@@ -1033,7 +1064,9 @@ mod tests {
         let (_dir, pool, build_id) = fixture().await;
         let repo = JobRepo::new(pool.clone());
         let done = repo.insert(new_job(build_id, "done")).await.expect("done");
-        repo.insert(new_job(build_id, "pending")).await.expect("pending");
+        repo.insert(new_job(build_id, "pending"))
+            .await
+            .expect("pending");
 
         repo.transition(done.id, JobStatus::Succeeded, Some(0), None, 1_000)
             .await
@@ -1070,7 +1103,10 @@ mod tests {
             .expect("a 完成");
 
         let pool_rows = repo.pending_pool().await.expect("pending 池");
-        assert!(pool_rows.is_empty(), "a 终态、c 在途、b 无 spec——都不在待跑集");
+        assert!(
+            pool_rows.is_empty(),
+            "a 终态、c 在途、b 无 spec——都不在待跑集"
+        );
     }
 
     #[tokio::test]
@@ -1089,7 +1125,10 @@ mod tests {
             })
             .await
             .expect("建 Agent");
-        agents.mark_online(agent.id, "[]", None, 1_000).await.expect("上线");
+        agents
+            .mark_online(agent.id, "[]", None, 1_000)
+            .await
+            .expect("上线");
         let repo = JobRepo::new(pool.clone());
         let job = repo.insert(new_job(build_id, "compile")).await.expect("建");
 
@@ -1098,11 +1137,24 @@ mod tests {
         let running = repo.get(job.id).await.expect("查").expect("应存在");
         assert_eq!(running.status, JobStatus::Running);
         assert_eq!(running.agent_id, Some(agent.id));
-        assert_eq!(running.started_at, Some(1_000), "下发记 started_at（超时计时起点）");
-        assert_eq!(repo.active_by_agent(agent.id).await.expect("在途"), 1, "下发即占槽");
+        assert_eq!(
+            running.started_at,
+            Some(1_000),
+            "下发记 started_at（超时计时起点）"
+        );
+        assert_eq!(
+            repo.active_by_agent(agent.id).await.expect("在途"),
+            1,
+            "下发即占槽"
+        );
 
         // 并发裁决：非 queued 再下发返回 false（同时只有一次赢）。
-        assert!(!repo.dispatch(job.id, agent.id, 1_100).await.expect("重复下发"));
+        assert!(
+            !repo
+                .dispatch(job.id, agent.id, 1_100)
+                .await
+                .expect("重复下发")
+        );
 
         // 回收：running → queued、清 agent/started_at/unknown_at/waiting（重发前回池）。
         let reverted = repo
@@ -1113,13 +1165,22 @@ mod tests {
         assert_eq!(reverted.status, JobStatus::Queued);
         assert_eq!(reverted.agent_id, None);
         assert_eq!(reverted.started_at, None);
-        assert_eq!(repo.active_by_agent(agent.id).await.expect("在途"), 0, "回收释放槽位");
+        assert_eq!(
+            repo.active_by_agent(agent.id).await.expect("在途"),
+            0,
+            "回收释放槽位"
+        );
 
         // 已终态任务回收返回 None（不破坏终态）。
         repo.transition(job.id, JobStatus::Succeeded, Some(0), None, 1_200)
             .await
             .expect("成功");
-        assert!(repo.revert_to_queued(job.id).await.expect("终态回收").is_none());
+        assert!(
+            repo.revert_to_queued(job.id)
+                .await
+                .expect("终态回收")
+                .is_none()
+        );
         assert_eq!(
             repo.get(job.id).await.expect("查").expect("应存在").status,
             JobStatus::Succeeded,
@@ -1167,10 +1228,11 @@ mod tests {
         assert_eq!(due[0].id, tiny.id);
         assert_eq!(due[0].status, JobStatus::Running, "timeout_due 只列不迁移");
         // 状态迁移到 timeout 终态（sched 调用侧动作）→ 重复扫描幂等（已终态）。
-        assert!(repo
-            .transition(tiny.id, JobStatus::Timeout, None, Some("job 超时"), 61_000)
-            .await
-            .expect("超时终态"));
+        assert!(
+            repo.transition(tiny.id, JobStatus::Timeout, None, Some("job 超时"), 61_000)
+                .await
+                .expect("超时终态")
+        );
         assert!(repo.timeout_due(61_000).await.expect("再扫").is_empty());
     }
 
@@ -1178,7 +1240,10 @@ mod tests {
     async fn orphan_grace_marks_unknown_jobs_failed() {
         let (_dir, pool, build_id) = fixture().await;
         let repo = JobRepo::new(pool.clone());
-        let orphan = repo.insert(new_job(build_id, "orphan")).await.expect("orphan");
+        let orphan = repo
+            .insert(new_job(build_id, "orphan"))
+            .await
+            .expect("orphan");
 
         repo.transition(orphan.id, JobStatus::Running, None, None, 1_000)
             .await
@@ -1189,18 +1254,28 @@ mod tests {
 
         let unknowns = repo.unknown_jobs().await.expect("unknown 清单");
         assert_eq!(unknowns.len(), 1);
-        assert_eq!(unknowns[0].unknown_at, Some(2_000), "unknown_at 计时起点可查");
+        assert_eq!(
+            unknowns[0].unknown_at,
+            Some(2_000),
+            "unknown_at 计时起点可查"
+        );
 
         // 宽限超时判败（调用侧裁决到点后经此落库）。
-        assert!(repo
-            .mark_orphan_failed(orphan.id, 2_000 + 10 * 60_000)
-            .await
-            .expect("判败"));
+        assert!(
+            repo.mark_orphan_failed(orphan.id, 2_000 + 10 * 60_000)
+                .await
+                .expect("判败")
+        );
         let failed = repo.get(orphan.id).await.expect("查").expect("应存在");
         assert_eq!(failed.status, JobStatus::Failed);
         assert!(failed.detail.as_deref().is_some(), "宽限超时 detail 记名");
         // 终态吸收：已 failed 不可再判败。
-        assert!(!repo.mark_orphan_failed(orphan.id, 3_000_000).await.expect("再判败"));
+        assert!(
+            !repo
+                .mark_orphan_failed(orphan.id, 3_000_000)
+                .await
+                .expect("再判败")
+        );
     }
 
     #[tokio::test]
@@ -1220,27 +1295,50 @@ mod tests {
             .await
             .expect("建 Agent");
         let repo = JobRepo::new(pool.clone());
-        let running = repo.insert(new_job(build_id, "running")).await.expect("running");
-        let queued = repo.insert(new_job(build_id, "queued")).await.expect("queued");
-        repo.dispatch(running.id, agent.id, 1_000).await.expect("下发 running");
+        let running = repo
+            .insert(new_job(build_id, "running"))
+            .await
+            .expect("running");
+        let queued = repo
+            .insert(new_job(build_id, "queued"))
+            .await
+            .expect("queued");
+        repo.dispatch(running.id, agent.id, 1_000)
+            .await
+            .expect("下发 running");
 
         // Agent 判离线：running → unknown、记 unknown_at；queued 不受影响。
         assert_eq!(
-            repo.agent_offline_to_unknown(agent.id, 2_000).await.expect("转 unknown"),
+            repo.agent_offline_to_unknown(agent.id, 2_000)
+                .await
+                .expect("转 unknown"),
             1
         );
         assert_eq!(
-            repo.get(running.id).await.expect("查").expect("应存在").status,
+            repo.get(running.id)
+                .await
+                .expect("查")
+                .expect("应存在")
+                .status,
             JobStatus::Unknown
         );
         assert_eq!(
-            repo.get(queued.id).await.expect("查").expect("应存在").status,
+            repo.get(queued.id)
+                .await
+                .expect("查")
+                .expect("应存在")
+                .status,
             JobStatus::Queued,
             "排队任务不因 Agent 离线而变"
         );
 
         // 构建级取消：排队中移出（不落开始时刻），在途不受影响（经通道下发取消）。
-        assert_eq!(repo.cancel_queued_by_build(build_id, 3_000).await.expect("取消"), 1);
+        assert_eq!(
+            repo.cancel_queued_by_build(build_id, 3_000)
+                .await
+                .expect("取消"),
+            1
+        );
         let queued_now = repo.get(queued.id).await.expect("查").expect("应存在");
         assert_eq!(queued_now.status, JobStatus::Cancelled);
         assert_eq!(queued_now.started_at, None, "排队中取消无开始时刻");
@@ -1250,7 +1348,9 @@ mod tests {
 
         // 在途任务按 Agent 回收（重启丢任务候选）。
         assert_eq!(
-            repo.in_flight_by_agent_to_queued(agent.id).await.expect("回收"),
+            repo.in_flight_by_agent_to_queued(agent.id)
+                .await
+                .expect("回收"),
             1
         );
         let back = repo.get(running.id).await.expect("查").expect("应存在");

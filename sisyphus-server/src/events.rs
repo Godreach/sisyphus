@@ -133,8 +133,14 @@ mod tests {
                 name: "linux-1".into(),
             }
         );
-        assert!(matches!(rx.try_recv(), Ok(Event::AgentOffline { agent_id: 1, .. })));
-        assert!(matches!(rx.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Event::AgentOffline { agent_id: 1, .. })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     /// 可丢语义：无订阅者时 publish 不报错（send 的 Err 被吞）。
@@ -169,7 +175,10 @@ mod tests {
             name: "a-999".into(),
         });
         assert!(
-            matches!(rx.recv().await, Err(tokio::sync::broadcast::error::RecvError::Lagged(_))),
+            matches!(
+                rx.recv().await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+            ),
             "慢消费应收 Lagged（丢中间消息）"
         );
         // Lagged 后游标落在「最老保留消息」而非最新——逐条读过去直到收到

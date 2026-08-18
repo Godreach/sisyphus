@@ -339,7 +339,10 @@ impl Handle {
         let gate = self.gate.clone();
         let job_id_for_cleanup = job_id.clone();
         self.jobs.spawn(async move {
-            run_job(spec, cancel_rx, uplink, in_flight, workspace, cache, logbuf, gate).await;
+            run_job(
+                spec, cancel_rx, uplink, in_flight, workspace, cache, logbuf, gate,
+            )
+            .await;
             // 清理取消注册（已取消则 no-op；防 stale 发送器泄漏）。
             cancels.unregister(&job_id_for_cleanup).await;
         });
@@ -935,11 +938,7 @@ fn job_deadline(timeout_minutes: i64) -> Option<Instant> {
 
 /// 从在途集释放一个 job（终态后），并经排空闸门唤醒等待排空的 upgrader
 /// （ADR-0017：升级排空等到在途集空）。仅在途集确含该 job 时通知，避免冗余唤醒。
-async fn release_inflight(
-    in_flight: &Arc<RwLock<Vec<String>>>,
-    job_id: &str,
-    gate: &DrainGate,
-) {
+async fn release_inflight(in_flight: &Arc<RwLock<Vec<String>>>, job_id: &str, gate: &DrainGate) {
     let mut g = in_flight.write().await;
     let was_present = g.iter().any(|j| j == job_id);
     g.retain(|j| j != job_id);
@@ -1064,7 +1063,9 @@ mod tests {
         let shell = || JobStep {
             name: "s".into(),
             seq: 0,
-            kind: Some(StepKind::Shell(ShellStep { command: String::new() })),
+            kind: Some(StepKind::Shell(ShellStep {
+                command: String::new(),
+            })),
         };
         let checkout = || JobStep {
             name: "c".into(),

@@ -189,10 +189,7 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
             "/projects/{name}/members",
             get(members::list).put(members::replace),
         )
-        .route(
-            "/projects/{name}/secrets",
-            get(secrets::list_secrets),
-        )
+        .route("/projects/{name}/secrets", get(secrets::list_secrets))
         .route(
             "/projects/{name}/secrets/{secret}",
             put(secrets::put_secret).delete(secrets::delete_secret),

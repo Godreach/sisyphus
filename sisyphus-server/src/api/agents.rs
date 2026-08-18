@@ -237,12 +237,7 @@ pub async fn create(
                 ));
             }
             Err(StoreError::Unique(_)) => {
-                if state
-                    .agents
-                    .get_by_name(name)
-                    .await?
-                    .is_some()
-                {
+                if state.agents.get_by_name(name).await?.is_some() {
                     return Err(ApiError::conflict(format!("Agent 名已存在：{name}")));
                 }
                 continue; // 哈希碰撞，换值重试
@@ -444,10 +439,7 @@ pub async fn patch(
         .ok_or_else(|| ApiError::resource_not_found(format!("Agent {name} 不存在")))?;
 
     if let Some(disabled) = req.disabled {
-        state
-            .agents
-            .set_disabled(row.id, disabled)
-            .await?;
+        state.agents.set_disabled(row.id, disabled).await?;
         // 审计（ADR-0015：token 吊销/恢复——停用即吊销踢线）——detail 记
         // 构建机名（值永不落审计）。
         state
@@ -468,8 +460,9 @@ pub async fn patch(
     if req.max_concurrency.is_some() || req.custom_labels.is_some() {
         let max_concurrency = req.max_concurrency.unwrap_or(row.max_concurrency);
         let custom_labels = match &req.custom_labels {
-            Some(labels) => serde_json::to_string(labels)
-                .expect("标签 JSON 序列化恒可成功（纯字符串）"),
+            Some(labels) => {
+                serde_json::to_string(labels).expect("标签 JSON 序列化恒可成功（纯字符串）")
+            }
             None => row.custom_labels.clone(),
         };
         state
@@ -478,11 +471,7 @@ pub async fn patch(
             .await?;
     }
 
-    let updated = state
-        .agents
-        .get(row.id)
-        .await?
-        .expect("刚更新的行必存在");
+    let updated = state.agents.get(row.id).await?.expect("刚更新的行必存在");
     Ok(Json(to_response(&state, updated).await?))
 }
 
@@ -575,10 +564,12 @@ fn agent_name_issue(name: &str) -> Option<ValidationIssue> {
 
 /// 槽位问题项：>= 1（0 槽的 Agent 永远接不到任务，建出来即废）。
 fn concurrency_issue(max_concurrency: Option<i32>) -> Option<ValidationIssue> {
-    max_concurrency.is_some_and(|v| v < 1).then(|| ValidationIssue {
-        path: "max_concurrency".into(),
-        message: "并发槽位须 >= 1".into(),
-    })
+    max_concurrency
+        .is_some_and(|v| v < 1)
+        .then(|| ValidationIssue {
+            path: "max_concurrency".into(),
+            message: "并发槽位须 >= 1".into(),
+        })
 }
 
 /// 自定义标签问题项：每个标签须为 `key=value` 形态（键与值都非空、键无
@@ -620,7 +611,11 @@ mod tests {
                 max_concurrency: None,
             })
             .unwrap_err();
-            assert_eq!(err.status_code(), StatusCode::UNPROCESSABLE_ENTITY, "{name}");
+            assert_eq!(
+                err.status_code(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{name}"
+            );
         }
 
         // 槽位 0 / 负：422。
@@ -653,20 +648,24 @@ mod tests {
     #[test]
     fn validate_patch_checks_only_present_fields() {
         // PATCH 缺省字段不参与校验（只改 disabled 不带标签/槽位也合法）。
-        assert!(validate_patch(&PatchAgentRequest {
-            disabled: Some(true),
-            max_concurrency: None,
-            custom_labels: None,
-        })
-        .is_ok());
+        assert!(
+            validate_patch(&PatchAgentRequest {
+                disabled: Some(true),
+                max_concurrency: None,
+                custom_labels: None,
+            })
+            .is_ok()
+        );
 
-        assert!(validate_patch(&PatchAgentRequest {
-            disabled: None,
-            max_concurrency: Some(0),
-            custom_labels: None,
-        })
-        .unwrap_err()
-        .status_code()
-            == StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            validate_patch(&PatchAgentRequest {
+                disabled: None,
+                max_concurrency: Some(0),
+                custom_labels: None,
+            })
+            .unwrap_err()
+            .status_code()
+                == StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 }

@@ -8,8 +8,8 @@
 //! 客户端上行流经 mpsc 通道驱动（连上后可继续发心跳/其他帧）。
 
 use sisyphus_proto::agent::{
-    agent_channel_client::AgentChannelClient, channel_message::Kind, ChannelMessage, DiskUsage,
-    Handshake, Heartbeat, Version,
+    ChannelMessage, DiskUsage, Handshake, Heartbeat, Version,
+    agent_channel_client::AgentChannelClient, channel_message::Kind,
 };
 use sisyphus_server::auth::{TokenFamily, generate_register_code, generate_token, token_hash};
 use sisyphus_server::sched::SchedulerHandle;
@@ -48,10 +48,16 @@ async fn harness() -> Harness {
     let dir = tempfile::tempdir().expect("临时数据目录");
     let pool = store::bootstrap(dir.path()).await.expect("bootstrap");
     let master_key = sisyphus_server::secrets::ensure_master_key(
-        &dir.path().join(sisyphus_server::config::MASTER_KEY_FILE_NAME),
+        &dir.path()
+            .join(sisyphus_server::config::MASTER_KEY_FILE_NAME),
     )
     .expect("测试主密钥");
-    let state = api::AppState::new(pool, false, master_key, sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES);
+    let state = api::AppState::new(
+        pool,
+        false,
+        master_key,
+        sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES,
+    );
     Harness { _dir: dir, state }
 }
 
@@ -87,9 +93,7 @@ async fn spawn_grpc(state: api::AppState) -> (std::net::SocketAddr, tokio::task:
     let handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(grpc::service(state, sessions, scheduler))
-            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(
-                listener,
-            ))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
             .expect("serve");
     });
@@ -103,7 +107,13 @@ async fn connect(
     addr: std::net::SocketAddr,
     token: Option<&str>,
     metadata: &[(&'static str, &'static str)],
-) -> Result<(tonic::Streaming<ChannelMessage>, mpsc::Sender<ChannelMessage>), tonic::Status> {
+) -> Result<
+    (
+        tonic::Streaming<ChannelMessage>,
+        mpsc::Sender<ChannelMessage>,
+    ),
+    tonic::Status,
+> {
     let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
         .expect("endpoint")
         .connect()
@@ -117,7 +127,13 @@ async fn connect_with_channel(
     channel: Channel,
     token: Option<&str>,
     metadata: &[(&'static str, &'static str)],
-) -> Result<(tonic::Streaming<ChannelMessage>, mpsc::Sender<ChannelMessage>), tonic::Status> {
+) -> Result<
+    (
+        tonic::Streaming<ChannelMessage>,
+        mpsc::Sender<ChannelMessage>,
+    ),
+    tonic::Status,
+> {
     let mut client = AgentChannelClient::new(channel);
     let (tx, rx) = mpsc::channel(16);
     tx.send(ChannelMessage {
@@ -148,7 +164,10 @@ async fn connect_with_channel(
 /// 从响应流读到握手回执（Server 确认会话建立）。
 async fn expect_handshake(stream: &mut tonic::Streaming<ChannelMessage>) {
     let msg = stream.message().await.expect("recv").expect("msg");
-    assert!(matches!(msg.kind, Some(Kind::Handshake(_))), "会话建立应先回握手");
+    assert!(
+        matches!(msg.kind, Some(Kind::Handshake(_))),
+        "会话建立应先回握手"
+    );
 }
 
 /// 等到谓词成立或超时（心跳落库是服务端异步路径，轮询驱动，避免 flaky）。
@@ -197,7 +216,9 @@ async fn rejects_connection_with_wrong_or_disabled_token() {
     // 建 Agent 拿真 token → 停用 → 同 token 拒连（停用即踢线：下一连接即拒）。
     let (token, id) = create_agent(&h.state, "linux-1").await;
     h.state.agents.set_disabled(id, true).await.expect("停用");
-    let err = connect(addr, Some(&token), &[]).await.expect_err("停用即踢线");
+    let err = connect(addr, Some(&token), &[])
+        .await
+        .expect_err("停用即踢线");
     assert_eq!(err.code(), tonic::Code::Unauthenticated, "停用 Agent 拒连");
 
     handle.abort();
@@ -232,7 +253,10 @@ async fn valid_token_establishes_session_and_marks_online() {
         row.system_labels.contains("sisyphus/arch=amd64"),
         "arch 随连接上报"
     );
-    assert!(!row.system_labels.contains("container"), "未上报的容器事实不置");
+    assert!(
+        !row.system_labels.contains("container"),
+        "未上报的容器事实不置"
+    );
 
     // 发送心跳（带磁盘占用）→ 落库可查。
     tx.send(ChannelMessage {
@@ -306,7 +330,15 @@ async fn heartbeat_sweep_marks_stale_agents_offline() {
         .mark_online(id, "[]", None, stale_at)
         .await
         .expect("置在线（过期 last_seen）");
-    assert!(h.state.agents.get(id).await.expect("查").expect("应存在").online);
+    assert!(
+        h.state
+            .agents
+            .get(id)
+            .await
+            .expect("查")
+            .expect("应存在")
+            .online
+    );
 
     grpc::heartbeat_sweep_once(&h.state).await;
 

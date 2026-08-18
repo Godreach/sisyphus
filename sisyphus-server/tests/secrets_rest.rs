@@ -93,9 +93,19 @@ async fn secrets_matrix_viewer_runner_403_and_write_path_only() {
 
     // viewer / runner：列名、建、删全部 403（档位不足，非 404——角色在）。
     for cookie in [&alice, &bob] {
-        let resp =
-            req_with_cookie(&app, "GET", "/api/v1/projects/demo/secrets", None, Some(cookie)).await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer/runner GET 403");
+        let resp = req_with_cookie(
+            &app,
+            "GET",
+            "/api/v1/projects/demo/secrets",
+            None,
+            Some(cookie),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "viewer/runner GET 403"
+        );
         assert_eq!(body_json(resp).await["code"], "FORBIDDEN");
         let resp = req_with_cookie(
             &app,
@@ -105,7 +115,11 @@ async fn secrets_matrix_viewer_runner_403_and_write_path_only() {
             Some(cookie),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer/runner PUT 403");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "viewer/runner PUT 403"
+        );
         let resp = req_with_cookie(
             &app,
             "DELETE",
@@ -114,7 +128,11 @@ async fn secrets_matrix_viewer_runner_403_and_write_path_only() {
             Some(cookie),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer/runner DELETE 403");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "viewer/runner DELETE 403"
+        );
     }
 
     // 项目 admin：建 → 列名 → 删除 → 名消失 全链路。
@@ -129,8 +147,14 @@ async fn secrets_matrix_viewer_runner_403_and_write_path_only() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT, "admin 建机密 204");
 
     // GET 仅名清单：响应只有名、永无值形态。
-    let resp =
-        req_with_cookie(&app, "GET", "/api/v1/projects/demo/secrets", None, Some(&carol)).await;
+    let resp = req_with_cookie(
+        &app,
+        "GET",
+        "/api/v1/projects/demo/secrets",
+        None,
+        Some(&carol),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK, "admin 列名 200");
     let list = body_json(resp).await;
     let names: Vec<&str> = list
@@ -156,8 +180,14 @@ async fn secrets_matrix_viewer_runner_403_and_write_path_only() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT, "覆写 204");
-    let resp =
-        req_with_cookie(&app, "GET", "/api/v1/projects/demo/secrets", None, Some(&carol)).await;
+    let resp = req_with_cookie(
+        &app,
+        "GET",
+        "/api/v1/projects/demo/secrets",
+        None,
+        Some(&carol),
+    )
+    .await;
     assert_eq!(
         body_json(resp).await.as_array().expect("清单").len(),
         1,
@@ -174,8 +204,14 @@ async fn secrets_matrix_viewer_runner_403_and_write_path_only() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT, "删除 204");
-    let resp =
-        req_with_cookie(&app, "GET", "/api/v1/projects/demo/secrets", None, Some(&carol)).await;
+    let resp = req_with_cookie(
+        &app,
+        "GET",
+        "/api/v1/projects/demo/secrets",
+        None,
+        Some(&carol),
+    )
+    .await;
     assert_eq!(
         body_json(resp).await,
         serde_json::json!([]),
@@ -206,8 +242,14 @@ async fn global_admin_manages_secrets_without_membership_row() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT, "全局 admin 建机密");
-    let resp =
-        req_with_cookie(&app, "GET", "/api/v1/projects/demo/secrets", None, Some(&admin)).await;
+    let resp = req_with_cookie(
+        &app,
+        "GET",
+        "/api/v1/projects/demo/secrets",
+        None,
+        Some(&admin),
+    )
+    .await;
     let list = body_json(resp).await;
     let names: Vec<&str> = list
         .as_array()
@@ -225,7 +267,13 @@ async fn secret_name_validation_rejects_invalid_names() {
 
     // 非法字符（URL 路径段百分号编码后仍被解码进机密名）：422；空名由
     // 路由结构天然不命中（空路径段无路由，404），空名校验规则见 charset 单测。
-    for bad in ["%20", "has-dash", "has.dot", "has%20space", "%E6%97%A5%E6%9C%AC%E8%AA%9E"] {
+    for bad in [
+        "%20",
+        "has-dash",
+        "has.dot",
+        "has%20space",
+        "%E6%97%A5%E6%9C%AC%E8%AA%9E",
+    ] {
         let resp = req_with_cookie(
             &app,
             "PUT",
@@ -242,8 +290,14 @@ async fn secret_name_validation_rejects_invalid_names() {
         assert_eq!(body_json(resp).await["code"], "VALIDATION_FAILED");
     }
     // 非法提交不落任何写入（名清单保持空）。
-    let resp =
-        req_with_cookie(&app, "GET", "/api/v1/projects/demo/secrets", None, Some(&carol)).await;
+    let resp = req_with_cookie(
+        &app,
+        "GET",
+        "/api/v1/projects/demo/secrets",
+        None,
+        Some(&carol),
+    )
+    .await;
     assert_eq!(body_json(resp).await, serde_json::json!([]));
 
     // DELETE 同走名校验（端点族规则统一）：非法名 422，先于「不存在」404。
@@ -255,7 +309,11 @@ async fn secret_name_validation_rejects_invalid_names() {
         Some(&carol),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "DELETE 非法名 422");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "DELETE 非法名 422"
+    );
 
     // 合法名（下划线、数字）：可写。
     for name in ["DEPLOY_KEY", "NPM_TOKEN_2FA", "_private"] {
@@ -315,13 +373,11 @@ async fn ciphertext_is_stored_in_blob_form_not_plaintext() {
     );
 
     // 全库扫描：明文值不得出现在任何列（库泄露读不出凭据）。
-    let hits: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM secrets WHERE ciphertext LIKE ?",
-    )
-    .bind(format!("%{plaintext}%"))
-    .fetch_all(pool)
-    .await
-    .expect("扫描");
+    let hits: Vec<String> = sqlx::query_scalar("SELECT name FROM secrets WHERE ciphertext LIKE ?")
+        .bind(format!("%{plaintext}%"))
+        .fetch_all(pool)
+        .await
+        .expect("扫描");
     assert!(hits.is_empty(), "明文不得作为子串出现：{hits:?}");
 
     // 操作人实名落库（认证用户名，票 B2b-T5 纪律）。
@@ -344,25 +400,48 @@ async fn secrets_no_role_404_ghost_404_unauth_401() {
     // 无角色：项目不可见 → 机密端点 404（与「项目不存在」同形）。
     for (method, path, body) in [
         ("GET", "/api/v1/projects/demo/secrets", None),
-        ("PUT", "/api/v1/projects/demo/secrets/X", Some(put_secret_body("v"))),
+        (
+            "PUT",
+            "/api/v1/projects/demo/secrets/X",
+            Some(put_secret_body("v")),
+        ),
         ("DELETE", "/api/v1/projects/demo/secrets/X", None),
     ] {
         let resp = req_with_cookie(&app, method, path, body, Some(&dave)).await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method} {path} 无角色 404");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "{method} {path} 无角色 404"
+        );
     }
 
     // 真不存在的项目：同为 404（与无角色不可分辨）。
-    let resp = req_with_cookie(&app, "GET", "/api/v1/projects/ghost/secrets", None, Some(&dave)).await;
+    let resp = req_with_cookie(
+        &app,
+        "GET",
+        "/api/v1/projects/ghost/secrets",
+        None,
+        Some(&dave),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     // 未认证：401（认证中间件全局面，先于授权）。
     for (method, path, body) in [
         ("GET", "/api/v1/projects/demo/secrets", None),
-        ("PUT", "/api/v1/projects/demo/secrets/X", Some(put_secret_body("v"))),
+        (
+            "PUT",
+            "/api/v1/projects/demo/secrets/X",
+            Some(put_secret_body("v")),
+        ),
         ("DELETE", "/api/v1/projects/demo/secrets/X", None),
     ] {
         let resp = common::req(&app, method, path, body).await;
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {path} 未认证 401");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {path} 未认证 401"
+        );
     }
 }
 

@@ -159,7 +159,10 @@ async fn tracer_bullet_full_b2b_chain() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED, "建 PAT");
-    let token = body_json(resp).await["token"].as_str().expect("token").to_string();
+    let token = body_json(resp).await["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
     assert!(token.starts_with("sis_"), "PAT 族前缀");
     let resp = common::custom_req(
         &app,
@@ -212,7 +215,11 @@ async fn tracer_bullet_full_b2b_chain() {
         attack_peer,
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS, "连续失败触发限流");
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "连续失败触发限流"
+    );
 
     // 8. 禁用用户即刻踢线：dave 登录拿 cookie → admin 禁用 → dave 请求 401。
     let dave = cookie_of(&login_cookie(&app, "dave").await).expect("dave cookie");
@@ -228,7 +235,11 @@ async fn tracer_bullet_full_b2b_chain() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK, "admin 禁用 dave");
     let resp = req_with_cookie(&app, "GET", "/api/v1/projects", None, Some(&dave)).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "禁用后 dave 即刻 401");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "禁用后 dave 即刻 401"
+    );
 
     // 9. 项目 admin（carol）写入机密：密文落库（版本字节 + nonce + 密文）、
     //    值永不可读（GET 面只回名）。
@@ -263,12 +274,13 @@ async fn tracer_bullet_full_b2b_chain() {
         .fetch_one(&app.pool)
         .await
         .expect("demo 行");
-    let ciphertext: Vec<u8> =
-        sqlx::query_scalar("SELECT ciphertext FROM secrets WHERE project_id = ? AND name = 'TRACER_KEY'")
-            .bind(demo_id)
-            .fetch_one(&app.pool)
-            .await
-            .expect("直查密文");
+    let ciphertext: Vec<u8> = sqlx::query_scalar(
+        "SELECT ciphertext FROM secrets WHERE project_id = ? AND name = 'TRACER_KEY'",
+    )
+    .bind(demo_id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("直查密文");
     assert_eq!(
         ciphertext[0],
         sisyphus_server::secrets::CIPHERTEXT_VERSION,
@@ -285,7 +297,10 @@ async fn tracer_bullet_full_b2b_chain() {
     assert_eq!(resp.status(), StatusCode::OK, "全局 admin 查审计");
     let rows = body_json(resp).await;
     let rows = rows.as_array().expect("审计数组");
-    let events: Vec<&str> = rows.iter().map(|r| r["event"].as_str().expect("event")).collect();
+    let events: Vec<&str> = rows
+        .iter()
+        .map(|r| r["event"].as_str().expect("event"))
+        .collect();
     for expected in [
         "user_created",    // setup 首个 admin + 直插用户（直插不落审计）……见下
         "login_success",   // admin/alice/bob/carol/dave 登录
@@ -293,8 +308,8 @@ async fn tracer_bullet_full_b2b_chain() {
         "member_roles_changed",
         "pat_created",
         "secret_created",
-        "user_disabled",  // admin 禁用 dave
-        "login_failure",  // attacker 5 败 + 1 次限流触达
+        "user_disabled", // admin 禁用 dave
+        "login_failure", // attacker 5 败 + 1 次限流触达
     ] {
         assert!(
             events.contains(&expected),
@@ -311,11 +326,7 @@ async fn tracer_bullet_full_b2b_chain() {
     let text = serde_json::to_string(&rows).expect("序列化");
     assert!(!text.contains(plaintext), "审计面不得出现机密明文");
     // 审计行数 = 上述事件笔数（appendix 不产生额外事件：定义保存不入审计）。
-    assert!(
-        rows.len() >= 8,
-        "审计至少 8 类事件轨迹：{}",
-        rows.len()
-    );
+    assert!(rows.len() >= 8, "审计至少 8 类事件轨迹：{}", rows.len());
     // AC：pipeline 保存不入审计（操作人已在业务表，避免双重记账，ADR-0015）
     // ——审计事件取值域即为契约，任何额外类型都是接线失误。
     const CONTRACT: &[&str] = &[

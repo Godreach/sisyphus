@@ -261,11 +261,7 @@ async fn member_management_takes_effect_immediately() {
             )
         })
         .collect();
-    let expected = [
-        ("alice", "viewer"),
-        ("bob", "runner"),
-        ("carol", "admin"),
-    ];
+    let expected = [("alice", "viewer"), ("bob", "runner"), ("carol", "admin")];
     let roles: Vec<(&str, &str)> = roles
         .iter()
         .map(|(u, r)| (u.as_str(), r.as_str()))

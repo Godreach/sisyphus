@@ -68,9 +68,10 @@ impl FromRequestParts<AppState> for RequireGlobalAdmin {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let axum::Extension(auth) = axum::Extension::<AuthContext>::from_request_parts(parts, state)
-            .await
-            .map_err(|_| ApiError::unauthorized())?;
+        let axum::Extension(auth) =
+            axum::Extension::<AuthContext>::from_request_parts(parts, state)
+                .await
+                .map_err(|_| ApiError::unauthorized())?;
         if !auth.is_admin {
             return Err(ApiError::forbidden("该操作仅全局管理员可用"));
         }

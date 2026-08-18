@@ -127,7 +127,7 @@ fn parse_filter(params: &AuditParams) -> Result<AuditQuery, ApiError> {
                         path: "event".into(),
                         message: format!("未知事件类型：{raw}（取值域见 OpenAPI enum）"),
                     }],
-                ))
+                ));
             }
         },
         None => None,
@@ -135,8 +135,18 @@ fn parse_filter(params: &AuditParams) -> Result<AuditQuery, ApiError> {
     Ok(AuditQuery {
         since: params.since,
         until: params.until,
-        user: params.user.as_deref().map(str::trim).filter(|u| !u.is_empty()).map(ToOwned::to_owned),
-        project: params.project.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(ToOwned::to_owned),
+        user: params
+            .user
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(ToOwned::to_owned),
+        project: params
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(ToOwned::to_owned),
         event,
     })
 }
@@ -172,7 +182,10 @@ mod tests {
 
     #[test]
     fn paging_defaults_and_bounds() {
-        assert_eq!(parse_paging(&AuditParams::default()).expect("默认"), (50, 0));
+        assert_eq!(
+            parse_paging(&AuditParams::default()).expect("默认"),
+            (50, 0)
+        );
         assert_eq!(
             parse_paging(&AuditParams {
                 limit: Some(1),
@@ -200,7 +213,11 @@ mod tests {
                 ..Default::default()
             })
             .unwrap_err();
-            assert_eq!(err.status_code(), StatusCode::UNPROCESSABLE_ENTITY, "{limit}");
+            assert_eq!(
+                err.status_code(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{limit}"
+            );
         }
         let err = parse_paging(&AuditParams {
             offset: Some(-1),

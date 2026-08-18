@@ -26,7 +26,7 @@
 
 mod spec;
 
-pub(crate) use spec::{eval_when, var_env, AssembleError, ResolvedJobSpec, ResolvedStep, Vcs};
+pub(crate) use spec::{AssembleError, ResolvedJobSpec, ResolvedStep, Vcs, eval_when, var_env};
 
 use std::collections::HashMap;
 
@@ -230,7 +230,7 @@ impl Engine {
             Err(e) => {
                 return self
                     .fail_build_defensively(&build, &format!("触发上下文损坏：{e}"))
-                    .await
+                    .await;
             }
         };
         let params = merged_params(&snapshot, &trigger);
@@ -248,7 +248,9 @@ impl Engine {
 
         if snapshot.pipeline.stages.is_empty() {
             // 无阶段 pipeline：入队即成功（与全阶段终态裁决同路径）。
-            return self.finish_build(&build, &project_name, BuildStatus::Succeeded).await;
+            return self
+                .finish_build(&build, &project_name, BuildStatus::Succeeded)
+                .await;
         }
 
         loop {
@@ -263,12 +265,14 @@ impl Engine {
             // 当前阶段 = 第一个「无行 / 含非终态任务 / 全终态但待重跑续开」
             // 的阶段（阶段按序；重跑时 build.attempt 已 +1，全终态行的最大
             // attempt 小于它即需重开失败任务）。
-            let current = snapshot.pipeline.stages.iter().enumerate().find_map(
-                |(i, _stage)| {
-                    let rows: Vec<&JobRow> = jobs
-                        .iter()
-                        .filter(|j| j.stage_index == i as i32)
-                        .collect();
+            let current = snapshot
+                .pipeline
+                .stages
+                .iter()
+                .enumerate()
+                .find_map(|(i, _stage)| {
+                    let rows: Vec<&JobRow> =
+                        jobs.iter().filter(|j| j.stage_index == i as i32).collect();
                     if rows.is_empty()
                         || rows.iter().any(|r| !r.status.is_terminal())
                         || (rows.iter().all(|r| r.status.is_terminal())
@@ -278,8 +282,7 @@ impl Engine {
                     } else {
                         None
                     }
-                },
-            );
+                });
 
             let Some(stage_index) = current else {
                 // 全部阶段已终态 → 构建终态裁决。成败只看每任务的最新 attempt
@@ -323,9 +326,7 @@ impl Engine {
                     }
                 } else {
                     for job_def in &stage.jobs {
-                        let row = self
-                            .insert_job(&build, stage_index, job_def, None)
-                            .await?;
+                        let row = self.insert_job(&build, stage_index, job_def, None).await?;
                         self.jobs
                             .transition(row.id, JobStatus::Skipped, None, None, now)
                             .await?;
@@ -346,14 +347,7 @@ impl Engine {
                     // when 重新求值——重跑仍处「构建 #N 当时」语义，之前被
                     // 跳过的阶段（when 不满足）其任务依然不发。
                     let stage_pass = stage.when.as_deref().is_none_or(|w| {
-                        let env = var_env(
-                            ctx.build,
-                            ctx.project,
-                            stage,
-                            None,
-                            ctx.scm,
-                            ctx.params,
-                        );
+                        let env = var_env(ctx.build, ctx.project, stage, None, ctx.scm, ctx.params);
                         eval_when(w, &env, "", &stage.name)
                     });
                     if !stage_pass {
@@ -385,12 +379,29 @@ impl Engine {
                         job = %job_row.name,
                         "任务行与快照定义失配"
                     );
-                    self.fail_job_and_cascade(&build, &project_name, job_row, "任务定义与快照失配", now)
-                        .await?;
+                    self.fail_job_and_cascade(
+                        &build,
+                        &project_name,
+                        job_row,
+                        "任务定义与快照失配",
+                        now,
+                    )
+                    .await?;
                     return Ok(());
                 };
-                let env = var_env(ctx.build, ctx.project, stage, Some(job_def), &scm, ctx.params);
-                if job_def.when.as_deref().is_some_and(|w| !eval_when(w, &env, &job_def.name, &stage.name)) {
+                let env = var_env(
+                    ctx.build,
+                    ctx.project,
+                    stage,
+                    Some(job_def),
+                    &scm,
+                    ctx.params,
+                );
+                if job_def
+                    .when
+                    .as_deref()
+                    .is_some_and(|w| !eval_when(w, &env, &job_def.name, &stage.name))
+                {
                     self.jobs
                         .transition(job_row.id, JobStatus::Skipped, None, None, now)
                         .await?;
@@ -406,8 +417,14 @@ impl Engine {
                             self.jobs.set_spec(job_row.id, &spec_json).await?;
                         }
                         Ok(Err(err)) => {
-                            self.fail_job_and_cascade(&build, &project_name, job_row, &err.to_string(), now)
-                                .await?;
+                            self.fail_job_and_cascade(
+                                &build,
+                                &project_name,
+                                job_row,
+                                &err.to_string(),
+                                now,
+                            )
+                            .await?;
                             return Ok(());
                         }
                         Err(e) => return Err(e),
@@ -428,10 +445,7 @@ impl Engine {
         job_def: &Job,
         now: i64,
     ) -> Result<(), StoreError> {
-        match self
-            .assemble_spec(ctx, stage_index, stage, job_def)
-            .await
-        {
+        match self.assemble_spec(ctx, stage_index, stage, job_def).await {
             Ok(Ok(spec)) => {
                 let row = self
                     .insert_job(ctx.build, stage_index, job_def, Some(spec))
@@ -445,8 +459,14 @@ impl Engine {
                     .insert_job(ctx.build, stage_index, job_def, None)
                     .await?;
                 let fresh = self.jobs.get(row.id).await?.expect("刚插入的行必存在");
-                self.fail_job_and_cascade(ctx.build, ctx.project_name, &fresh, &err.to_string(), now)
-                    .await?;
+                self.fail_job_and_cascade(
+                    ctx.build,
+                    ctx.project_name,
+                    &fresh,
+                    &err.to_string(),
+                    now,
+                )
+                .await?;
                 Ok(())
             }
             Err(e) => Err(e),
@@ -533,7 +553,11 @@ impl Engine {
     }
 
     /// 防御性失败（快照/属主/触发上下文损坏）：构建置 failed 并广播。
-    async fn fail_build_defensively(&self, build: &BuildRow, reason: &str) -> Result<(), StoreError> {
+    async fn fail_build_defensively(
+        &self,
+        build: &BuildRow,
+        reason: &str,
+    ) -> Result<(), StoreError> {
         tracing::error!(build_id = build.id, "构建数据损坏：{reason}");
         self.builds
             .transition(build.id, BuildStatus::Failed, now_ms())
@@ -556,7 +580,11 @@ impl Engine {
     }
 
     /// 广播构建当前状态（读回新鲜行）。
-    async fn finish_build_event(&self, build: &BuildRow, project_name: &str) -> Result<(), StoreError> {
+    async fn finish_build_event(
+        &self,
+        build: &BuildRow,
+        project_name: &str,
+    ) -> Result<(), StoreError> {
         let fresh = self.builds.get(build.id).await?.expect("构建必存在");
         self.publish_build_status(&fresh, project_name);
         Ok(())
@@ -595,7 +623,10 @@ impl Engine {
             }
             // cancelled/skipped 由级联/跳过路径直接落库，不经本入口；
             // queued/running/unknown 非终态，不是本入口的职责。
-            JobStatus::Queued | JobStatus::Running | JobStatus::Unknown | JobStatus::Cancelled
+            JobStatus::Queued
+            | JobStatus::Running
+            | JobStatus::Unknown
+            | JobStatus::Cancelled
             | JobStatus::Skipped => Ok(()),
         }
     }
@@ -713,7 +744,9 @@ fn latest_per_job(jobs: &[JobRow]) -> Vec<&JobRow> {
 mod tests {
     use super::*;
     use crate::store::projects::{NewProject, ScmType};
-    use sisyphus_model::pipeline::{EnvVar, ExecutionEnv, Parameter, ParameterType, ParameterValue, Shell, Step};
+    use sisyphus_model::pipeline::{
+        EnvVar, ExecutionEnv, Parameter, ParameterType, ParameterValue, Shell, Step,
+    };
 
     /// 独立临时目录 + 已迁移库 + 项目 demo（engine 缝测试形态）。
     async fn fixture() -> (tempfile::TempDir, SqlitePool, Engine) {
@@ -724,7 +757,9 @@ mod tests {
             crate::config::Overrides::default(),
         )
         .expect("目录布局");
-        let pool = crate::store::bootstrap(dir.path()).await.expect("bootstrap");
+        let pool = crate::store::bootstrap(dir.path())
+            .await
+            .expect("bootstrap");
         ProjectRepo::new(pool.clone())
             .create(NewProject {
                 name: "demo".into(),
@@ -900,19 +935,21 @@ mod tests {
     /// 任务终态注入（本票测试缝）：先把任务行迁移到目标终态（sched/grpc
     /// 上报路径的落库动作），再以终态行调 `on_job_terminal` 驱动推进。
     async fn report_job(engine: &Engine, job: &JobRow, status: JobStatus) {
-        let exit_code = if status == JobStatus::Succeeded { Some(0) } else { Some(1) };
+        let exit_code = if status == JobStatus::Succeeded {
+            Some(0)
+        } else {
+            Some(1)
+        };
         engine
             .jobs
             .transition(job.id, status, exit_code, None, 1_000)
             .await
             .expect("任务迁移");
-        let updated = engine
-            .jobs
-            .get(job.id)
+        let updated = engine.jobs.get(job.id).await.expect("查").expect("应存在");
+        engine
+            .on_job_terminal(&updated, 1_000)
             .await
-            .expect("查")
-            .expect("应存在");
-        engine.on_job_terminal(&updated, 1_000).await.expect("上报终态");
+            .expect("上报终态");
     }
 
     /// 驱动构建到终态（测试注入：把所有非终态任务按成功上报，直至构建
@@ -998,7 +1035,12 @@ mod tests {
 
         // 排队 → 运行（FIFO 放行 + 阶段 0 下发两个任务）。
         engine.drive(row.id).await.expect("推进");
-        let build = engine.builds.get(row.id).await.expect("查").expect("应存在");
+        let build = engine
+            .builds
+            .get(row.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(build.status, BuildStatus::Running);
         assert!(build.started_at.is_some());
         let jobs = engine.jobs.list_by_build(row.id).await.expect("任务清单");
@@ -1028,11 +1070,20 @@ mod tests {
         let jobs = engine.jobs.list_by_build(row.id).await.expect("任务清单");
         assert_eq!(jobs.len(), 4, "deploy 阶段任务以 Skipped 落行");
         let publish = job_by_name(&jobs, "publish");
-        assert_eq!(publish.status, JobStatus::Skipped, "阶段级 when 不满足整阶段跳过");
+        assert_eq!(
+            publish.status,
+            JobStatus::Skipped,
+            "阶段级 when 不满足整阶段跳过"
+        );
         assert!(publish.spec_json.is_none(), "跳过的任务全不发（无 spec）");
 
         // 全部终态 → 构建 succeeded。
-        let build = engine.builds.get(row.id).await.expect("查").expect("应存在");
+        let build = engine
+            .builds
+            .get(row.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(build.status, BuildStatus::Succeeded);
         assert!(build.finished_at.is_some());
     }
@@ -1068,7 +1119,12 @@ mod tests {
         // 阶段 0 在跑时某任务失败（非豁免）→ 级联：构建 failed、阶段 1/2
         // 不再下发。
         report_job(&engine, &compile, JobStatus::Failed).await;
-        let build = engine.builds.get(row.id).await.expect("查").expect("应存在");
+        let build = engine
+            .builds
+            .get(row.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(build.status, BuildStatus::Failed);
         assert!(build.finished_at.is_some());
 
@@ -1096,15 +1152,29 @@ mod tests {
         report_job(&engine, &lint, JobStatus::Failed).await;
 
         // 豁免：构建不 failed，阶段 1 继续下发。
-        let build = engine.builds.get(row.id).await.expect("查").expect("应存在");
-        assert_eq!(build.status, BuildStatus::Running, "allow_failure 不触发级联");
+        let build = engine
+            .builds
+            .get(row.id)
+            .await
+            .expect("查")
+            .expect("应存在");
+        assert_eq!(
+            build.status,
+            BuildStatus::Running,
+            "allow_failure 不触发级联"
+        );
         let jobs = engine.jobs.list_by_build(row.id).await.expect("任务清单");
         assert_eq!(job_by_name(&jobs, "unit").status, JobStatus::Queued);
 
         // 后续全部成功 → 构建 succeeded（豁免任务的失败保留）。
         let unit = job_by_name(&jobs, "unit").clone();
         report_job(&engine, &unit, JobStatus::Succeeded).await;
-        let build = engine.builds.get(row.id).await.expect("查").expect("应存在");
+        let build = engine
+            .builds
+            .get(row.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(build.status, BuildStatus::Succeeded);
         let jobs = engine.jobs.list_by_build(row.id).await.expect("任务清单");
         assert_eq!(job_by_name(&jobs, "lint").status, JobStatus::Failed);
@@ -1133,12 +1203,22 @@ mod tests {
         let retry = latest_job_by_name(&jobs, "unit");
         assert_eq!(retry.attempt, 2, "同 job 新 attempt");
         assert_eq!(retry.status, JobStatus::Queued, "重新入池");
-        let build = engine.builds.get(row.id).await.expect("查").expect("应存在");
+        let build = engine
+            .builds
+            .get(row.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(build.status, BuildStatus::Running, "重试不级联");
 
         // 重试又败 → 耗尽：级联，构建 failed。
         report_job(&engine, retry, JobStatus::Failed).await;
-        let build = engine.builds.get(row.id).await.expect("查").expect("应存在");
+        let build = engine
+            .builds
+            .get(row.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(build.status, BuildStatus::Failed, "耗尽才 failed");
         // 历史保留：attempt=1 与 attempt=2 两行都在。
         let jobs = engine.jobs.list_by_build(row.id).await.expect("任务清单");
@@ -1175,7 +1255,10 @@ mod tests {
             .map(|e| (e.name.as_str(), e.value.as_str()))
             .collect();
         assert_eq!(env["CARGO_HOME"], "${SISY_WORKSPACE}/.cargo");
-        assert_eq!(env["MODE"], "x86_64", "任务级 env 引用参数 target 替换为默认值");
+        assert_eq!(
+            env["MODE"], "x86_64",
+            "任务级 env 引用参数 target 替换为默认值"
+        );
         let spec::ResolvedStep::Shell { command, .. } = &spec.steps[0] else {
             panic!("compile 第一步应为 shell");
         };
@@ -1197,7 +1280,9 @@ mod tests {
         let unit_spec: ResolvedJobSpec =
             serde_json::from_str(unit.spec_json.as_ref().expect("spec")).expect("解析");
         assert!(
-            unit_spec.labels.contains(&"sisyphus/container=docker".to_string()),
+            unit_spec
+                .labels
+                .contains(&"sisyphus/container=docker".to_string()),
             "容器任务隐式追加容器标签"
         );
     }
@@ -1216,10 +1301,18 @@ mod tests {
         let compile = job_by_name(&jobs, "compile");
         assert_eq!(compile.status, JobStatus::Failed, "缺失机密的任务立即失败");
         let detail = compile.detail.as_deref().expect("detail 记名");
-        assert!(detail.contains("DEPLOY_KEY"), "detail 应含缺失机密名：{detail}");
+        assert!(
+            detail.contains("DEPLOY_KEY"),
+            "detail 应含缺失机密名：{detail}"
+        );
         assert!(compile.spec_json.is_none(), "失败任务不落 spec");
 
-        let build = engine.builds.get(row.id).await.expect("查").expect("应存在");
+        let build = engine
+            .builds
+            .get(row.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(build.status, BuildStatus::Failed, "级联 fail-fast");
     }
 
@@ -1242,7 +1335,11 @@ mod tests {
         let row = save_and_start(&engine_with_key, pipeline, Some("main")).await;
         engine_with_key.drive(row.id).await.expect("推进");
 
-        let jobs = engine_with_key.jobs.list_by_build(row.id).await.expect("任务清单");
+        let jobs = engine_with_key
+            .jobs
+            .list_by_build(row.id)
+            .await
+            .expect("任务清单");
         let compile = job_by_name(&jobs, "compile");
         assert_eq!(compile.status, JobStatus::Queued);
         let spec: ResolvedJobSpec =
@@ -1265,20 +1362,40 @@ mod tests {
 
         // 驱动第一条：放行（无运行中）+ 阶段下发；第二条保持 queued。
         engine.drive(first.id).await.expect("推进第一条");
-        let a = engine.builds.get(first.id).await.expect("查").expect("应存在");
+        let a = engine
+            .builds
+            .get(first.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(a.status, BuildStatus::Running);
-        let b = engine.builds.get(second.id).await.expect("查").expect("应存在");
+        let b = engine
+            .builds
+            .get(second.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(b.status, BuildStatus::Queued, "后来者排队");
 
         // 驱动第二条：已有运行中构建 → 不放行（仍 queued）。
         engine.drive(second.id).await.expect("驱动第二条");
-        let b = engine.builds.get(second.id).await.expect("查").expect("应存在");
+        let b = engine
+            .builds
+            .get(second.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(b.status, BuildStatus::Queued);
 
         // 第一条跑完 → 第二条接力（FIFO 串行队列）。
         complete_build_ok(&engine, first.id).await;
         engine.drive(second.id).await.expect("接力");
-        let b = engine.builds.get(second.id).await.expect("查").expect("应存在");
+        let b = engine
+            .builds
+            .get(second.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(b.status, BuildStatus::Running, "第一条终态后接力");
     }
 
@@ -1296,7 +1413,12 @@ mod tests {
         // compile 成功、lint 失败 → 构建 failed。
         report_job(&engine, &compile, JobStatus::Succeeded).await;
         report_job(&engine, &lint, JobStatus::Failed).await;
-        let build = engine.builds.get(row.id).await.expect("查").expect("应存在");
+        let build = engine
+            .builds
+            .get(row.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(build.status, BuildStatus::Failed);
 
         // 从失败任务重跑：同号 attempt+1、回 queued。
@@ -1322,7 +1444,12 @@ mod tests {
 
         // 重跑构建最终可成功（补充路径完整性）。
         complete_build_ok(&engine, rerun.id).await;
-        let build = engine.builds.get(row.id).await.expect("查").expect("应存在");
+        let build = engine
+            .builds
+            .get(row.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(build.status, BuildStatus::Succeeded, "重跑续跑至成功");
     }
 
@@ -1340,7 +1467,12 @@ mod tests {
         // compile 成功、lint 失败 → 构建 failed（阶段 2 deploy 从未下发）。
         report_job(&engine, &compile, JobStatus::Succeeded).await;
         report_job(&engine, &lint, JobStatus::Failed).await;
-        let build = engine.builds.get(row.id).await.expect("查").expect("应存在");
+        let build = engine
+            .builds
+            .get(row.id)
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(build.status, BuildStatus::Failed);
 
         // 从失败任务重跑：同号 attempt+1。
@@ -1362,19 +1494,39 @@ mod tests {
         );
 
         // lint 重跑成功 → 阶段 1 unit 下发。
-        report_job(&engine, latest_job_by_name(&jobs, "lint"), JobStatus::Succeeded).await;
+        report_job(
+            &engine,
+            latest_job_by_name(&jobs, "lint"),
+            JobStatus::Succeeded,
+        )
+        .await;
         let jobs = engine.jobs.list_by_build(row.id).await.expect("任务清单");
         assert_eq!(latest_job_by_name(&jobs, "unit").status, JobStatus::Queued);
 
         // 重跑跑通阶段 0/1 后：阶段 2 deploy 的 when 仍不满足（main 分支）
         // → 整阶段保持跳过，其任务全不发（无 queued 行）。
-        report_job(&engine, latest_job_by_name(&jobs, "unit"), JobStatus::Succeeded).await;
+        report_job(
+            &engine,
+            latest_job_by_name(&jobs, "unit"),
+            JobStatus::Succeeded,
+        )
+        .await;
         let jobs = engine.jobs.list_by_build(row.id).await.expect("任务清单");
         let publish = latest_job_by_name(&jobs, "publish");
-        assert_eq!(publish.status, JobStatus::Skipped, "重跑后 when 不满足的阶段仍跳过");
+        assert_eq!(
+            publish.status,
+            JobStatus::Skipped,
+            "重跑后 when 不满足的阶段仍跳过"
+        );
         assert!(publish.spec_json.is_none(), "跳过的任务全不发");
         assert_eq!(
-            engine.builds.get(row.id).await.expect("查").expect("应存在").status,
+            engine
+                .builds
+                .get(row.id)
+                .await
+                .expect("查")
+                .expect("应存在")
+                .status,
             BuildStatus::Succeeded,
             "重跑续跑至成功"
         );
@@ -1410,7 +1562,11 @@ mod tests {
         assert_eq!(row.number, 1);
         let detail: TriggerDetail =
             serde_json::from_str(&row.trigger_detail).expect("触发上下文可解析");
-        assert_eq!(detail.commit.as_deref(), Some("deadbeef"), "poll 上下文含轮询提交");
+        assert_eq!(
+            detail.commit.as_deref(),
+            Some("deadbeef"),
+            "poll 上下文含轮询提交"
+        );
 
         // 驱动后组装出的 spec 钉到轮询提交（SCM 上下文）。
         engine.drive(row.id).await.expect("推进");

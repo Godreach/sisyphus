@@ -39,7 +39,6 @@ const MAX_CRON_CATCHUP: usize = 10_000;
 /// 叠加忙轮（30s 扫表成本可忽略，triggers 表小）。
 pub const TRIGGER_LOOP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
-
 /// spec 解析/校验错误（REST 422 映射；trigger 引擎内部按「坏 spec 跳过」处理）。
 #[derive(Debug)]
 pub enum SpecError {
@@ -83,7 +82,8 @@ pub struct PollSpec {
 impl CronSpec {
     /// 从 `triggers.spec` JSON 文本解析 + 校验（5 字段 + `cron` crate 可解析）。
     pub fn parse(spec: &str) -> Result<Self, SpecError> {
-        let parsed: Self = serde_json::from_str(spec).map_err(|e| SpecError::Json(e.to_string()))?;
+        let parsed: Self =
+            serde_json::from_str(spec).map_err(|e| SpecError::Json(e.to_string()))?;
         parsed.validate()?;
         Ok(parsed)
     }
@@ -104,7 +104,8 @@ impl CronSpec {
 impl PollSpec {
     /// 从 `triggers.spec` JSON 文本解析 + 校验（节奏 >= 1 分钟）。
     pub fn parse(spec: &str) -> Result<Self, SpecError> {
-        let parsed: Self = serde_json::from_str(spec).map_err(|e| SpecError::Json(e.to_string()))?;
+        let parsed: Self =
+            serde_json::from_str(spec).map_err(|e| SpecError::Json(e.to_string()))?;
         parsed.validate()?;
         Ok(parsed)
     }
@@ -303,9 +304,7 @@ impl TriggerEngine {
         match self.probe.probe_head(&project).await {
             Err(e) => {
                 // 探测失败：记历史、按节奏重试、不自动禁用（ADR-0016）。
-                self.triggers
-                    .record_probe(t.id, now, Some(&e))
-                    .await?;
+                self.triggers.record_probe(t.id, now, Some(&e)).await?;
                 report.probe_errors += 1;
                 tracing::warn!(trigger_id = t.id, error = %e, "poll 探测失败（记历史，按节奏重试）");
                 Ok(())
@@ -319,9 +318,7 @@ impl TriggerEngine {
             Ok(Some(head)) => match &t.baseline_commit {
                 None => {
                     // 首探/启用后首探：记基线，不触发（ADR-0016）。
-                    self.triggers
-                        .record_baseline(t.id, &head, now)
-                        .await?;
+                    self.triggers.record_baseline(t.id, &head, now).await?;
                     report.poll_baseline += 1;
                     Ok(())
                 }
@@ -354,9 +351,7 @@ impl TriggerEngine {
                         .await
                     {
                         Ok(_) => {
-                            self.triggers
-                                .record_baseline(t.id, &head, now)
-                                .await?;
+                            self.triggers.record_baseline(t.id, &head, now).await?;
                             report.poll_fired += 1;
                             Ok(())
                         }
@@ -412,7 +407,9 @@ mod tests {
             crate::config::Overrides::default(),
         )
         .expect("目录布局");
-        let pool = crate::store::bootstrap(dir.path()).await.expect("bootstrap");
+        let pool = crate::store::bootstrap(dir.path())
+            .await
+            .expect("bootstrap");
         let engine = Engine::new(pool.clone(), MasterKey::generate(), EventBus::new());
         let trigger = TriggerEngine::new(
             engine,
@@ -618,15 +615,13 @@ mod tests {
             crate::config::Overrides::default(),
         )
         .expect("目录布局");
-        let pool = crate::store::bootstrap(dir.path()).await.expect("bootstrap");
+        let pool = crate::store::bootstrap(dir.path())
+            .await
+            .expect("bootstrap");
         save_project_and_pipeline(&pool, scm, branch).await;
         let engine = Engine::new(pool.clone(), MasterKey::generate(), EventBus::new());
         let probe = Arc::new(FakeProbe::new());
-        let trigger = TriggerEngine::new(
-            engine,
-            pool.clone(),
-            probe.clone() as Arc<dyn ScmProbe>,
-        );
+        let trigger = TriggerEngine::new(engine, pool.clone(), probe.clone() as Arc<dyn ScmProbe>);
         let poll = TriggerRepo::new(pool.clone())
             .create(TriggerInput {
                 project_id: 1,
@@ -638,17 +633,13 @@ mod tests {
             .await
             .expect("建 poll");
         // TempDir 随测试存活：存进静态丢弃槽防过早清理。
-        LEAK_DIR
-            .lock()
-            .expect("leak slot")
-            .push(dir);
+        LEAK_DIR.lock().expect("leak slot").push(dir);
         (pool, trigger, poll, probe)
     }
 
     // TempDir 必须活到测试结束才清理；poll_fixture 把目录存进此静态槽
     // （poll 用例不绑定局部 _dir——用例只需 pool/probe）。
-    static LEAK_DIR: std::sync::Mutex<Vec<tempfile::TempDir>> =
-        std::sync::Mutex::new(Vec::new());
+    static LEAK_DIR: std::sync::Mutex<Vec<tempfile::TempDir>> = std::sync::Mutex::new(Vec::new());
 
     /// AC：创建/启用时记基线不触发、只对之后的新提交触发、commit-id 去重。
     #[tokio::test]
@@ -665,7 +656,12 @@ mod tests {
         assert_eq!(r.poll_fired, 0, "首探记基线不触发");
         assert!(builds(&pool).await.is_empty());
         assert_eq!(
-            repo.get(poll.id).await.unwrap().unwrap().baseline_commit.as_deref(),
+            repo.get(poll.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .baseline_commit
+                .as_deref(),
             Some("abc")
         );
 
@@ -681,7 +677,12 @@ mod tests {
         assert_eq!(r.poll_fired, 1, "新提交触发一次");
         assert_eq!(builds(&pool).await, vec![1]);
         assert_eq!(
-            repo.get(poll.id).await.unwrap().unwrap().baseline_commit.as_deref(),
+            repo.get(poll.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .baseline_commit
+                .as_deref(),
             Some("def"),
             "基线更新到新提交"
         );
@@ -695,7 +696,11 @@ mod tests {
         assert_eq!(build.trigger, TriggerSource::Poll);
         let detail: TriggerDetail = serde_json::from_str(&build.trigger_detail).expect("解析");
         assert_eq!(detail.by, "poll");
-        assert_eq!(detail.commit.as_deref(), Some("def"), "poll 上下文钉轮询提交");
+        assert_eq!(
+            detail.commit.as_deref(),
+            Some("def"),
+            "poll 上下文钉轮询提交"
+        );
     }
 
     /// AC：poll 按项目节奏轮询——未到期不探测。
@@ -738,9 +743,16 @@ mod tests {
         assert_eq!(r.probe_errors, 1);
         assert!(builds(&pool).await.is_empty(), "失败不触发");
         let row = repo.get(poll.id).await.unwrap().unwrap();
-        assert_eq!(row.last_probe_error.as_deref(), Some("git ls-remote failed"));
+        assert_eq!(
+            row.last_probe_error.as_deref(),
+            Some("git ls-remote failed")
+        );
         assert!(row.enabled, "探测失败不自动禁用");
-        assert_eq!(row.baseline_commit.as_deref(), Some("abc"), "基线不变 → 下次重试");
+        assert_eq!(
+            row.baseline_commit.as_deref(),
+            Some("abc"),
+            "基线不变 → 下次重试"
+        );
 
         // 再探成功（同提交 abc，无新提交，再一个节奏后）→ 去重、错误清空。
         probe.push_head(Some("abc"));
@@ -782,7 +794,12 @@ mod tests {
         assert_eq!(r.poll_fired, 0);
         assert!(builds(&pool).await.is_empty());
         assert_eq!(
-            repo.get(poll.id).await.unwrap().unwrap().baseline_commit.as_deref(),
+            repo.get(poll.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .baseline_commit
+                .as_deref(),
             Some("def")
         );
     }
@@ -849,11 +866,23 @@ mod tests {
         assert!(CronSpec::parse(r#"{"expr":"0 2 * * *"}"#).is_ok());
         assert!(CronSpec::parse(r#"{"expr":"*/5 * * * *"}"#).is_ok());
         // 非 5 字段。
-        assert!(CronSpec::parse(r#"{"expr":"0 2 * *"}"#).is_err(), "4 字段拒绝");
-        assert!(CronSpec::parse(r#"{"expr":"0 0 2 * * *"}"#).is_err(), "6 字段拒绝");
+        assert!(
+            CronSpec::parse(r#"{"expr":"0 2 * *"}"#).is_err(),
+            "4 字段拒绝"
+        );
+        assert!(
+            CronSpec::parse(r#"{"expr":"0 0 2 * * *"}"#).is_err(),
+            "6 字段拒绝"
+        );
         // 坏语法。
-        assert!(CronSpec::parse(r#"{"expr":"99 2 * * *"}"#).is_err(), "坏分钟拒绝");
-        assert!(CronSpec::parse(r#"{"expr":"0 2 * * foo"}"#).is_err(), "坏字段拒绝");
+        assert!(
+            CronSpec::parse(r#"{"expr":"99 2 * * *"}"#).is_err(),
+            "坏分钟拒绝"
+        );
+        assert!(
+            CronSpec::parse(r#"{"expr":"0 2 * * foo"}"#).is_err(),
+            "坏字段拒绝"
+        );
         // 坏 JSON。
         assert!(CronSpec::parse("not json").is_err());
     }
@@ -862,20 +891,30 @@ mod tests {
     fn poll_spec_parse_validates_interval_at_least_one_minute() {
         assert!(PollSpec::parse(r#"{"interval_minutes":5}"#).is_ok());
         assert!(PollSpec::parse(r#"{"interval_minutes":1}"#).is_ok());
-        assert!(PollSpec::parse(r#"{"interval_minutes":0}"#).is_err(), "0 拒绝");
-        assert!(PollSpec::parse(r#"{"interval_minutes":-1}"#).is_err(), "负值拒绝");
+        assert!(
+            PollSpec::parse(r#"{"interval_minutes":0}"#).is_err(),
+            "0 拒绝"
+        );
+        assert!(
+            PollSpec::parse(r#"{"interval_minutes":-1}"#).is_err(),
+            "负值拒绝"
+        );
         assert!(PollSpec::parse("not json").is_err());
     }
 
     #[test]
     fn cron_to_json_round_trips_through_parse() {
-        let spec = CronSpec { expr: "0 2 * * *".into() };
+        let spec = CronSpec {
+            expr: "0 2 * * *".into(),
+        };
         assert_eq!(CronSpec::parse(&spec.to_json()).unwrap(), spec);
     }
 
     #[test]
     fn poll_to_json_round_trips_through_parse() {
-        let spec = PollSpec { interval_minutes: 7 };
+        let spec = PollSpec {
+            interval_minutes: 7,
+        };
         assert_eq!(PollSpec::parse(&spec.to_json()).unwrap(), spec);
     }
 }

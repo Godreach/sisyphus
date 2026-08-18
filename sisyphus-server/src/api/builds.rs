@@ -28,8 +28,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use sisyphus_model::validate::BuildSnapshot;
-use utoipa::{IntoParams, ToSchema};
 use utoipa::openapi::schema::{ObjectBuilder, Type};
+use utoipa::{IntoParams, ToSchema};
 
 use super::AppState;
 use super::error::{ApiError, ErrorBody, ValidationIssue, parse_body};
@@ -766,7 +766,14 @@ mod tests {
 
     #[test]
     fn parse_status_filter_accepts_contract_values_and_rejects_unknown() {
-        for raw in ["queued", "running", "succeeded", "failed", "cancelled", "timeout"] {
+        for raw in [
+            "queued",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "timeout",
+        ] {
             let q = ListBuildsQuery {
                 status: Some(raw.into()),
                 ..Default::default()
@@ -779,7 +786,11 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(err.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(parse_status_filter(&ListBuildsQuery::default()).expect("空").is_none());
+        assert!(
+            parse_status_filter(&ListBuildsQuery::default())
+                .expect("空")
+                .is_none()
+        );
     }
 
     #[test]

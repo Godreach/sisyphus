@@ -217,12 +217,7 @@ fn build_id_of(body: &serde_json::Value) -> i64 {
 }
 
 /// 触发并返回 (build_id, number)。
-async fn trigger_build(
-    app: &TestApp,
-    cookie: &str,
-    pipeline: &str,
-    body: &str,
-) -> (i64, i64) {
+async fn trigger_build(app: &TestApp, cookie: &str, pipeline: &str, body: &str) -> (i64, i64) {
     let resp = trigger(app, cookie, pipeline, body).await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED, "触发应 202");
     let body = body_json(resp).await;
@@ -261,8 +256,7 @@ async fn trigger_runner_viewer_norole_and_param_override() {
         .await
         .expect("查")
         .expect("应存在");
-    let trig: TriggerDetail =
-        serde_json::from_str(&row.trigger_detail).expect("触发上下文可解析");
+    let trig: TriggerDetail = serde_json::from_str(&row.trigger_detail).expect("触发上下文可解析");
     assert_eq!(trig.by, "bob", "触发人为认证用户实名");
     assert_eq!(trig.branch.as_deref(), Some("dev"), "分支指定生效");
     assert_eq!(trig.commit.as_deref(), Some("deadbeef"), "commit 指定生效");
@@ -306,7 +300,11 @@ async fn trigger_runner_viewer_norole_and_param_override() {
 
     // bad body → 422。
     let resp = trigger(&app, &bob, "build", "{not json}").await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "bad body 422");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "bad body 422"
+    );
 }
 
 // ===========================================================================
@@ -375,14 +373,17 @@ async fn rerun_two_modes_and_matrix() {
         .await
         .expect("查")
         .expect("应存在");
-    let trig: TriggerDetail =
-        serde_json::from_str(&row.trigger_detail).expect("触发上下文");
+    let trig: TriggerDetail = serde_json::from_str(&row.trigger_detail).expect("触发上下文");
     assert_eq!(trig.by, "carol", "from_scratch 的 by 为重跑人");
     assert_eq!(trig.branch.as_deref(), Some("main"), "复制原触发上下文");
 
     // from_failed 要求终态：build #1 仍 queued → 409。
     let resp = rerun(&app, &bob, "build", 1, r#"{ "mode": "from_failed" }"#).await;
-    assert_eq!(resp.status(), StatusCode::CONFLICT, "queued 不可 from_failed 409");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "queued 不可 from_failed 409"
+    );
     assert_eq!(body_json(resp).await["code"], "CONFLICT");
 
     // from_failed：独立 sec 管线（引用缺失机密）触发 #1 → drive 组装缺机密
@@ -409,7 +410,11 @@ async fn rerun_two_modes_and_matrix() {
         .await
         .expect("查")
         .expect("应存在");
-    assert_eq!(row.status, BuildStatus::Failed, "重跑续跑至失败（机密仍缺）");
+    assert_eq!(
+        row.status,
+        BuildStatus::Failed,
+        "重跑续跑至失败（机密仍缺）"
+    );
     assert_eq!(row.attempt, 2);
 
     // viewer / 无角色：403 / 404（from_scratch 不依赖原构建状态）。
@@ -422,7 +427,11 @@ async fn rerun_two_modes_and_matrix() {
     let resp = rerun(&app, &bob, "sec", 999, r#"{ "mode": "from_scratch" }"#).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let resp = rerun(&app, &bob, "sec", 1, "{}").await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "缺 mode 422");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "缺 mode 422"
+    );
 }
 
 // ===========================================================================
@@ -518,9 +527,17 @@ async fn list_descends_paginates_filters_and_matrix() {
 
     // 非法分页/状态 → 422。
     let resp = list_builds(&app, &bob, "build", "?limit=0").await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "limit=0 422");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "limit=0 422"
+    );
     let resp = list_builds(&app, &bob, "build", "?status=bogus").await;
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "bad status 422");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "bad status 422"
+    );
 }
 
 // ===========================================================================

@@ -84,23 +84,23 @@ impl SecretRepo {
 
     /// 项目机密名清单（按名排序输出稳定；只含名，值永不出库面）。
     pub async fn list_names(&self, project_id: i64) -> Result<Vec<String>, StoreError> {
-        let names = sqlx::query_scalar("SELECT name FROM secrets WHERE project_id = ? ORDER BY name")
-            .bind(project_id)
-            .fetch_all(&self.pool)
-            .await?;
+        let names =
+            sqlx::query_scalar("SELECT name FROM secrets WHERE project_id = ? ORDER BY name")
+                .bind(project_id)
+                .fetch_all(&self.pool)
+                .await?;
         Ok(names)
     }
 
     /// 机密名是否存在（票 B2b-T7：建/覆写前区分审计事件类型——同名已存
     /// 即覆写）。只查存在性，不读值（值只写不读纪律不破）。
     pub async fn exists(&self, project_id: i64, name: &str) -> Result<bool, StoreError> {
-        let hit: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM secrets WHERE project_id = ? AND name = ? LIMIT 1",
-        )
-        .bind(project_id)
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await?;
+        let hit: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM secrets WHERE project_id = ? AND name = ? LIMIT 1")
+                .bind(project_id)
+                .bind(name)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(hit.is_some())
     }
 
@@ -142,12 +142,11 @@ impl SecretRepo {
     /// 删除机密（名消失，AC：DELETE 后名不在清单）。以项目 + 名双条件
     /// 命中才删；不存在返回 `false`（调用侧 404，不暴露存在性）。
     pub async fn delete(&self, project_id: i64, name: &str) -> Result<bool, StoreError> {
-        let result =
-            sqlx::query("DELETE FROM secrets WHERE project_id = ? AND name = ?")
-                .bind(project_id)
-                .bind(name)
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query("DELETE FROM secrets WHERE project_id = ? AND name = ?")
+            .bind(project_id)
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 }
@@ -215,8 +214,16 @@ mod tests {
                 .await
                 .expect("直查密文");
         assert_eq!(stored, blob, "落库形态即加密域产出");
-        assert_eq!(stored[0], crate::secrets::CIPHERTEXT_VERSION, "首字节为版本字节");
-        assert_ne!(&stored[1 + crate::secrets::NONCE_LEN..], &plaintext[..], "密文段与明文不等");
+        assert_eq!(
+            stored[0],
+            crate::secrets::CIPHERTEXT_VERSION,
+            "首字节为版本字节"
+        );
+        assert_ne!(
+            &stored[1 + crate::secrets::NONCE_LEN..],
+            &plaintext[..],
+            "密文段与明文不等"
+        );
         assert_eq!(
             decrypt(&key, &stored).expect("解密"),
             plaintext,
@@ -257,9 +264,15 @@ mod tests {
         assert_eq!(stored, second);
 
         // 多机密：列名清单只含名、按名排序、只属于本项目。
-        repo.upsert(project_id, "SMTP_PASS", &encrypt(&key, b"smtp").expect("加密"), "alice", 3_000)
-            .await
-            .expect("第二条");
+        repo.upsert(
+            project_id,
+            "SMTP_PASS",
+            &encrypt(&key, b"smtp").expect("加密"),
+            "alice",
+            3_000,
+        )
+        .await
+        .expect("第二条");
         let names = repo.list_names(project_id).await.expect("清单");
         assert_eq!(names, vec!["SMTP_PASS", "TOKEN"], "仅名、按名排序");
     }
@@ -300,8 +313,14 @@ mod tests {
         .expect("other 建");
 
         // 同名机密跨项目独立（(project, name) 唯一是复合键）。
-        assert_eq!(repo.list_names(project_id).await.expect("demo 清单"), vec!["SHARED_NAME"]);
-        assert_eq!(repo.list_names(other.id).await.expect("other 清单"), vec!["SHARED_NAME"]);
+        assert_eq!(
+            repo.list_names(project_id).await.expect("demo 清单"),
+            vec!["SHARED_NAME"]
+        );
+        assert_eq!(
+            repo.list_names(other.id).await.expect("other 清单"),
+            vec!["SHARED_NAME"]
+        );
     }
 
     /// 票 #46：engine 下发路径的批量密文读——命中子集返回、缺名不在结果、
@@ -345,11 +364,12 @@ mod tests {
         );
 
         // 空名清单：空结果。
-        assert!(repo
-            .ciphertexts(project_id, &[])
-            .await
-            .expect("空清单")
-            .is_empty());
+        assert!(
+            repo.ciphertexts(project_id, &[])
+                .await
+                .expect("空清单")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -357,15 +377,29 @@ mod tests {
         let (_dir, pool, project_id) = fixture().await;
         let repo = SecretRepo::new(pool.clone());
         let key = test_key();
-        repo.upsert(project_id, "DOOMED", &encrypt(&key, b"x").expect("加密"), "alice", 0)
-            .await
-            .expect("建");
+        repo.upsert(
+            project_id,
+            "DOOMED",
+            &encrypt(&key, b"x").expect("加密"),
+            "alice",
+            0,
+        )
+        .await
+        .expect("建");
 
         // 他人项目删同名：不命中（项目隔离）。
-        assert!(!repo.delete(project_id + 999, "DOOMED").await.expect("异项目删"));
+        assert!(
+            !repo
+                .delete(project_id + 999, "DOOMED")
+                .await
+                .expect("异项目删")
+        );
         // 属主删：名消失。
         assert!(repo.delete(project_id, "DOOMED").await.expect("属主删"));
-        assert!(repo.list_names(project_id).await.expect("清单").is_empty(), "DELETE 后名消失");
+        assert!(
+            repo.list_names(project_id).await.expect("清单").is_empty(),
+            "DELETE 后名消失"
+        );
         // 再删同项目同名校：false（不暴露存在性）。
         assert!(!repo.delete(project_id, "DOOMED").await.expect("重复删"));
     }

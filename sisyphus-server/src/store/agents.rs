@@ -85,10 +85,10 @@ pub struct AgentRow {
 impl AgentRow {
     /// 全部标签取并集（系统 + 自定义；匹配语义的输入集合）。
     pub fn all_labels(&self) -> Result<Vec<String>, StoreError> {
-        let mut labels: Vec<String> = serde_json::from_str(&self.system_labels)
-            .map_err(StoreError::DefinitionJson)?;
-        let custom: Vec<String> = serde_json::from_str(&self.custom_labels)
-            .map_err(StoreError::DefinitionJson)?;
+        let mut labels: Vec<String> =
+            serde_json::from_str(&self.system_labels).map_err(StoreError::DefinitionJson)?;
+        let custom: Vec<String> =
+            serde_json::from_str(&self.custom_labels).map_err(StoreError::DefinitionJson)?;
         labels.extend(custom);
         Ok(labels)
     }
@@ -161,7 +161,10 @@ impl AgentRepo {
         let result = match result {
             Ok(result) => result,
             Err(e) if is_unique_violation(&e) => {
-                return Err(StoreError::Unique(format!("Agent 名已存在：{}", input.name)));
+                return Err(StoreError::Unique(format!(
+                    "Agent 名已存在：{}",
+                    input.name
+                )));
             }
             Err(e) => return Err(e.into()),
         };
@@ -271,7 +274,10 @@ impl AgentRepo {
 
     /// 认证面：按 token 哈希取未停用 Agent（停用即踢线：认证失败）。
     /// 不存在或已停用返回 `None`（与「行不存在」不可区分，一律拒连）。
-    pub async fn find_active_by_hash(&self, token_hash: &str) -> Result<Option<AgentRow>, StoreError> {
+    pub async fn find_active_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<AgentRow>, StoreError> {
         let row = sqlx::query_as::<_, AgentTuple>(
             "SELECT id, name, token_hash, system_labels, custom_labels, max_concurrency,
                     online, disabled, last_seen_at, disk_usage, register_code_hash,
@@ -288,7 +294,10 @@ impl AgentRepo {
     /// 一次性/有效期/停用裁决所需的全部字段，由调用侧（REST 面）裁决并
     /// 调 [`Self::redeem_register_code`] 原子置已用。不存在返回 `None`
     /// （无效注册码）。
-    pub async fn find_by_register_code(&self, code_hash: &str) -> Result<Option<AgentRow>, StoreError> {
+    pub async fn find_by_register_code(
+        &self,
+        code_hash: &str,
+    ) -> Result<Option<AgentRow>, StoreError> {
         let row = sqlx::query_as::<_, AgentTuple>(
             "SELECT id, name, token_hash, system_labels, custom_labels, max_concurrency,
                     online, disabled, last_seen_at, disk_usage, register_code_hash,
@@ -406,7 +415,9 @@ impl AgentRepo {
     /// 标签 AND 全集匹配：job 要求全部命中即在线候选（ADR-0008 纯 AND
     /// 语义——容器任务调用侧已追加隐式容器标签；本方法不追加）。
     pub fn matches_tags(agent_labels: &[String], required: &[String]) -> bool {
-        required.iter().all(|tag| agent_labels.iter().any(|a| a == tag))
+        required
+            .iter()
+            .all(|tag| agent_labels.iter().any(|a| a == tag))
     }
 
     /// 为一项 job 的标签要求匹配 Agent（在线 + 未停用 + 有空槽 + 标签 AND
@@ -511,9 +522,9 @@ mod tests {
     use crate::store::builds::{BuildRepo, StartBuild, TriggerSource};
     use crate::store::jobs::{JobRepo, NewJob};
     use crate::store::projects::{NewProject, ProjectRepo, ScmType};
+    use sisyphus_model::pipeline::Revision;
     use sisyphus_model::pipeline::{Job, Pipeline, Shell, Stage, Step};
     use sisyphus_model::validate::BuildSnapshot;
-    use sisyphus_model::pipeline::Revision;
 
     /// 独立临时目录 + 已迁移库 + 预置项目（store 缝测试形态）。
     async fn fixture() -> (tempfile::TempDir, SqlitePool) {
@@ -548,7 +559,11 @@ mod tests {
         let repo = AgentRepo::new(pool.clone());
 
         let a = repo
-            .create(new_agent("linux-1", r#"["sisyphus/os=linux","sisyphus/arch=amd64"]"#, r#"["region=cn"]"#))
+            .create(new_agent(
+                "linux-1",
+                r#"["sisyphus/os=linux","sisyphus/arch=amd64"]"#,
+                r#"["region=cn"]"#,
+            ))
             .await
             .expect("建条目");
         assert!(a.id > 0);
@@ -566,13 +581,21 @@ mod tests {
 
         // 按名/按 id 读回等价。
         let by_id = repo.get(a.id).await.expect("查").expect("应存在");
-        let by_name = repo.get_by_name("linux-1").await.expect("查").expect("应存在");
+        let by_name = repo
+            .get_by_name("linux-1")
+            .await
+            .expect("查")
+            .expect("应存在");
         assert_eq!(by_id, by_name);
-        assert_eq!(by_name.all_labels().expect("标签"), vec![
-            "sisyphus/os=linux".to_string(),
-            "sisyphus/arch=amd64".to_string(),
-            "region=cn".to_string(),
-        ], "系统 + 自定义取并集");
+        assert_eq!(
+            by_name.all_labels().expect("标签"),
+            vec![
+                "sisyphus/os=linux".to_string(),
+                "sisyphus/arch=amd64".to_string(),
+                "region=cn".to_string(),
+            ],
+            "系统 + 自定义取并集"
+        );
 
         let list = repo.list().await.expect("清单");
         assert_eq!(list.len(), 1);
@@ -598,11 +621,12 @@ mod tests {
         );
 
         // 无效码：None。
-        assert!(repo
-            .find_by_register_code("code-hash-unknown")
-            .await
-            .expect("查")
-            .is_none());
+        assert!(
+            repo.find_by_register_code("code-hash-unknown")
+                .await
+                .expect("查")
+                .is_none()
+        );
 
         // 未兑可换：查行 → 原子兑码 → token 换新、置已用。
         let row = repo
@@ -611,19 +635,22 @@ mod tests {
             .expect("查")
             .expect("应存在");
         assert_eq!(row.id, agent.id);
-        assert!(repo
-            .redeem_register_code(row.id, "sisa-hash-new", 1_700_000_000_000)
-            .await
-            .expect("兑码"));
+        assert!(
+            repo.redeem_register_code(row.id, "sisa-hash-new", 1_700_000_000_000)
+                .await
+                .expect("兑码")
+        );
         let after = repo.get(agent.id).await.expect("查").expect("应存在");
         assert!(after.register_code_used, "兑码后置已用");
         assert_eq!(after.token_hash, "sisa-hash-new", "token 换新");
 
         // 重兑：false（一次性防重放——并发双换的败者也走这条路）。
-        assert!(!repo
-            .redeem_register_code(agent.id, "sisa-hash-another", 1_700_000_000_000)
-            .await
-            .expect("重兑应 false"));
+        assert!(
+            !repo
+                .redeem_register_code(agent.id, "sisa-hash-another", 1_700_000_000_000)
+                .await
+                .expect("重兑应 false")
+        );
 
         // 过期码：false（原子闸含「未过期」条件——读后写前的 TOCTOU 关闭）。
         let expired = repo
@@ -635,10 +662,12 @@ mod tests {
             .execute(&pool)
             .await
             .expect("拨过期");
-        assert!(!repo
-            .redeem_register_code(expired.id, "sisa-hash-expired", 1_000)
-            .await
-            .expect("过期应 false"));
+        assert!(
+            !repo
+                .redeem_register_code(expired.id, "sisa-hash-expired", 1_000)
+                .await
+                .expect("过期应 false")
+        );
 
         // 停用：false（原子闸含「未停用」条件）。
         let disabled = repo
@@ -646,22 +675,27 @@ mod tests {
             .await
             .expect("建 linux-3");
         repo.set_disabled(disabled.id, true).await.expect("停用");
-        assert!(!repo
-            .redeem_register_code(disabled.id, "sisa-hash-disabled", 1_000)
-            .await
-            .expect("停用应 false"));
+        assert!(
+            !repo
+                .redeem_register_code(disabled.id, "sisa-hash-disabled", 1_000)
+                .await
+                .expect("停用应 false")
+        );
 
         // 兑码后 token 认证面以新哈希命中、旧哈希失效。
-        assert!(repo
-            .find_active_by_hash("sisa-hash-new")
-            .await
-            .expect("认证")
-            .is_some());
-        assert!(repo
-            .find_active_by_hash("sisa-hash-linux-1")
-            .await
-            .expect("认证")
-            .is_none(), "兑码即吊销旧 token（换新）");
+        assert!(
+            repo.find_active_by_hash("sisa-hash-new")
+                .await
+                .expect("认证")
+                .is_some()
+        );
+        assert!(
+            repo.find_active_by_hash("sisa-hash-linux-1")
+                .await
+                .expect("认证")
+                .is_none(),
+            "兑码即吊销旧 token（换新）"
+        );
     }
 
     #[tokio::test]
@@ -674,15 +708,16 @@ mod tests {
             .expect("建");
 
         // 上线：刷 last_seen、置 online、系统标签与建议并发更新。
-        assert!(repo
-            .mark_online(
+        assert!(
+            repo.mark_online(
                 agent.id,
                 r#"["sisyphus/os=linux","sisyphus/container=docker"]"#,
                 Some(4),
                 1_000,
             )
             .await
-            .expect("上线"));
+            .expect("上线")
+        );
         let up = repo.get(agent.id).await.expect("查").expect("应存在");
         assert!(up.online);
         assert_eq!(up.last_seen_at, Some(1_000));
@@ -690,12 +725,17 @@ mod tests {
         assert!(up.system_labels.contains("sisyphus/container=docker"));
 
         // 心跳再刷新（建议并发 None 不动现有值）。
-        assert!(repo
-            .mark_online(agent.id, up.system_labels.as_str(), None, 2_000)
-            .await
-            .expect("心跳"));
+        assert!(
+            repo.mark_online(agent.id, up.system_labels.as_str(), None, 2_000)
+                .await
+                .expect("心跳")
+        );
         assert_eq!(
-            repo.get(agent.id).await.expect("查").expect("应存在").last_seen_at,
+            repo.get(agent.id)
+                .await
+                .expect("查")
+                .expect("应存在")
+                .last_seen_at,
             Some(2_000)
         );
 
@@ -706,10 +746,11 @@ mod tests {
         assert_eq!(down.last_seen_at, Some(3_000));
 
         // 编辑槽位与自定义标签。
-        assert!(repo
-            .update_spec(agent.id, 2, r#"["region=eu"]"#)
-            .await
-            .expect("编辑"));
+        assert!(
+            repo.update_spec(agent.id, 2, r#"["region=eu"]"#)
+                .await
+                .expect("编辑")
+        );
         let edited = repo.get(agent.id).await.expect("查").expect("应存在");
         assert_eq!(edited.max_concurrency, 2);
         assert!(edited.custom_labels.contains("region=eu"));
@@ -804,7 +845,11 @@ mod tests {
                 trigger_detail: "{}".into(),
                 snapshot: BuildSnapshot::new(
                     pipeline,
-                    Revision { number: 1, operator: "tester".into(), at_ms: 1_000 },
+                    Revision {
+                        number: 1,
+                        operator: "tester".into(),
+                        at_ms: 1_000,
+                    },
                 ),
             })
             .await
@@ -841,21 +886,36 @@ mod tests {
             .expect("j2");
 
         // queued 不占槽；一个 running 占满单槽。
-        jobs.transition(j1.id, crate::store::jobs::JobStatus::Running, None, None, 1_000)
-            .await
-            .expect("j1 运行");
+        jobs.transition(
+            j1.id,
+            crate::store::jobs::JobStatus::Running,
+            None,
+            None,
+            1_000,
+        )
+        .await
+        .expect("j1 运行");
         assert!(!agents.has_slots(agent.id).await.expect("槽位"), "单槽被占");
 
         // 终态释放槽位。
-        jobs.transition(j1.id, crate::store::jobs::JobStatus::Succeeded, Some(0), None, 2_000)
-            .await
-            .expect("j1 完成");
+        jobs.transition(
+            j1.id,
+            crate::store::jobs::JobStatus::Succeeded,
+            Some(0),
+            None,
+            2_000,
+        )
+        .await
+        .expect("j1 完成");
         assert!(agents.has_slots(agent.id).await.expect("槽位"), "终态释放");
 
         // 离线/停用：无槽（即使有空位也不接新任务）。
         agents.mark_offline(agent.id, 3_000).await.expect("离线");
         assert!(!agents.has_slots(agent.id).await.expect("槽位"));
-        agents.mark_online(agent.id, "[]", None, 4_000).await.expect("上线");
+        agents
+            .mark_online(agent.id, "[]", None, 4_000)
+            .await
+            .expect("上线");
         agents.set_disabled(agent.id, true).await.expect("停用");
         assert!(!agents.has_slots(agent.id).await.expect("槽位"));
         agents.set_disabled(agent.id, false).await.expect("启用");
@@ -877,7 +937,10 @@ mod tests {
         // 全部命中。
         assert!(AgentRepo::matches_tags(
             &agent,
-            &["sisyphus/os=linux".to_string(), "sisyphus/arch=amd64".to_string()],
+            &[
+                "sisyphus/os=linux".to_string(),
+                "sisyphus/arch=amd64".to_string()
+            ],
         ));
         // 容器任务（调用侧已追加隐式容器标签）命中。
         assert!(AgentRepo::matches_tags(
@@ -936,10 +999,11 @@ mod tests {
         );
 
         // 再次心跳不带上报：在线/标签刷新、旧磁盘占用保留。
-        assert!(repo
-            .heartbeat(agent.id, r#"["sisyphus/os=linux"]"#, None, 2_000)
-            .await
-            .expect("再心跳"));
+        assert!(
+            repo.heartbeat(agent.id, r#"["sisyphus/os=linux"]"#, None, 2_000)
+                .await
+                .expect("再心跳")
+        );
         let row = repo.get(agent.id).await.expect("查").expect("应存在");
         assert_eq!(row.last_seen_at, Some(2_000));
         assert_eq!(row.system_labels, r#"["sisyphus/os=linux"]"#);
@@ -963,16 +1027,19 @@ mod tests {
 
         // 启用后心跳恢复生效。
         assert!(repo.set_disabled(agent.id, false).await.expect("启用"));
-        assert!(repo
-            .heartbeat(agent.id, "[]", None, 4_000)
-            .await
-            .expect("启用心跳"));
+        assert!(
+            repo.heartbeat(agent.id, "[]", None, 4_000)
+                .await
+                .expect("启用心跳")
+        );
 
         // 不存在的 Agent：false。
-        assert!(!repo
-            .heartbeat(agent.id + 999, "[]", None, 5_000)
-            .await
-            .expect("不存在"));
+        assert!(
+            !repo
+                .heartbeat(agent.id + 999, "[]", None, 5_000)
+                .await
+                .expect("不存在")
+        );
     }
 
     #[tokio::test]
@@ -988,7 +1055,9 @@ mod tests {
             .expect("b");
 
         assert!(repo.list_online().await.expect("在线清单").is_empty());
-        repo.heartbeat(a.id, "[]", None, 1_000).await.expect("a 上线");
+        repo.heartbeat(a.id, "[]", None, 1_000)
+            .await
+            .expect("a 上线");
         let online = repo.list_online().await.expect("在线清单");
         assert_eq!(online.len(), 1);
         assert_eq!(online[0].name, "linux-1");
@@ -1021,13 +1090,13 @@ mod tests {
             "sisyphus/container=docker".to_string(),
             "region=cn".to_string(),
         ];
-        assert_eq!(repo.match_job(&required).await.expect("匹配"), Some(linux.id));
+        assert_eq!(
+            repo.match_job(&required).await.expect("匹配"),
+            Some(linux.id)
+        );
 
         // 缺任一标签：无匹配（无限等待，sched 标注缺失标签）。
-        let missing = vec![
-            "sisyphus/os=linux".to_string(),
-            "gpu=nvidia".to_string(),
-        ];
+        let missing = vec!["sisyphus/os=linux".to_string(), "gpu=nvidia".to_string()];
         assert_eq!(repo.match_job(&missing).await.expect("匹配"), None);
 
         // 离线：不接新任务（标签全命中也不行）。
@@ -1087,7 +1156,11 @@ mod tests {
                 trigger_detail: "{}".into(),
                 snapshot: BuildSnapshot::new(
                     pipeline,
-                    Revision { number: 1, operator: "tester".into(), at_ms: 1_000 },
+                    Revision {
+                        number: 1,
+                        operator: "tester".into(),
+                        at_ms: 1_000,
+                    },
                 ),
             })
             .await
@@ -1108,7 +1181,13 @@ mod tests {
             .await
             .expect("j1");
         JobRepo::new(pool.clone())
-            .transition(j1.id, crate::store::jobs::JobStatus::Running, None, None, 4_000)
+            .transition(
+                j1.id,
+                crate::store::jobs::JobStatus::Running,
+                None,
+                None,
+                4_000,
+            )
             .await
             .expect("j1 运行");
         assert_eq!(
@@ -1118,16 +1197,28 @@ mod tests {
         );
         // 终态释放后恢复命中。
         JobRepo::new(pool.clone())
-            .transition(j1.id, crate::store::jobs::JobStatus::Succeeded, Some(0), None, 5_000)
+            .transition(
+                j1.id,
+                crate::store::jobs::JobStatus::Succeeded,
+                Some(0),
+                None,
+                5_000,
+            )
             .await
             .expect("j1 完成");
-        assert_eq!(repo.match_job(&required).await.expect("匹配"), Some(linux.id));
+        assert_eq!(
+            repo.match_job(&required).await.expect("匹配"),
+            Some(linux.id)
+        );
 
         // 停用：不命中；启用恢复。
         repo.set_disabled(linux.id, true).await.expect("停用");
         assert_eq!(repo.match_job(&required).await.expect("匹配"), None);
         repo.set_disabled(linux.id, false).await.expect("启用");
-        assert_eq!(repo.match_job(&required).await.expect("匹配"), Some(linux.id));
+        assert_eq!(
+            repo.match_job(&required).await.expect("匹配"),
+            Some(linux.id)
+        );
 
         // 无任何 Agent 的库：None（先清引用它的 jobs 再清 agents——外键）。
         sqlx::query("DELETE FROM jobs")
@@ -1170,7 +1261,9 @@ mod tests {
         );
         // id 偏好：首候选优先（即使在线清单里排后）。
         assert_eq!(
-            repo.match_candidates(Some(linux.id), &[]).await.expect("候选"),
+            repo.match_candidates(Some(linux.id), &[])
+                .await
+                .expect("候选"),
             vec![linux.id, mac.id],
             "无标签约束：两者候选，偏好者排前"
         );

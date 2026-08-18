@@ -81,9 +81,8 @@ pub async fn put_secret(
     let now = now_ms();
 
     // 加密只在写入路径调用一次：明文经此即不留存于任何模块。
-    let blob = crate::secrets::encrypt(&state.master_key, req.value.as_bytes()).map_err(
-        |e| ApiError::internal("secret encrypt", &e),
-    )?;
+    let blob = crate::secrets::encrypt(&state.master_key, req.value.as_bytes())
+        .map_err(|e| ApiError::internal("secret encrypt", &e))?;
     state
         .secrets
         .upsert(access.project.id, &secret, &blob, &access.operator, now)
@@ -157,7 +156,9 @@ pub async fn delete_secret(
 ) -> Result<StatusCode, ApiError> {
     validate_secret_name(&secret)?;
     if !state.secrets.delete(access.project.id, &secret).await? {
-        return Err(ApiError::resource_not_found(format!("机密不存在：{secret}")));
+        return Err(ApiError::resource_not_found(format!(
+            "机密不存在：{secret}"
+        )));
     }
     // 审计（票 B2b-T7）：机密删除——detail 只记名，永不记值。
     state

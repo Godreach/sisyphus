@@ -253,7 +253,8 @@ fn spawn_agent(
         ws_root.clone(),
     ));
     let ws_state = Workspace::new(ws_root).with_usage(sampler.clone());
-    let cache_state = sisyphus_agent::cache::Cache::new(cfg.cache_dir(), cfg.cache_capacity_bytes());
+    let cache_state =
+        sisyphus_agent::cache::Cache::new(cfg.cache_dir(), cfg.cache_capacity_bytes());
     let agent = Agent::with_channel_config(
         cfg,
         channel_cfg(server_url, token, data_dir),
@@ -289,9 +290,12 @@ fn spawn_agent_cache(
     )
     .expect("配置");
     let ws_root = cfg.workspaces_dir();
-    let sampler = Arc::new(sisyphus_agent::workspace::WorkspaceSampler::new(ws_root.clone()));
+    let sampler = Arc::new(sisyphus_agent::workspace::WorkspaceSampler::new(
+        ws_root.clone(),
+    ));
     let ws_state = Workspace::new(ws_root).with_usage(sampler.clone());
-    let cache_state = sisyphus_agent::cache::Cache::new(cfg.cache_dir(), cfg.cache_capacity_bytes());
+    let cache_state =
+        sisyphus_agent::cache::Cache::new(cfg.cache_dir(), cfg.cache_capacity_bytes());
     let agent = Agent::with_channel_config(
         cfg,
         channel_cfg(server_url, token, data_dir),
@@ -1881,7 +1885,11 @@ async fn cache_restore_after_checkout_hits_using_lockfile_hash() {
     send_downlink(&state, spec).await;
     let _ = await_ack(&state, "job-co", true).await;
     let term = await_terminal(&state, "job-co").await;
-    assert_eq!(term.phase(), JobPhase::JobSucceeded, "checkout + restore + shell 成功");
+    assert_eq!(
+        term.phase(),
+        JobPhase::JobSucceeded,
+        "checkout + restore + shell 成功"
+    );
     // restore 命中：工作区 out 由缓存拷入（=b"cached"，seed 的精确内容）。
     let co_ws = ws.find("pipe", "job").expect("resolve 工作区");
     wait_until(|| async { co_ws.join("out").is_file() }).await;
@@ -1954,13 +1962,25 @@ async fn backend_switches_per_job_host_runs_and_container_routes_to_pull() {
     // host job：exec_env=None → 宿主机后端真实 shell 执行成功 + 输出 "host-ran"。
     send_downlink(
         &state,
-        shell_spec("job-host", "pipe", "host", "echo host-ran", vec![], vec![], 0),
+        shell_spec(
+            "job-host",
+            "pipe",
+            "host",
+            "echo host-ran",
+            vec![],
+            vec![],
+            0,
+        ),
     )
     .await;
     let ack_h = await_ack(&state, "job-host", true).await;
     assert!(ack_h.error.is_empty(), "host job 接受：{}", ack_h.error);
     let term_h = await_terminal(&state, "job-host").await;
-    assert_eq!(term_h.phase(), JobPhase::JobSucceeded, "host job 宿主机后端成功");
+    assert_eq!(
+        term_h.phase(),
+        JobPhase::JobSucceeded,
+        "host job 宿主机后端成功"
+    );
     wait_until(|| async {
         output_bytes(&state, "job-host")
             .windows(b"host-ran".len())
@@ -1993,7 +2013,11 @@ async fn backend_switches_per_job_host_runs_and_container_routes_to_pull() {
         "container job 接受（pull 在首步前、ack 时未知失败）"
     );
     let term_c = await_terminal(&state, "job-ctr").await;
-    assert_eq!(term_c.phase(), JobPhase::JobFailed, "container job pull 失败 → failed");
+    assert_eq!(
+        term_c.phase(),
+        JobPhase::JobFailed,
+        "container job pull 失败 → failed"
+    );
     assert!(
         term_c.detail.contains("docker pull"),
         "container job 走容器后端（docker pull 失败，detail 点名）：{}",

@@ -173,18 +173,13 @@ impl UserRepo {
     /// 覆写密码哈希（票 B2b-T4：管理员代办重置 / 自助改密的落库面）。
     /// 只换哈希不动凭据面：既有 session 与 PAT 不受密码变更牵连（各自有
     /// 独立吊销途径）。目标不存在返回 `false`。
-    pub async fn set_password(
-        &self,
-        id: i64,
-        password_hash: &str,
-    ) -> Result<bool, StoreError> {
-        let result =
-            sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
-                .bind(password_hash)
-                .bind(now_ms())
-                .bind(id)
-                .execute(&self.pool)
-                .await?;
+    pub async fn set_password(&self, id: i64, password_hash: &str) -> Result<bool, StoreError> {
+        let result = sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
+            .bind(password_hash)
+            .bind(now_ms())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 }
@@ -295,7 +290,10 @@ mod tests {
             vec!["alice", "root"],
             "按用户名排序，含已禁用"
         );
-        assert!(list.iter().any(|u| u.id == alice.id && u.disabled), "禁用行仍可见");
+        assert!(
+            list.iter().any(|u| u.id == alice.id && u.disabled),
+            "禁用行仍可见"
+        );
         assert!(list.iter().any(|u| u.id == root.id));
     }
 
@@ -363,7 +361,11 @@ mod tests {
         assert_eq!(root_sessions, 1, "他人 session 不受牵连");
 
         // 用户行仍在（只禁用不物理删除），密码哈希不动。
-        let row = repo.get_by_id(user.id).await.expect("读取").expect("行仍在");
+        let row = repo
+            .get_by_id(user.id)
+            .await
+            .expect("读取")
+            .expect("行仍在");
         assert!(row.disabled);
         assert_eq!(row.password_hash, user.password_hash, "禁用不改密码");
 
@@ -384,7 +386,10 @@ mod tests {
 
         // 未知 id：None（幂等不存在）。
         assert!(
-            repo.set_disabled(user.id + 1000, true).await.expect("未知 id").is_none(),
+            repo.set_disabled(user.id + 1000, true)
+                .await
+                .expect("未知 id")
+                .is_none(),
             "未知 id 应 None"
         );
     }
@@ -415,7 +420,10 @@ mod tests {
         );
 
         assert!(
-            !repo.set_password(user.id + 1000, &new_phc).await.expect("未知 id"),
+            !repo
+                .set_password(user.id + 1000, &new_phc)
+                .await
+                .expect("未知 id"),
             "未知 id 应返回 false"
         );
     }
