@@ -53,10 +53,16 @@ pub enum StepOutcome {
 }
 
 /// 已起的 shell 步骤：持有 child 与树终止用的 pid（stdout/stderr 经
-/// [`SpawnedStep::take_streams`] 交 runner 编码）。
+/// [`SpawnedStep::take_streams`] 交 runner 编码）。Windows 下另持
+/// job object 句柄（[`windows_job`]：整棵树终止的权威机制——`taskkill /T`
+/// 依赖父子关系枚举，pwsh 异步 fork 的子进程在枚举窗口外会漏杀成孤儿）。
 pub struct SpawnedStep {
     child: Child,
     pid: u32,
+    /// Windows：进程树终止用的作业对象句柄（None = 非 Windows / 挂入失败，
+    /// kill 回落 taskkill /T）。
+    #[cfg(windows)]
+    job: Option<crate::windows_job::JobHandle>,
 }
 
 /// 以默认解释器起一个 shell 步骤。`command` 须已做 `${SISY_WORKSPACE}` 替换
@@ -123,7 +129,18 @@ fn spawn(
         SpawnError(msg)
     })?;
     let pid = child.id().unwrap_or(0);
-    Ok(SpawnedStep { child, pid })
+    #[cfg(windows)]
+    {
+        // 子进程挂进作业对象：此后 pwsh 内部 fork 的任何子进程自动属同一
+        // job，`TerminateJobObject` 可整树终止（含孤儿）。挂入失败不阻断
+        // spawn——kill 回落 taskkill /T（[`kill_tree`]）。
+        let job = crate::windows_job::create_and_assign(pid);
+        Ok(SpawnedStep { child, pid, job })
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(SpawnedStep { child, pid })
+    }
 }
 
 impl SpawnedStep {
@@ -152,6 +169,11 @@ impl SpawnedStep {
     /// `timeout = None` = 无限等待（仅与 cancel 竞争）。`cancel` 是电平触发
     /// （`watch::Receiver<bool>`，true = 取消）：进入 wait 时已置位则立即
     /// 返回 Cancelled（覆盖「取消在步骤间到达、本步刚起」的窗口）。
+    ///
+    /// kill 后补刀（[`Self::reap_after_kill`]）：`kill_tree` 只发一次信号，
+    /// 在 Windows 高负载下 taskkill 枚举进程树时，shell（pwsh）异步 fork 的
+    /// 子进程（如 `ping`）可能尚未挂上父子关系而被漏杀、跑满时长；有界等待 +
+    /// 未退出重试 kill 覆盖该竞态窗口（ADR-0008「终止进程树」语义）。
     pub async fn wait_until(
         &mut self,
         timeout: Option<Duration>,
@@ -159,7 +181,8 @@ impl SpawnedStep {
     ) -> StepOutcome {
         let pid = self.pid;
         // 钉住 wait future：select 各分支以 `&mut wait_fut` 共用同一 future 实例
-        // （非二次 wait）。
+        // （非二次 wait）。job 句柄先取出（不随 wait_fut 借 child——补刀阶段
+        // 仍可访问）。
         let wait_fut = self.child.wait();
         tokio::pin!(wait_fut);
         // 先经 select 裁决触发源（自然退出即直接返回）；取消/超时分支的 handler
@@ -176,14 +199,74 @@ impl SpawnedStep {
                 _ = cancel.wait_for(|c| *c) => Trigger::Cancel,
             },
         };
-        kill_tree(pid);
-        let _ = (&mut wait_fut).await; // reap 被杀的子进程
+        #[cfg(windows)]
+        {
+            let job = self.job.as_ref();
+            Self::reap_after_kill(job, pid, &mut wait_fut).await;
+        }
+        #[cfg(not(windows))]
+        {
+            Self::reap_after_kill(pid, &mut wait_fut).await;
+        }
         match triggered {
             Trigger::Cancel => StepOutcome::Cancelled,
             Trigger::Timeout => StepOutcome::Timeout,
         }
     }
+
+    /// kill 后带界等待并补刀：反复 `kill_tree` + 等待，直到进程退出或补刀
+    /// 次数用尽（极端情况回落到无界等待自然退出——不丢终态语义，仅保底）。
+    ///
+    /// 每次补刀间隔 [`KILL_REAP_INTERVAL`]；重试上限 [`KILL_REAP_MAX`]。等待
+    /// 与补刀都只持 `wait_fut`（`&mut` 复用同一 future，非二次 wait）。静态
+    /// 方法：不借 `self`（`wait_fut` 已借 `self.child`，再借 self 会冲突）。
+    /// Windows 传入 job object 引用（[`Self::job`]；None = 挂入失败，kill
+    /// 回落 `taskkill /T`）。`JobHandle: Sync`，引用跨 await 安全。
+    #[cfg(windows)]
+    async fn reap_after_kill(
+        job: Option<&crate::windows_job::JobHandle>,
+        pid: u32,
+        wait_fut: &mut std::pin::Pin<&mut impl std::future::Future<Output = std::io::Result<std::process::ExitStatus>>>,
+    ) {
+        for _ in 0..KILL_REAP_MAX {
+            kill_tree(job, pid);
+            let exited = tokio::select! {
+                s = &mut *wait_fut => { let _ = s; true }
+                _ = tokio::time::sleep(KILL_REAP_INTERVAL) => false,
+            };
+            if exited {
+                return;
+            }
+        }
+        // 补刀用尽仍未退出（极端系统状态）：回落到无界等待自然退出，保终态语义。
+        let _ = (&mut *wait_fut).await;
+    }
+
+    /// kill 后带界等待并补刀（Unix：进程组 SIGKILL，无 job）。
+    #[cfg(not(windows))]
+    async fn reap_after_kill(
+        pid: u32,
+        wait_fut: &mut std::pin::Pin<&mut impl std::future::Future<Output = std::io::Result<std::process::ExitStatus>>>,
+    ) {
+        for _ in 0..KILL_REAP_MAX {
+            kill_tree(pid);
+            let exited = tokio::select! {
+                s = &mut *wait_fut => { let _ = s; true }
+                _ = tokio::time::sleep(KILL_REAP_INTERVAL) => false,
+            };
+            if exited {
+                return;
+            }
+        }
+        // 补刀用尽仍未退出（极端系统状态）：回落到无界等待自然退出，保终态语义。
+        let _ = (&mut *wait_fut).await;
+    }
 }
+
+/// kill 后补刀循环：每次 kill 后等待的间隔（覆盖 taskkill 枚举窗口）。
+const KILL_REAP_INTERVAL: Duration = Duration::from_millis(500);
+/// kill 后补刀次数上限（500ms × 4 = 2s 内仍不退出才回落到无界等待）。
+const KILL_REAP_MAX: u32 = 4;
 
 /// 取消/超时触发源（自然退出在 select 内直接 return，不经此枚举）。
 enum Trigger {
@@ -276,9 +359,15 @@ fn kill_tree(pid: u32) {
     let _ = unsafe { libc::kill(-(pid as pid_t), libc::SIGKILL) };
 }
 
-/// Windows：`taskkill /T /F /PID` 杀整树（/T = 含子进程，/F = 强制）。
+/// Windows 树终止：优先 `TerminateJobObject`（作业对象整树杀，含异步 fork
+/// 的孤儿——权威机制）；job 句柄缺失（挂入失败降级）回落
+/// `taskkill /T /F /PID`（按父子关系枚举，存在漏杀窗口）。
 #[cfg(windows)]
-fn kill_tree(pid: u32) {
+fn kill_tree(job: Option<&crate::windows_job::JobHandle>, pid: u32) {
+    if let Some(job) = job {
+        job.terminate();
+        return;
+    }
     let _ = std::process::Command::new("taskkill")
         .args(["/T", "/F", "/PID", &pid.to_string()])
         .stdin(Stdio::null())

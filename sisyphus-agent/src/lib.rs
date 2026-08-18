@@ -20,6 +20,8 @@ pub mod register;
 pub mod runner;
 pub mod stepio;
 pub mod upgrader;
+#[cfg(windows)]
+pub mod windows_job;
 pub mod workspace;
 
 use std::sync::Arc;

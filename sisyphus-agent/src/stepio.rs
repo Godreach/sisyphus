@@ -125,6 +125,15 @@ pub async fn emit_step(logbuf: &LogBuffer, job_id: &str, attempt: i32, event: St
 
 /// 流式读取一条输出流：读 → 脱敏 → 截断 → 编码 OutputChunk（经 logbuf 编号 seq）。
 /// EOF 时 flush 脱敏器暂留窗口（跨块边界的机密前缀在此补齐或作明文外发）。
+///
+/// `drain` 是进程终态信号（[`run_streamed_step`] 在 `wait_until` 返回后置位）：
+/// 读循环与 drain 竞争——进程已终态而残留子进程仍持有管道写端（Windows
+/// 孤儿进程继承句柄）时，`read` 会阻塞到 EOF；drain 触发即退出循环，避免
+/// 被拖到残留进程自然退出（如 `ping -n 30` 跑满 30s）。
+//
+// 参数多于 clippy 阈值：stream/tag/drain 是 per-流、余下是 per-job 编码上下文
+// （脱敏集/截断/标识/日志）——皆流式编码所需，与 run_streamed_step 同纪律。
+#[allow(clippy::too_many_arguments)]
 async fn stream_output<R>(
     stream: Option<R>,
     tag: Stream,
@@ -133,6 +142,7 @@ async fn stream_output<R>(
     job_id: String,
     attempt: i32,
     logbuf: LogBuffer,
+    mut drain: watch::Receiver<bool>,
 ) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
@@ -143,10 +153,14 @@ async fn stream_output<R>(
     let mut redactor = Redactor::new(secrets);
     let mut buf = vec![0u8; READ_BUF];
     loop {
-        let n = match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(_) => break,
+        let n = tokio::select! {
+            n = reader.read(&mut buf) => match n {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            },
+            // 进程已终态（wait_until 返回）：放弃残留输出读取。
+            _ = drain.wait_for(|c| *c) => break,
         };
         let redacted = redactor.process(&buf[..n]);
         emit_output(&logbuf, &job_id, attempt, tag, &redacted, &trunc).await;
@@ -230,6 +244,9 @@ pub async fn run_streamed_step(
         })),
         _ => None,
     };
+    // drain 信号：进程终态（wait_until 返回）后置位，读流任务据此退出——
+    // 覆盖「残留子进程持有管道写端、read 阻塞到 EOF」的 Windows 场景。
+    let (drain_tx, drain_rx) = watch::channel(false);
     let (stdout, stderr) = spawned.take_streams();
     let out_task = tokio::spawn(stream_output(
         stdout,
@@ -239,6 +256,7 @@ pub async fn run_streamed_step(
         job_id.to_string(),
         attempt,
         logbuf.clone(),
+        drain_rx.clone(),
     ));
     let err_task = tokio::spawn(stream_output(
         stderr,
@@ -248,16 +266,24 @@ pub async fn run_streamed_step(
         job_id.to_string(),
         attempt,
         logbuf.clone(),
+        drain_rx,
     ));
     let outcome = spawned.wait_until(timeout, cancel).await;
-    // 回收读流/写流任务（确保输出在判定终态前全部编码、stdin 写完）。
-    let _ = out_task.await;
-    let _ = err_task.await;
+    // 进程已终态：置位 drain 让读流任务尽快退出（不再等 EOF）。随后有界
+    // 回收读流任务（正常路径下它们已在 drain 后很快结束；超时仅兜底极端
+    // 调度——读循环在 drain 竞争点响应）。
+    drain_tx.send(true).ok();
+    let _ = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, out_task).await;
+    let _ = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, err_task).await;
     if let Some(t) = stdin_task {
         let _ = t.await;
     }
     outcome
 }
+
+/// 进程终态后读流任务的回收时限：drain 信号置位后给已产出输出落库的时间，
+/// 超时即放弃 join（读循环在 drain 竞争点响应，超时仅兜底极端调度）。
+const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 // ============================================================
 // 单元测试（Truncation 纯逻辑，从 runner 迁移）
