@@ -180,6 +180,7 @@ impl DiskSampler for PlatformDiskSampler {
 /// 卷级磁盘占用（尽力而为：平台调用失败返回 `None`——心跳不带病，缺卷级
 /// 数据即空）。
 #[cfg(unix)]
+#[allow(unsafe_code)] // libc::statvfs 标记 unsafe；FFI 调用，无内部数据访问
 fn platform_volumes(base: &std::path::Path) -> Option<Vec<sisyphus_proto::agent::VolumeUsage>> {
     use std::os::unix::ffi::OsStrExt;
 

@@ -293,6 +293,7 @@ fn kill_tree(_pid: u32) {}
 
 /// Unix pid 类型别名（libc::pid_t）。
 #[cfg(unix)]
+#[allow(non_camel_case_types)] // FFI 类型别名沿用 C 名 pid_t
 type pid_t = libc::pid_t;
 
 // ============================================================
