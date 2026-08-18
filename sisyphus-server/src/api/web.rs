@@ -1,7 +1,7 @@
 //! 静态资源服务（ADR-0005；票 B2a-T5）。
 //!
-//! rust-embed 内嵌 sisyphus-web 构建产物（本阶段为占位 index.html）：
-//! release 编译期嵌入、debug 运行时读盘——web 批次把真实前端产物放进
+//! rust-embed 内嵌 sisyphus-web 构建产物（票 B4-T1 起为真实 Vue 构建）：
+//! release 编译期嵌入、debug 运行时读盘——构建产物放进
 //! `sisyphus-web/dist/` 后 server 侧零改动。
 //!
 //! 非 `/api` 路径的解析顺序（票 B2a-T5 AC）：**本地覆盖目录 → 内嵌资源 →
@@ -58,7 +58,7 @@ fn serve_override(override_dir: &Path, rel: &Path) -> Option<Response> {
 }
 
 /// SPA 入口页：覆盖目录 index.html 优先，回落内嵌；两层皆缺（内嵌产物
-/// 未随构建产出）才 404——正常提交里占位页必在。
+/// 未随构建产出）才 404——正常提交里入口页必在。
 fn serve_index(override_dir: &Path) -> Response {
     if let Some(resp) = serve_override(override_dir, Path::new("index.html")) {
         return resp;

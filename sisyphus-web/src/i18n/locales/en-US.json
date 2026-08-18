@@ -1,0 +1,39 @@
+{
+  "app": {
+    "name": "sisyphus",
+    "pageUnderConstruction": "This page is under construction and will be shipped by a later batch.",
+    "langSwitch": "中"
+  },
+  "auth": {
+    "login": "Sign in",
+    "loginTagline": "Sign in to continue",
+    "loggingIn": "Signing in…",
+    "username": "Username",
+    "password": "Password",
+    "loginRateLimited": "Too many attempts. Retry in {seconds}s.",
+    "loginRateLimitedGeneric": "Too many attempts. Please try again later."
+  },
+  "setup": {
+    "title": "Initial setup",
+    "intro": "First deployment: create the global admin, first agent and first project.",
+    "comingSoon": "The setup flow will be implemented by B4-T2."
+  },
+  "routes": {
+    "overview": "Overview",
+    "projects": "Projects",
+    "projectDetail": "Project detail",
+    "pipelineEdit": "Pipeline editor",
+    "buildDetail": "Build detail",
+    "agents": "Agents",
+    "agentDetail": "Agent detail",
+    "adminSecrets": "Secrets",
+    "adminAudit": "Audit log",
+    "adminUpgrade": "Agent upgrade",
+    "adminUsers": "Users"
+  },
+  "errors": {
+    "generic": "An unknown error occurred",
+    "network": "Network request failed. Please check that the service is reachable.",
+    "notFound": "Page not found"
+  }
+}

@@ -1,0 +1,7 @@
+# 前端依赖（npm ci 按 package-lock.json 安装，无需进 git）
+node_modules/
+
+# Vite/vue-tsc 增量缓存
+*.tsbuildinfo
+
+# 开发期本地产物（build 产物 dist/ 须提交：server rust-embed 编译期内嵌目录）

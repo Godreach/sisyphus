@@ -1,0 +1,39 @@
+{
+  "app": {
+    "name": "sisyphus",
+    "pageUnderConstruction": "本页正在建设中，将由后续批次实现。",
+    "langSwitch": "EN"
+  },
+  "auth": {
+    "login": "登录",
+    "loginTagline": "登录以继续",
+    "loggingIn": "登录中…",
+    "username": "用户名",
+    "password": "密码",
+    "loginRateLimited": "尝试过于频繁，请在 {seconds} 秒后重试",
+    "loginRateLimitedGeneric": "尝试过于频繁，请稍后再试"
+  },
+  "setup": {
+    "title": "初始化引导",
+    "intro": "首次部署：创建全局管理员、首个 Agent 与首个项目。",
+    "comingSoon": "引导流程将由 B4-T2 实现。"
+  },
+  "routes": {
+    "overview": "概览",
+    "projects": "项目",
+    "projectDetail": "项目详情",
+    "pipelineEdit": "流水线编辑",
+    "buildDetail": "构建详情",
+    "agents": "Agent",
+    "agentDetail": "Agent 详情",
+    "adminSecrets": "机密",
+    "adminAudit": "审计日志",
+    "adminUpgrade": "Agent 升级",
+    "adminUsers": "用户"
+  },
+  "errors": {
+    "generic": "发生未知错误",
+    "network": "网络请求失败，请检查服务是否可达",
+    "notFound": "页面不存在"
+  }
+}

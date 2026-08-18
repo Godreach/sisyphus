@@ -1,9 +1,44 @@
 # sisyphus-web
 
-前端工程（ADR-0003：Vue 3 + Vue Flow）。web 批次在此落 Vue 工程，构建产物输出到 `dist/`。
-
-当前 `dist/` 只含占位 `index.html`（票 B2a-T5）：sisyphus-server 经 rust-embed
-内嵌该目录产物对外提供静态服务与 SPA fallback。真实前端构建进 `dist/` 后
-server 侧零改动——release 编译期内嵌、debug 运行时读盘（ADR-0005）。
+sisyphus 的 Web 前端工程（ADR-0003：Vue 3 + TypeScript + Vite；ADR-0020：
+12 页 IA + 混合式编辑器）。构建产物输出到 `dist/`——sisyphus-server 经
+rust-embed 内嵌该目录产物对外提供静态服务与 SPA fallback（release 编译期
+嵌入、debug 运行时读盘，ADR-0005），server 侧零改动。
 
 本地覆盖目录（同名文件压过内嵌资源）在 Server 数据目录的 `web/` 子目录。
+
+## 目录约定
+
+- `src/api/`：单实例 API 客户端——`http.ts`（fetch 核心：cookie 会话 + 可选
+  Bearer PAT 双通道、401 统一落登录、统一错误形态 `code`/`message`/`detail`
+  按 code 分支、校验清单 `detail.errors` 按字段路径定位）+ `http-singleton.ts`
+  （模块级单实例）+ `client.ts`（端点级封装：auth/setup）+ `types.ts`
+  （错误形态类型）。
+- `src/model/`：sisyphus-model 生成产物落点（ADR-0009，B4-T7 建立生成/对账
+  管线；本批次为空目录，类型以 API 客户端 DTO 先行）。
+- `src/i18n/`：zh 源语言 + en 全量对译 catalog（`locales/`）+ 装配
+  （`index.ts`）。key 集合一致性由 `npm run i18n:check` 强制（CI 挂）。
+- `src/stores/`：Pinia store（auth 等）。
+- `src/views/`：12 页 IA + 登录 + 初始化引导（页面实现归各页面票）。
+- `src/components/`：页面组件（侧栏、轨道、表单、日志流等，页面票落地）。
+- `src/router/`：路由表（ADR-0020 12 页 IA）+ 守卫（会话恢复 `/auth/me`
+  锚点、未认证重定向登录 + 回跳、`/setup` 引导位）。
+
+## 依赖纪律
+
+依赖锁版本（`package-lock.json` 提交，CI `npm ci` 按锁文件安装）。
+**不引入 Vue Flow**（ADR-0020：编辑器不是画布；无消费者则不装）。
+
+## 脚本
+
+- `npm run dev`：Vite dev server（`/api` 代理到本机 server 默认 8080 端口，
+  开发期前后端同源，cookie 会话与 CSRF 语义一致）。
+- `npm run build`：vue-tsc 类型 + vite 构建，产物进 `dist/`。
+- `npm run preview`：预览构建产物。
+- `npm run typecheck` / `npm test` / `npm run i18n:check`：CI 三件套
+  （vue-tsc 类型 + vitest 行为测试 + i18n 对账）。
+
+## 测试纪律
+
+Vitest + Vue Test Utils，只测外部行为（用户可见状态、DOM 事件、网络请求/
+响应形态断言），不测组件内部结构；API 层 mock（fetch 替身）驱动（Spec B4）。

@@ -1,5 +1,5 @@
 //! 静态资源进程内集成（票 B2a-T5 AC）：经与二进制相同的 Router 组合根做
-//! oneshot 请求。覆盖四条验收：SPA fallback 回占位 index.html、本地覆盖
+//! oneshot 请求。覆盖四条验收：SPA fallback 回内嵌 index.html、本地覆盖
 //! 目录同名文件压过内嵌、`/api` 前缀未命中不落 fallback、healthz/Swagger
 //! 不受影响；外加路径穿越不外泄文件系统（含数据目录内的库文件）。
 
@@ -13,8 +13,11 @@ mod common;
 
 use common::test_app;
 
-/// 内嵌占位 index.html 的可断言标记（sisyphus-web/dist/index.html）。
-const EMBEDDED_MARKER: &str = "sisyphus-web placeholder";
+/// 内嵌构建产物 index.html 的可断言标记（sisyphus-web/dist/index.html）。
+/// 从占位页换成真实前端构建后（票 B4-T1），用 Vue 挂载点 `<div id="app">`
+/// 作稳定标记：Vite 产物里的资源 URL 带内容哈希（每次构建变化），
+/// `<div id="app">` 是构建模板（index.html）的固定结构。
+const EMBEDDED_MARKER: &str = "id=\"app\"";
 
 async fn get(app: &common::TestApp, path: &str) -> Response {
     app.router
@@ -50,7 +53,7 @@ fn assert_content_type(resp: &Response, prefix: &str) {
     );
 }
 
-/// AC1：非 `/api` 未命中路径与根路径都返回占位 index.html。
+/// AC1：非 `/api` 未命中路径与根路径都返回内嵌 index.html。
 #[tokio::test]
 async fn non_api_miss_returns_embedded_index_html() {
     let app = test_app().await;
@@ -62,7 +65,7 @@ async fn non_api_miss_returns_embedded_index_html() {
         let body = body_text(resp).await;
         assert!(
             body.contains(EMBEDDED_MARKER),
-            "路径 {path} 应回内嵌占位页：{body}"
+            "路径 {path} 应回内嵌入口页：{body}"
         );
     }
 }
@@ -84,7 +87,7 @@ async fn local_override_dir_shadows_embedded_assets() {
     std::fs::create_dir_all(app.web.join("assets")).unwrap();
     std::fs::write(app.web.join("assets").join("app.js"), "// override-asset").unwrap();
 
-    // 同名覆盖：根路径与未命中路径都拿到覆盖版本，不再是内嵌占位页。
+    // 同名覆盖：根路径与未命中路径都拿到覆盖版本，不再是内嵌版本。
     for path in ["/", "/some-frontend-path"] {
         let resp = get(&app, path).await;
         assert_eq!(resp.status(), StatusCode::OK);

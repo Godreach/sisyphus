@@ -58,3 +58,37 @@ jobs:
 
       - name: Clippy agent
         run: cargo clippy -p sisyphus-agent -- -D warnings
+
+  # 前端工程（票 B4-T1，ADR-0003/0020）：vue-tsc 类型 + vitest 行为测试 +
+  # i18n 对账（zh 源语言/en 全量对译，key 集合一致）挂在依赖锁定（npm ci
+  # 按 package-lock.json）与构建（产物进 dist/，server rust-embed 内嵌目录）。
+  # 构建用 npm run build（vue-tsc -b && vite build）保证类型检查也覆盖构建面。
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sisyphus-web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: sisyphus-web/package-lock.json
+
+      - name: Install dependencies（按锁文件）
+        run: npm ci
+
+      - name: vue-tsc 类型检查
+        run: npm run typecheck
+
+      - name: vitest 行为测试
+        run: npm test
+
+      - name: i18n 对账（zh/en key 集合一致）
+        run: npm run i18n:check
+
+      - name: 构建产物进 dist/
+        run: npm run build
