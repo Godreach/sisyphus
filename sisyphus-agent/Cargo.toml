@@ -41,6 +41,11 @@ fs4 = { version = "1.1", default-features = false, features = ["sync"] }
 # workspace 已有——server auth 面同依赖，零新增 crate，纯 Rust）。
 # alloc feature：decode_vec 需要（std = alloc，直接开 std）。
 base64ct = { workspace = true, features = ["std"] }
+# upgrader 下载/spawn 注入缝（B3-T9 / #61）：Downloader / Spawner 是 async
+# trait，经 `Arc<dyn>` 注入——real（reqwest 下载 + tokio spawn 甄别）生产、
+# fake（canned 字节 / 记录路径）测试。async-trait 是 async 方法的对象安全
+# 装糖；纯过程宏、零 C 依赖、6 目标交叉编译面（ADR-0010）可负担。
+async-trait = "0.1"
 
 # 卷级磁盘占用采样（ADR-0019）：statvfs / GetDiskFreeSpaceExW——
 # 零构建依赖的 FFI 绑定，6 目标交叉编译面（ADR-0010）可负担。

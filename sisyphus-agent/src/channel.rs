@@ -35,6 +35,7 @@ use tonic::metadata::MetadataValue;
 
 use crate::cache::Cache;
 use crate::logbuf::LogBuffer;
+use crate::upgrader::UpgradeUplink;
 use crate::workspace::Workspace;
 
 /// 心跳间隔（ADR-0007：15s 一报；与 Server 侧 `HEARTBEAT_INTERVAL_MS` 同值）。
@@ -497,6 +498,7 @@ impl From<tonic::Status> for ChannelError {
 /// 外层负责退避重连（本函数不含重试逻辑）。
 ///
 /// 每次调用都是一次完整「新握手 + 认证 + 标签刷新」——重连即走同一路径。
+#[allow(clippy::too_many_arguments)] // 各模块上行链路 + 共享状态各一参，语义独立
 pub async fn run_connection(
     cfg: &ChannelConfig,
     dispatch: &Dispatch,
@@ -505,6 +507,7 @@ pub async fn run_connection(
     runner_uplink: &crate::runner::RunnerUplink,
     workspace: &Workspace,
     cache: &Cache,
+    upgrade_uplink: &UpgradeUplink,
 ) -> Result<(), ChannelError> {
     let channel = tonic::transport::Endpoint::from_shared(cfg.server_url.clone())
         .map_err(|e| ChannelError(format!("无效 server-url {}：{e}", cfg.server_url)))?
@@ -608,6 +611,9 @@ pub async fn run_connection(
     // 缓冲。set_live 先于 flush_pending——离线期间完成的终态经此 sender 补发
     // （< orphan 宽限窗口；超宽限由 Server orphan grace 兜底）。
     runner_uplink.set_live(Some(out_tx.clone())).await;
+    // 升级上行链路（ADR-0017）：升级阶段经此单 writer 外送；set_live 先于
+    // flush_pending——断线时最新阶段存 pending，重连补发（「重连上报失败原因」）。
+    upgrade_uplink.set_live(Some(out_tx.clone())).await;
     for msg in logbuf
         .replay_all()
         .await
@@ -623,6 +629,8 @@ pub async fn run_connection(
     }
     // 离线期间缓冲的终态补发（日志重放之后；同一 writer 保写序）。
     runner_uplink.flush_pending(&out_tx).await;
+    // 升级最新阶段补发（断线期间的退回/失败原因在重连后可见）。
+    upgrade_uplink.flush_pending(&out_tx).await;
 
     // 心跳循环：15s 一报，附带磁盘占用（ADR-0019）。独立 task——连接期内
     // 与 reader 并行；流结束由外层 abort。工作区占用从 [`Workspace`] 的低频
@@ -658,6 +666,7 @@ pub async fn run_connection(
     workspace.set_live(None).await;
     cache.set_live(None).await;
     runner_uplink.set_live(None).await;
+    upgrade_uplink.set_live(None).await;
     heartbeat.abort();
     writer.abort();
     result

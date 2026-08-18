@@ -59,6 +59,7 @@ use crate::container;
 use crate::exec::{self, SpawnError, StepOutcome};
 use crate::logbuf::LogBuffer;
 use crate::stepio::{Truncation, emit_step, run_streamed_step, step_event};
+use crate::upgrader::DrainGate;
 use crate::workspace::{self, Workspace};
 
 /// per-job 日志上限默认值（ADR-0013：`log_limit_bytes = 0` → 50 MB）。
@@ -190,8 +191,8 @@ impl CancelRegistry {
 // ============================================================
 
 /// runner 句柄：下行接收端、上行链路、在途集、工作区、日志缓冲、取消注册、
-/// 在跑 job 的 [`JoinSet`] 与收帧观测。`run` 消费 self；job 任务经 JoinSet
-/// 托管（Handle drop / 任务 abort 即随 JoinSet drop 一并取消）。
+/// 在跑 job 的 [`JoinSet`]、排空闸门与收帧观测。`run` 消费 self；job 任务经
+/// JoinSet 托管（Handle drop / 任务 abort 即随 JoinSet drop 一并取消）。
 pub struct Handle {
     rx: mpsc::Receiver<ChannelMessage>,
     uplink: RunnerUplink,
@@ -201,11 +202,15 @@ pub struct Handle {
     logbuf: LogBuffer,
     cancels: CancelRegistry,
     jobs: JoinSet<()>,
+    /// 排空闸门（ADR-0017：升级排空时拒接新任务；终态释放唤醒等待排空的 upgrader）。
+    gate: DrainGate,
     receipts: ReceiptLog,
 }
 
 impl Handle {
-    /// 以分派接收端、上行链路、在途集、工作区、缓存、日志缓冲与收帧观测构造。
+    /// 以分派接收端、上行链路、在途集、工作区、缓存、日志缓冲、排空闸门与收帧
+    /// 观测构造。
+    #[allow(clippy::too_many_arguments)] // 各依赖语义独立，聚合在 Handle 构造
     pub fn new(
         rx: mpsc::Receiver<ChannelMessage>,
         uplink: RunnerUplink,
@@ -213,6 +218,7 @@ impl Handle {
         workspace: Workspace,
         cache: Cache,
         logbuf: LogBuffer,
+        gate: DrainGate,
         receipts: ReceiptLog,
     ) -> Self {
         Self {
@@ -224,6 +230,7 @@ impl Handle {
             logbuf,
             cancels: CancelRegistry::default(),
             jobs: JoinSet::new(),
+            gate,
             receipts,
         }
     }
@@ -260,9 +267,24 @@ impl Handle {
         }
     }
 
-    /// 处理一帧 JobSpec：去重 → ack → 起任务执行。
+    /// 处理一帧 JobSpec：排空态拒收 → 去重 → ack → 起任务执行。
     async fn handle_job(&mut self, spec: JobSpec) {
         let job_id = spec.job_id.clone();
+        // 排空态（ADR-0017 升级排空）：拒收新任务，ack accepted=false，不占槽位。
+        // TOCTOU（闸门置位与本检查竞态）由 upgrader 的 wait_drained 兜住——已入
+        // 在途集的任务仍被等空，故正确性不破；仅极罕见地多收一个任务。
+        if self.gate.is_draining() {
+            self.uplink
+                .send(ChannelMessage {
+                    kind: Some(Kind::JobAck(JobAck {
+                        job_id: job_id.clone(),
+                        accepted: false,
+                        error: "draining for upgrade".into(),
+                    })),
+                })
+                .await;
+            return;
+        }
         // 去重：已在跑 → 拒收（不占槽位）。
         {
             let mut inflight = self.in_flight.write().await;
@@ -299,9 +321,10 @@ impl Handle {
         let cache = self.cache.clone();
         let logbuf = self.logbuf.clone();
         let cancels = self.cancels.clone();
+        let gate = self.gate.clone();
         let job_id_for_cleanup = job_id.clone();
         self.jobs.spawn(async move {
-            run_job(spec, cancel_rx, uplink, in_flight, workspace, cache, logbuf).await;
+            run_job(spec, cancel_rx, uplink, in_flight, workspace, cache, logbuf, gate).await;
             // 清理取消注册（已取消则 no-op；防 stale 发送器泄漏）。
             cancels.unregister(&job_id_for_cleanup).await;
         });
@@ -445,7 +468,8 @@ impl<'a> Backend<'a> {
 }
 
 /// 单个 job 的执行主体：running 上报 → 工作区解析 → 执行后端装配 → 步骤序贯 →
-/// 终态上报 → 在途释放。
+/// 终态上报 → 在途释放（释放经排空闸门唤醒等待排空的 upgrader）。
+#[allow(clippy::too_many_arguments)] // spec + 共享状态 + 取消信号，语义独立
 async fn run_job(
     spec: JobSpec,
     cancel_rx: watch::Receiver<bool>,
@@ -454,6 +478,7 @@ async fn run_job(
     workspace: Workspace,
     cache: Cache,
     logbuf: LogBuffer,
+    gate: DrainGate,
 ) {
     let job_id = spec.job_id.clone();
     let attempt = spec.attempt;
@@ -482,7 +507,7 @@ async fn run_job(
                     &format!("工作区解析失败：{e}"),
                 )
                 .await;
-            release_inflight(&in_flight, &job_id).await;
+            release_inflight(&in_flight, &job_id, &gate).await;
             return;
         }
     };
@@ -503,7 +528,7 @@ async fn run_job(
                 uplink
                     .report_terminal(&job_id, JobPhase::JobFailed, None, &e)
                     .await;
-                release_inflight(&in_flight, &job_id).await;
+                release_inflight(&in_flight, &job_id, &gate).await;
                 return;
             }
         },
@@ -534,7 +559,7 @@ async fn run_job(
     // 终态上报成功后延迟宽限删除日志缓冲（ADR-0013：宽限内崩溃重启缓冲留作
     // 孤儿补传取证；宽限到期由 logbuf 删除 worker 清理）。
     logbuf.clear_deferred(&job_id, attempt);
-    release_inflight(&in_flight, &job_id).await;
+    release_inflight(&in_flight, &job_id, &gate).await;
     // container_task drop：env 文件 + ASKPASS 任务毕即删（ADR-0018）。
 }
 
@@ -893,10 +918,20 @@ fn job_deadline(timeout_minutes: i64) -> Option<Instant> {
     }
 }
 
-/// 从在途集释放一个 job（终态后）。
-async fn release_inflight(in_flight: &Arc<RwLock<Vec<String>>>, job_id: &str) {
+/// 从在途集释放一个 job（终态后），并经排空闸门唤醒等待排空的 upgrader
+/// （ADR-0017：升级排空等到在途集空）。仅在途集确含该 job 时通知，避免冗余唤醒。
+async fn release_inflight(
+    in_flight: &Arc<RwLock<Vec<String>>>,
+    job_id: &str,
+    gate: &DrainGate,
+) {
     let mut g = in_flight.write().await;
+    let was_present = g.iter().any(|j| j == job_id);
     g.retain(|j| j != job_id);
+    drop(g);
+    if was_present {
+        gate.notify_released();
+    }
 }
 
 /// Unix 毫秒时间戳（与 workspace.rs 同源；尽力而为：系统时钟异常回退 0）。

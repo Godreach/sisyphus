@@ -27,6 +27,7 @@ use std::sync::Arc;
 use cache::Cache;
 use channel::ChannelConfig;
 use tokio::sync::{RwLock, mpsc, watch};
+use upgrader::{DrainGate, UpgradeDeps, UpgradeUplink};
 use workspace::Workspace;
 
 use crate::logbuf::{DEFAULT_GRACE, LogBuffer};
@@ -66,7 +67,21 @@ pub struct Agent {
     runner: runner::Handle,
     workspace: workspace::Handle,
     cache: cache::Handle,
-    upgrader: upgrader::Handle,
+    /// upgrader 下行接收端（`run` 时装配 Handle——延后装配以支持 `with_upgrader_deps`
+    /// 在 `run` 前注入 fake 下载/启动器，避免测试真下载/真重启进程）。
+    upgrader_rx: mpsc::Receiver<sisyphus_proto::agent::ChannelMessage>,
+    /// 升级依赖包（下载器/启动器/当前二进制路径）。默认 `safe_stub`（不触发升级
+    /// 的测试即安全）；`Agent::new` 覆盖为 real，测试经 `with_upgrader_deps` 注入 fake。
+    upgrade_deps: UpgradeDeps,
+    /// 升级上行链路（ADR-0017：升级阶段经通道上报；`run_connection` set_live/flush）。
+    upgrade_uplink: UpgradeUplink,
+    /// 排空闸门（ADR-0017：升级排空时 runner 拒接新任务；runner 终态释放唤醒）。
+    /// runner Handle 持其克隆；upgrader Handle（`run` 装配）持其克隆。
+    drain_gate: DrainGate,
+    /// 升级成功信号发送端（upgrader 置位 → `run` 循环退出，旧进程退出）。
+    exit_tx: watch::Sender<bool>,
+    /// 升级成功信号接收端（`run` 循环 select 监听，置位即退出）。
+    exit_rx: watch::Receiver<bool>,
     /// 占位模块收帧观测（分派骨架断言面）。
     receipts: ReceiptLog,
 }
@@ -100,6 +115,7 @@ impl Agent {
             workspace_sampler,
             cache_state,
         )
+        .with_upgrader_deps(UpgradeDeps::real())
     }
 
     /// 以指定通道参数装配（测试注入短心跳/短退避/固定采样求确定性）。
@@ -130,6 +146,15 @@ impl Agent {
         // Handle 持一份工作区状态克隆（与组合根共享内部；run_connection 用根上那份）。
         let handle_state = workspace_state.clone();
         let handle_cache = cache_state.clone();
+        // 排空闸门（ADR-0017）：runner 拒接新任务 + 终态释放唤醒；upgrader 等在途空。
+        // runner Handle 与 upgrader Handle（run 装配）各持克隆共享同一内部。
+        let drain_gate = DrainGate::new();
+        // 升级上行链路（ADR-0017）：阶段经通道上报；run_connection set_live/flush。
+        let upgrade_uplink = UpgradeUplink::new();
+        // 升级成功信号：upgrader 置位 → run 循环退出（旧进程退出，新进程接管）。
+        let (exit_tx, exit_rx) = watch::channel(false);
+        // 升级依赖：默认 safe_stub（不触发升级的测试即安全）；Agent::new / 测试覆盖。
+        let upgrade_deps = UpgradeDeps::safe_stub();
         Self {
             config,
             channel_cfg,
@@ -147,13 +172,26 @@ impl Agent {
                 handle_state.clone(),
                 handle_cache.clone(),
                 logbuf,
+                drain_gate.clone(),
                 receipts.clone(),
             ),
             workspace: workspace::Handle::new(workspace_rx, handle_state, receipts.clone()),
             cache: cache::Handle::new(cache_rx, handle_cache, receipts.clone()),
-            upgrader: upgrader::Handle::new(upgrader_rx, receipts.clone()),
+            upgrader_rx,
+            upgrade_deps,
+            upgrade_uplink,
+            drain_gate,
+            exit_tx,
+            exit_rx,
             receipts,
         }
+    }
+
+    /// 覆盖升级依赖（测试注入 fake 下载器/启动器/当前二进制路径）。须在 `run`
+    /// 前调用；`Agent::new` 已覆盖为 real，测试据此注入 fake（不真下载/真重启）。
+    pub fn with_upgrader_deps(mut self, deps: UpgradeDeps) -> Self {
+        self.upgrade_deps = deps;
+        self
     }
 
     /// 日志缓冲句柄（runner 喂事件/测试断言）。
@@ -180,12 +218,28 @@ impl Agent {
     /// 常驻运行：占位模块循环 + 通道重连循环。断线即指数退避重连、永久
     /// 重试不自杀（认证拒绝/版本拒连/网络失败一律重试，日志写明原因）。
     /// `shutdown` 收到 `true` 时退出（测试/将来服务化用；生产主进程常驻）。
-    pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
+    pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
         // 各模块占位循环（收下行指令即记日志；真实执行随后续批次）。
         let runner_task = tokio::spawn(self.runner.run());
         let workspace_task = tokio::spawn(self.workspace.run());
         let cache_task = tokio::spawn(self.cache.run());
-        let upgrader_task = tokio::spawn(self.upgrader.run());
+        // upgrader Handle 延后到此装配（`with_upgrader_deps` 已在 `run` 前注入）：
+        // 消费 upgrader_rx / upgrade_deps / exit_tx，克隆其余共享状态。token 取
+        // channel_cfg（下载 Bearer），api_url 取 config（相对 download_url 解析），
+        // agent.json 路径取 config（失败计数持久化）。
+        let upgrader_handle = upgrader::Handle::new(
+            self.upgrader_rx,
+            self.upgrade_uplink.clone(),
+            self.drain_gate.clone(),
+            self.in_flight.clone(),
+            self.channel_cfg.token.clone(),
+            self.config.api_url.clone(),
+            self.upgrade_deps,
+            self.config.agent_json_path(),
+            Some(self.exit_tx.clone()),
+            self.receipts.clone(),
+        );
+        let upgrader_task = tokio::spawn(upgrader_handle.run());
 
         // 工作区占用采样循环（ADR-0011/0019：低频后台遍历，spawn 先采样一次；
         // 间隔取自 channel_cfg——测试注入短间隔避免真实 10 分钟 sleep）。
@@ -221,8 +275,11 @@ impl Agent {
                     &self.runner_uplink,
                     &self.workspace_state,
                     &self.cache_state,
+                    &self.upgrade_uplink,
                 ) => r,
                 _ = shutdown_requested(&mut shutdown) => break,
+                // 升级成功（upgrader spawn 新进程后置位）→ 旧进程退出，跳出重连循环。
+                _ = upgrade_exit_requested(&mut self.exit_rx) => break,
             };
             match outcome {
                 Ok(()) => tracing::info!("通道关闭（对端关流），进入退避重连"),
@@ -237,6 +294,7 @@ impl Agent {
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
                 _ = shutdown_requested(&mut shutdown) => break,
+                _ = upgrade_exit_requested(&mut self.exit_rx) => break,
             }
         }
 
@@ -254,6 +312,18 @@ impl Agent {
 /// 是否收到关闭信号（watch 值变 true；发送端弃置视为无信号——生产主进程
 /// 持发送端，进程生命即运行生命）。
 async fn shutdown_requested(rx: &mut watch::Receiver<bool>) -> bool {
+    if *rx.borrow() {
+        return true;
+    }
+    match rx.changed().await {
+        Ok(_) => *rx.borrow(),
+        Err(_) => false,
+    }
+}
+
+/// 是否收到升级成功信号（upgrader spawn 新进程后置位 watch；ADR-0017：旧进程
+/// 退出，新进程接管）。与 [`shutdown_requested`] 同形——电平触发，迟到订阅亦见。
+async fn upgrade_exit_requested(rx: &mut watch::Receiver<bool>) -> bool {
     if *rx.borrow() {
         return true;
     }

@@ -17,7 +17,7 @@
 //! 经 `Agent::run`：要注入可控 `in_flight` 集（判定孤儿——本批 runner 未实现，
 //! 在途集恒空；真实运行中 job 由 runner #59 维护），并显式控制两次连接
 //! （连接 A 活体 → 断线 → 连接 B 重放）。
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,13 +26,16 @@ use sisyphus_agent::Agent;
 use sisyphus_agent::channel::{Backoff, ChannelConfig, PlatformDiskSampler, StaticLabels};
 use sisyphus_agent::config::{self, Overrides};
 use sisyphus_proto::agent::{
-    CacheCommand, CacheDeleteRequest, CacheList, ChannelMessage, Handshake, JobReported,
-    UpgradeCommand, Version, WorkspaceCommand, WorkspaceList,
+    CacheCommand, CacheDeleteRequest, CacheList, ChannelMessage, Handshake, JobPhase,
+    JobReported, JobSpec, JobStep, ShellStep, UpgradeCommand, UpgradePhase,
+    Version, WorkspaceCommand, WorkspaceList,
     agent_channel_server::{AgentChannel, AgentChannelServer},
     cache_command::Kind as CacheKind,
     channel_message::Kind,
+    job_step::Kind as StepKind,
     workspace_command::Kind as WorkspaceKind,
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::{RwLock, mpsc, watch};
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::{Request, Response, Status, Streaming};
@@ -99,6 +102,12 @@ struct FakeState {
     workspace_lists: Mutex<Vec<WorkspaceList>>,
     /// 收到的缓存列表响应（CacheList，列表/删除集成断言面，ADR-0012）。
     cache_lists: Mutex<Vec<CacheList>>,
+    /// 收到的任务回执（JobAck——排空拒收断言面，ADR-0017）。
+    acks: Mutex<Vec<sisyphus_proto::agent::JobAck>>,
+    /// 收到的任务状态（JobStatus——排空等终态断言面，ADR-0017）。
+    statuses: Mutex<Vec<sisyphus_proto::agent::JobStatus>>,
+    /// 收到的升级阶段（UpgradeStatus——升级全流程断言面，ADR-0017）。
+    upgrade_statuses: Mutex<Vec<sisyphus_proto::agent::UpgradeStatus>>,
     /// 活动会话的下行发送器（测试注入下行指令用）。
     sessions: Mutex<Vec<mpsc::Sender<Result<ChannelMessage, Status>>>>,
     /// 断开信号：会话读取任务 select 监听，触发即关流（模拟 Server 中途掉线）。
@@ -134,6 +143,15 @@ impl FakeState {
     }
     fn cache_lists(&self) -> Vec<CacheList> {
         self.cache_lists.lock().expect("锁").clone()
+    }
+    fn acks(&self) -> Vec<sisyphus_proto::agent::JobAck> {
+        self.acks.lock().expect("锁").clone()
+    }
+    fn statuses(&self) -> Vec<sisyphus_proto::agent::JobStatus> {
+        self.statuses.lock().expect("锁").clone()
+    }
+    fn upgrade_statuses(&self) -> Vec<sisyphus_proto::agent::UpgradeStatus> {
+        self.upgrade_statuses.lock().expect("锁").clone()
     }
     fn last_session_tx(&self) -> mpsc::Sender<Result<ChannelMessage, Status>> {
         self.sessions
@@ -271,6 +289,11 @@ impl AgentChannel for FakeServer {
                             Some(Kind::CacheList(l)) => {
                                 state.cache_lists.lock().expect("锁").push(l)
                             }
+                            Some(Kind::JobAck(a)) => state.acks.lock().expect("锁").push(a),
+                            Some(Kind::JobStatus(s)) => state.statuses.lock().expect("锁").push(s),
+                            Some(Kind::UpgradeStatus(u)) => {
+                                state.upgrade_statuses.lock().expect("锁").push(u)
+                            }
                             _ => {}
                         }
                     }
@@ -314,6 +337,9 @@ fn fake_state(expect_token: Option<&str>, server_version: Version) -> Arc<FakeSt
         log_batches: Mutex::new(Vec::new()),
         workspace_lists: Mutex::new(Vec::new()),
         cache_lists: Mutex::new(Vec::new()),
+        acks: Mutex::new(Vec::new()),
+        statuses: Mutex::new(Vec::new()),
+        upgrade_statuses: Mutex::new(Vec::new()),
         sessions: Mutex::new(Vec::new()),
         drop_signal: watch::channel(false).0,
     })
@@ -482,6 +508,7 @@ async fn connect_once(
     let workspace = sisyphus_agent::workspace::Workspace::new(data_dir.join("workspaces"));
     let cache = sisyphus_agent::cache::Cache::new(data_dir.join("cache"), 0);
     let runner_uplink = sisyphus_agent::runner::RunnerUplink::new();
+    let upgrade_uplink = sisyphus_agent::upgrader::UpgradeUplink::new();
     sisyphus_agent::channel::run_connection(
         &cfg,
         &dispatch,
@@ -490,6 +517,7 @@ async fn connect_once(
         &runner_uplink,
         &workspace,
         &cache,
+        &upgrade_uplink,
     )
     .await
 }
@@ -801,6 +829,7 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
     let cache_a = std::sync::Arc::new(sisyphus_agent::cache::Cache::new(dir.path().join("cache"), 0));
     let (cfg_ha, dispatch_ha, logbuf_ha) = (cfg_a.clone(), dispatch_a.clone(), logbuf.clone());
     let runner_uplink_a = sisyphus_agent::runner::RunnerUplink::new();
+    let upgrade_uplink_a = sisyphus_agent::upgrader::UpgradeUplink::new();
     let conn_a = tokio::spawn(async move {
         sisyphus_agent::channel::run_connection(
             &cfg_ha,
@@ -810,6 +839,7 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
             &runner_uplink_a,
             &workspace_a,
             &cache_a,
+            &upgrade_uplink_a,
         )
         .await
     });
@@ -855,6 +885,7 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
     let cache_b = std::sync::Arc::new(sisyphus_agent::cache::Cache::new(dir.path().join("cache"), 0));
     let (cfg_hb, dispatch_hb, logbuf_hb) = (cfg_b.clone(), dispatch_b.clone(), logbuf.clone());
     let runner_uplink_b = sisyphus_agent::runner::RunnerUplink::new();
+    let upgrade_uplink_b = sisyphus_agent::upgrader::UpgradeUplink::new();
     let conn_b = tokio::spawn(async move {
         sisyphus_agent::channel::run_connection(
             &cfg_hb,
@@ -864,6 +895,7 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
             &runner_uplink_b,
             &workspace_b,
             &cache_b,
+            &upgrade_uplink_b,
         )
         .await
     });
@@ -1289,6 +1321,459 @@ async fn cache_delete_command_single_and_clear() {
     .expect("下发全清");
     wait_until(|| async { !k2_dir.exists() }).await;
     assert_eq!(cache.cache_bytes(), 0, "全清后 registry 空");
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+// ============================================================
+// 升级集成验收（ADR-0017；票 B3-T9 / #61）
+// ============================================================
+//
+// fake Server 经通道下发 UpgradeCommand，收 UpgradeStatus / JobAck / JobStatus；
+// agent 侧经 `with_upgrader_deps` 注入 fake 下载器/启动器（不真下载、不真重启
+// 进程），真实 runner 跑真实 job（排空断言面）。覆盖：
+// - 升级全流程阶段经通道可见 + spawn 构造点收到换入后的新路径；
+// - 排空：运行中 job 在途时升级阻塞、新 JobSpec 被拒收、job 终态后继续；
+// - 下载失败 / sha256 校验失败：保持旧版、上报错误、不换入；
+// - 连续 3 次启动失败退回 .old + Fallback 上报。
+
+/// sha256 → 小写 hex（测试自用，与 upgrader 内部同算法）。
+fn sha256_hex(bytes: &[u8]) -> String {
+    let d = Sha256::digest(bytes);
+    d.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 下载器观测：记录收到的 (url, token) 序列。
+type DlSeen = Arc<Mutex<Vec<(String, Option<String>)>>>;
+/// 启动器观测：记录被 spawn 的二进制路径序列。
+type SpawnSeen = Arc<Mutex<Vec<PathBuf>>>;
+
+/// fake 下载器：配定字节或错误，记录收到的 url + token。
+struct FakeDownloader {
+    bytes: Result<Vec<u8>, String>,
+    seen: DlSeen,
+}
+#[tonic::async_trait]
+impl sisyphus_agent::upgrader::Downloader for FakeDownloader {
+    async fn download(
+        &self,
+        url: &str,
+        token: Option<&str>,
+    ) -> Result<Vec<u8>, sisyphus_agent::upgrader::DownloadError> {
+        self.seen
+            .lock()
+            .expect("锁")
+            .push((url.to_string(), token.map(str::to_string)));
+        self.bytes
+            .clone()
+            .map_err(sisyphus_agent::upgrader::DownloadError)
+    }
+}
+
+/// fake 启动器：配定结果序列（每次 spawn 取一个），记录被 spawn 的二进制路径。
+struct FakeSpawner {
+    results: Vec<Result<(), String>>,
+    next: Arc<Mutex<usize>>,
+    recorded: SpawnSeen,
+}
+#[tonic::async_trait]
+impl sisyphus_agent::upgrader::Spawner for FakeSpawner {
+    async fn spawn(
+        &self,
+        bin: &Path,
+        _args: Vec<String>,
+    ) -> Result<(), sisyphus_agent::upgrader::SpawnFailure> {
+        self.recorded.lock().expect("锁").push(bin.to_path_buf());
+        let mut idx = self.next.lock().expect("锁");
+        let i = *idx;
+        *idx += 1;
+        match self.results.get(i) {
+            Some(Ok(())) => Ok(()),
+            Some(Err(e)) => Err(sisyphus_agent::upgrader::SpawnFailure(e.clone())),
+            None => Err(sisyphus_agent::upgrader::SpawnFailure(
+                "fake: 结果序列耗尽".into(),
+            )),
+        }
+    }
+}
+
+/// 装配组合根并 spawn `Agent::run`，注入升级依赖（fake 下载器/启动器/当前
+/// 二进制路径）。其余（runner / workspace / cache）与生产同款真实装配。
+fn spawn_agent_upgrade(
+    data_dir: &Path,
+    server_url: String,
+    token: Option<&str>,
+    deps: sisyphus_agent::upgrader::UpgradeDeps,
+) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+    let cfg = config::Config::load(
+        &Overrides {
+            server_url: Some(server_url.clone()),
+            data_dir: Some(data_dir.to_path_buf()),
+            ..Overrides::default()
+        },
+        &Overrides::default(),
+    )
+    .expect("配置");
+    let (ws_state, ws_sampler) = build_workspace(&cfg);
+    let cache_state = build_cache(&cfg);
+    let agent = Agent::with_channel_config(
+        cfg,
+        channel_config(server_url, token, data_dir),
+        ws_state,
+        ws_sampler,
+        cache_state,
+    )
+    .with_upgrader_deps(deps);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let task = tokio::spawn(agent.run(shutdown_rx));
+    (shutdown_tx, task)
+}
+
+/// 升级依赖包构造（下载器/启动器/当前二进制路径）。当前二进制写 `OLD`。
+/// `dl_seen` / `spawn_seen` 按引用传入、内部克隆——调用方保留所有权供断言。
+fn upgrade_deps(
+    bin: &Path,
+    dl_bytes: Result<Vec<u8>, String>,
+    spawn_results: Vec<Result<(), String>>,
+    dl_seen: &DlSeen,
+    spawn_seen: &SpawnSeen,
+) -> sisyphus_agent::upgrader::UpgradeDeps {
+    std::fs::write(bin, b"OLD").expect("写旧二进制");
+    let downloader: Arc<dyn sisyphus_agent::upgrader::Downloader> =
+        Arc::new(FakeDownloader {
+            bytes: dl_bytes,
+            seen: dl_seen.clone(),
+        });
+    let spawner: Arc<dyn sisyphus_agent::upgrader::Spawner> = Arc::new(FakeSpawner {
+        results: spawn_results,
+        next: Arc::new(Mutex::new(0)),
+        recorded: spawn_seen.clone(),
+    });
+    sisyphus_agent::upgrader::UpgradeDeps {
+        downloader,
+        spawner,
+        current_exe: bin.to_path_buf(),
+    }
+}
+
+/// 当前阶段是否已上报（含 error 子串匹配，空串 = 任意）。
+fn has_upgrade_phase(state: &Arc<FakeState>, phase: UpgradePhase, contains: &str) -> bool {
+    state
+        .upgrade_statuses()
+        .iter()
+        .any(|u| u.phase == phase as i32 && (contains.is_empty() || u.error.contains(contains)))
+}
+
+/// AC：升级全流程经通道——Draining → Downloading → Swapping → Restarting（成功），
+/// spawn 收到换入后的新路径二进制，当前换新、.old 保留旧，旧进程退出。
+#[tokio::test]
+async fn upgrade_full_flow_reports_phases_and_swaps_via_channel() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let bin_dir = tempfile::tempdir().expect("临时二进制目录");
+    let bin = bin_dir.path().join("agent.bin");
+    let new_bytes = b"NEW-BIN".to_vec();
+    let sha = sha256_hex(&new_bytes);
+    let dl_seen = Arc::new(Mutex::new(Vec::new()));
+    let spawn_seen = Arc::new(Mutex::new(Vec::new()));
+    let deps = upgrade_deps(&bin, Ok(new_bytes), vec![Ok(())], &dl_seen, &spawn_seen);
+
+    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, agent_task) =
+        spawn_agent_upgrade(dir.path(), format!("http://{addr}"), Some("sisa_abc"), deps);
+
+    wait_until(|| async { !state.sessions.lock().expect("锁").is_empty() }).await;
+    let tx = state.last_session_tx();
+    tx.send(Ok(ChannelMessage {
+        kind: Some(Kind::Upgrade(UpgradeCommand {
+            package_name: "agent-1.0.1".into(),
+            sha256: sha,
+            download_url: "http://get/pkg".into(),
+        })),
+    }))
+    .await
+    .expect("下发升级指令");
+
+    // 各阶段经通道上报。
+    wait_until(|| async { has_upgrade_phase(&state, UpgradePhase::UpgradeDraining, "") }).await;
+    wait_until(|| async { has_upgrade_phase(&state, UpgradePhase::UpgradeDownloading, "") }).await;
+    wait_until(|| async { has_upgrade_phase(&state, UpgradePhase::UpgradeSwapping, "") }).await;
+    wait_until(|| async { has_upgrade_phase(&state, UpgradePhase::UpgradeRestarting, "") }).await;
+
+    // spawn 构造点：收到的是换入后的当前路径（新二进制）。
+    wait_until(|| async { !spawn_seen.lock().expect("锁").is_empty() }).await;
+    assert_eq!(
+        spawn_seen.lock().expect("锁").clone(),
+        vec![bin.clone()],
+        "spawn 的是换入后的新路径二进制"
+    );
+    // 当前换新、.old 保留旧。
+    assert_eq!(std::fs::read(&bin).unwrap(), b"NEW-BIN", "当前已换新");
+    assert_eq!(
+        std::fs::read(format!("{}.old", bin.display())).unwrap(),
+        b"OLD",
+        ".old 保留旧"
+    );
+    // 下载器收到 Bearer token + 绝对 URL。
+    let dl = dl_seen.lock().expect("锁").clone();
+    assert_eq!(dl.len(), 1);
+    assert_eq!(dl[0].0, "http://get/pkg");
+    assert_eq!(dl[0].1.as_deref(), Some("sisa_abc"));
+    // 旧进程退出（exit 信号 → run 循环退出）。
+    wait_until(|| async { agent_task.is_finished() }).await;
+
+    let _ = shutdown_tx;
+    server_task.abort();
+}
+
+/// AC：排空——运行中 job 在途时升级阻塞排空；排空期间新 JobSpec 被拒收
+/// （ack accepted=false）；job 终态后升级继续下载；job-2 不被执行。
+#[tokio::test]
+async fn upgrade_drains_running_job_and_rejects_new_jobs() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let bin_dir = tempfile::tempdir().expect("临时二进制目录");
+    let bin = bin_dir.path().join("agent.bin");
+    let new_bytes = b"NEW-BIN".to_vec();
+    let sha = sha256_hex(&new_bytes);
+    let dl_seen = Arc::new(Mutex::new(Vec::new()));
+    let spawn_seen = Arc::new(Mutex::new(Vec::new()));
+    let deps = upgrade_deps(&bin, Ok(new_bytes), vec![Ok(())], &dl_seen, &spawn_seen);
+
+    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, agent_task) =
+        spawn_agent_upgrade(dir.path(), format!("http://{addr}"), Some("sisa_abc"), deps);
+
+    wait_until(|| async { !state.sessions.lock().expect("锁").is_empty() }).await;
+    let tx = state.last_session_tx();
+
+    // 先下一个 ~1s 的 job-1（进入在途）。
+    let sleep_cmd = if cfg!(unix) {
+        "sleep 1".to_string()
+    } else {
+        "ping -n 2 127.0.0.1".to_string()
+    };
+    tx.send(Ok(ChannelMessage {
+        kind: Some(Kind::JobSpec(Box::new(JobSpec {
+            job_id: "j1".into(),
+            steps: vec![JobStep {
+                name: "s".into(),
+                seq: 0,
+                kind: Some(StepKind::Shell(ShellStep { command: sleep_cmd })),
+            }],
+            ..Default::default()
+        }))),
+    }))
+    .await
+    .expect("下发 job-1");
+    wait_until(|| async {
+        state
+            .statuses()
+            .iter()
+            .any(|s| s.job_id == "j1" && s.phase == JobPhase::JobRunning as i32)
+    })
+    .await;
+
+    // 下升级指令 → Draining。
+    tx.send(Ok(ChannelMessage {
+        kind: Some(Kind::Upgrade(UpgradeCommand {
+            package_name: "agent-1.0.1".into(),
+            sha256: sha,
+            download_url: "http://get/pkg".into(),
+        })),
+    }))
+    .await
+    .expect("下发升级指令");
+    wait_until(|| async { has_upgrade_phase(&state, UpgradePhase::UpgradeDraining, "") }).await;
+
+    // 排空期间下 job-2 → 拒收（ack accepted=false，"draining for upgrade"）。
+    tx.send(Ok(ChannelMessage {
+        kind: Some(Kind::JobSpec(Box::new(JobSpec {
+            job_id: "j2".into(),
+            steps: vec![JobStep {
+                name: "s".into(),
+                seq: 0,
+                kind: Some(StepKind::Shell(ShellStep { command: "exit 0".into() })),
+            }],
+            ..Default::default()
+        }))),
+    }))
+    .await
+    .expect("下发 job-2（排空期）");
+    wait_until(|| async {
+        state
+            .acks()
+            .iter()
+            .any(|a| a.job_id == "j2" && !a.accepted && a.error.contains("draining"))
+    })
+    .await;
+    // job-2 未被执行（无 running 状态）。
+    assert!(
+        !state.statuses().iter().any(|s| s.job_id == "j2"),
+        "排空期 job-2 不应被执行"
+    );
+
+    // job-1 终态后排空完成 → 下载发生（Downloading，error 空）。
+    wait_until(|| async {
+        state.statuses().iter().any(|s| {
+            s.job_id == "j1"
+                && [JobPhase::JobSucceeded as i32, JobPhase::JobFailed as i32].contains(&s.phase)
+        })
+    })
+    .await;
+    wait_until(|| async { has_upgrade_phase(&state, UpgradePhase::UpgradeDownloading, "") }).await;
+    // 升级继续 → spawn 成功 → 旧进程退出。
+    wait_until(|| async { agent_task.is_finished() }).await;
+
+    let _ = shutdown_tx;
+    server_task.abort();
+}
+
+/// AC：下载失败——保持旧版、上报错误、不换入、不 spawn。
+#[tokio::test]
+async fn upgrade_download_failure_keeps_old_via_channel() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let bin_dir = tempfile::tempdir().expect("临时二进制目录");
+    let bin = bin_dir.path().join("agent.bin");
+    let dl_seen = Arc::new(Mutex::new(Vec::new()));
+    let spawn_seen = Arc::new(Mutex::new(Vec::new()));
+    let deps = upgrade_deps(
+        &bin,
+        Err("网络不可达".into()),
+        vec![Ok(())],
+        &dl_seen,
+        &spawn_seen,
+    );
+
+    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, agent_task) =
+        spawn_agent_upgrade(dir.path(), format!("http://{addr}"), Some("sisa_abc"), deps);
+
+    wait_until(|| async { !state.sessions.lock().expect("锁").is_empty() }).await;
+    let tx = state.last_session_tx();
+    tx.send(Ok(ChannelMessage {
+        kind: Some(Kind::Upgrade(UpgradeCommand {
+            package_name: "agent-1.0.1".into(),
+            sha256: "deadbeef".into(),
+            download_url: "http://get/pkg".into(),
+        })),
+    }))
+    .await
+    .expect("下发升级指令");
+
+    // 下载失败上报（Downloading + error）。
+    wait_until(|| async { has_upgrade_phase(&state, UpgradePhase::UpgradeDownloading, "下载失败") })
+        .await;
+    // 保持旧版、不换入、不 spawn。
+    assert_eq!(std::fs::read(&bin).unwrap(), b"OLD", "下载失败保持旧版");
+    assert!(!Path::new(&format!("{}.old", bin.display())).exists(), "未换入，无 .old");
+    assert!(
+        spawn_seen.lock().expect("锁").is_empty(),
+        "下载失败不 spawn"
+    );
+    // agent 仍运行（未退出）。
+    assert!(!agent_task.is_finished(), "下载失败不退出，继续跑");
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// AC：sha256 校验失败——弃、保持旧版、上报错误、不换入、不 spawn。
+#[tokio::test]
+async fn upgrade_sha_mismatch_keeps_old_via_channel() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let bin_dir = tempfile::tempdir().expect("临时二进制目录");
+    let bin = bin_dir.path().join("agent.bin");
+    let wrong_bytes = b"WRONG-BIN".to_vec();
+    let dl_seen = Arc::new(Mutex::new(Vec::new()));
+    let spawn_seen = Arc::new(Mutex::new(Vec::new()));
+    // 下载器返回 WRONG 字节，但指令 sha 指向 NEW → 不符。
+    let deps = upgrade_deps(&bin, Ok(wrong_bytes), vec![Ok(())], &dl_seen, &spawn_seen);
+
+    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, agent_task) =
+        spawn_agent_upgrade(dir.path(), format!("http://{addr}"), Some("sisa_abc"), deps);
+
+    wait_until(|| async { !state.sessions.lock().expect("锁").is_empty() }).await;
+    let tx = state.last_session_tx();
+    tx.send(Ok(ChannelMessage {
+        kind: Some(Kind::Upgrade(UpgradeCommand {
+            package_name: "agent-1.0.1".into(),
+            sha256: sha256_hex(b"NEW-BIN"),
+            download_url: "http://get/pkg".into(),
+        })),
+    }))
+    .await
+    .expect("下发升级指令");
+
+    wait_until(|| async {
+        has_upgrade_phase(&state, UpgradePhase::UpgradeDownloading, "sha256 校验失败")
+    })
+    .await;
+    assert_eq!(std::fs::read(&bin).unwrap(), b"OLD", "校验失败保持旧版");
+    assert!(!Path::new(&format!("{}.old", bin.display())).exists(), "未换入");
+    assert!(
+        spawn_seen.lock().expect("锁").is_empty(),
+        "校验失败不 spawn"
+    );
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// AC：连续 3 次启动失败自动换回 .old——Fallback 经通道上报、当前退回旧、
+/// .old 消失、agent 继续跑（不退出）。
+#[tokio::test]
+async fn upgrade_three_start_failures_roll_back_via_channel() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let bin_dir = tempfile::tempdir().expect("临时二进制目录");
+    let bin = bin_dir.path().join("agent.bin");
+    let new_bytes = b"NEW-BIN".to_vec();
+    let sha = sha256_hex(&new_bytes);
+    let dl_seen = Arc::new(Mutex::new(Vec::new()));
+    let spawn_seen = Arc::new(Mutex::new(Vec::new()));
+    let deps = upgrade_deps(
+        &bin,
+        Ok(new_bytes),
+        vec![Err("boom".into()), Err("boom".into()), Err("boom".into())],
+        &dl_seen,
+        &spawn_seen,
+    );
+
+    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, agent_task) =
+        spawn_agent_upgrade(dir.path(), format!("http://{addr}"), Some("sisa_abc"), deps);
+
+    wait_until(|| async { !state.sessions.lock().expect("锁").is_empty() }).await;
+    let tx = state.last_session_tx();
+    tx.send(Ok(ChannelMessage {
+        kind: Some(Kind::Upgrade(UpgradeCommand {
+            package_name: "agent-1.0.1".into(),
+            sha256: sha,
+            download_url: "http://get/pkg".into(),
+        })),
+    }))
+    .await
+    .expect("下发升级指令");
+
+    // 3 次启动失败 → Fallback 上报。
+    wait_until(|| async { has_upgrade_phase(&state, UpgradePhase::UpgradeFallback, "退回") }).await;
+    // 当前退回旧、.old 消失。
+    assert_eq!(std::fs::read(&bin).unwrap(), b"OLD", "3 次失败后退回旧版");
+    assert!(
+        !Path::new(&format!("{}.old", bin.display())).exists(),
+        "退回后 .old 已挪回当前"
+    );
+    assert_eq!(spawn_seen.lock().expect("锁").len(), 3, "重试 3 次");
+    // 退回后继续跑（未退出）。
+    assert!(!agent_task.is_finished(), "退回后继续跑，不退出");
 
     shutdown_tx.send(true).expect("关闭");
     agent_task.await.expect("agent 退出");
