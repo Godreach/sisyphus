@@ -1929,3 +1929,83 @@ fn local_git_repo_with_lockfile(parent: &Path, name: &str) -> (PathBuf, String) 
         .to_string();
     (repo, sha)
 }
+
+// ============================================================
+// 两后端切换（票 B3-T10 / #55）
+// ============================================================
+
+/// AC（B3-T10 / #55）：真实两后端切换——同一 agent 依次跑 host job 与 container
+/// job，runner 按 `exec_env` 逐 job 选后端：host job（`exec_env=None`）在宿主机后端
+/// 真实 shell 执行成功；container job（`exec_env=Container`）路由到容器后端、首步前
+/// `docker pull` 失败 → `JobFailed`（detail 含 "docker pull"）。
+///
+/// 用永不可达的镜像 registry（`.invalid` TLD，RFC 2606 保留、DNS 必返 NXDOMAIN）
+/// 保证无论宿主有无 docker / 网络都确定失败：无 docker 二进制 → spawn 失败；有
+/// daemon → DNS/manifest 失败。不依赖 `#[ignore]` 门控，CI 确定性绿（覆盖「两后端
+/// 切换」一条）；真实容器执行（pull 成功 + run）由既有 `#[ignore]` 用例覆盖。
+#[tokio::test]
+async fn backend_switches_per_job_host_runs_and_container_routes_to_pull() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, _ws, agent_task) =
+        spawn_agent(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
+
+    // host job：exec_env=None → 宿主机后端真实 shell 执行成功 + 输出 "host-ran"。
+    send_downlink(
+        &state,
+        shell_spec("job-host", "pipe", "host", "echo host-ran", vec![], vec![], 0),
+    )
+    .await;
+    let ack_h = await_ack(&state, "job-host", true).await;
+    assert!(ack_h.error.is_empty(), "host job 接受：{}", ack_h.error);
+    let term_h = await_terminal(&state, "job-host").await;
+    assert_eq!(term_h.phase(), JobPhase::JobSucceeded, "host job 宿主机后端成功");
+    wait_until(|| async {
+        output_bytes(&state, "job-host")
+            .windows(b"host-ran".len())
+            .any(|w| w == b"host-ran")
+    })
+    .await;
+    assert!(
+        String::from_utf8_lossy(&output_bytes(&state, "job-host")).contains("host-ran"),
+        "host job 输出 host-ran（宿主机后端真实执行）"
+    );
+
+    // container job：exec_env=Container{不可达 registry} → 容器后端、docker pull 失败。
+    send_downlink(
+        &state,
+        container_shell_spec(
+            "job-ctr",
+            "pipe",
+            "ctr",
+            "no.such.registry.invalid/sisyphus:none",
+            "echo should-not-run",
+            vec![],
+            vec![],
+            0,
+        ),
+    )
+    .await;
+    let ack_c = await_ack(&state, "job-ctr", true).await;
+    assert!(
+        ack_c.accepted,
+        "container job 接受（pull 在首步前、ack 时未知失败）"
+    );
+    let term_c = await_terminal(&state, "job-ctr").await;
+    assert_eq!(term_c.phase(), JobPhase::JobFailed, "container job pull 失败 → failed");
+    assert!(
+        term_c.detail.contains("docker pull"),
+        "container job 走容器后端（docker pull 失败，detail 点名）：{}",
+        term_c.detail
+    );
+    // 容器命令未执行（pull 失败前置、未 docker run）。
+    assert!(
+        !String::from_utf8_lossy(&output_bytes(&state, "job-ctr")).contains("should-not-run"),
+        "container job 命令未执行（pull 失败前置）"
+    );
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}

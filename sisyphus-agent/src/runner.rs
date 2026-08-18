@@ -95,15 +95,23 @@ impl RunnerUplink {
 
     /// 经活体发送器上行一帧（ack / running）。离线（无活体）则丢弃——ack 恒在
     /// 收到 JobSpec 的活体连接上发，running 离线丢失由重连 JobReported 兜底。
+    ///
+    /// 先克隆发送器出读锁再 send（与 [`crate::logbuf::LogBuffer::forward_live]
+    /// 同款）：避免持读锁期间 `tx.send` 阻塞与 `set_live(None)` 写锁互锁。
     async fn send(&self, msg: ChannelMessage) {
-        let live = self.live.read().await;
-        if let Some(tx) = live.as_ref() {
+        let live = self.live.read().await.clone();
+        if let Some(tx) = live {
             let _ = tx.send(msg).await;
         }
     }
 
     /// 上报终态：在线即发；离线则缓冲到 `pending_terminals`，重连 `flush_pending`
     /// 补发。同一 job 重复终态以最后一次为准（HashMap 覆盖）。
+    ///
+    /// 先克隆发送器出读锁再 send（同 [`Self::send`]）：避免持读锁期间 `tx.send`
+    /// 阻塞与 `set_live(None)` 写锁互锁。**发送失败（连接刚断）也落缓冲**——
+    /// 兜住「live 仍是 Some 但连接已断」的窗口：`set_live(None)` 在 `run_connection`
+    /// 清理期才置位，job 终态恰在此窗口完成时 `send` 返 `Err`，落缓冲待重连补发。
     async fn report_terminal(
         &self,
         job_id: &str,
@@ -117,17 +125,24 @@ impl RunnerUplink {
             exit_code,
             detail: detail.to_string(),
         };
-        let live = self.live.read().await;
-        match live.as_ref() {
+        let live = self.live.read().await.clone();
+        match live {
             Some(tx) => {
-                let _ = tx
+                if tx
                     .send(ChannelMessage {
-                        kind: Some(Kind::JobStatus(status)),
+                        kind: Some(Kind::JobStatus(status.clone())),
                     })
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    // live 仍是 Some 但发送失败（连接刚断）→ 落缓冲待重连补发。
+                    self.pending_terminals
+                        .lock()
+                        .await
+                        .insert(job_id.to_string(), status);
+                }
             }
             None => {
-                drop(live);
                 self.pending_terminals
                     .lock()
                     .await

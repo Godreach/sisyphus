@@ -480,9 +480,12 @@ impl Workspace {
 
     /// 经活体发送器上行一帧（断线 = 无发送器，记日志；单 writer 保写序——
     /// `out_tx` 与心跳/日志同一通道）。
+    ///
+    /// 先克隆发送器出读锁再 send（与 [`crate::logbuf::LogBuffer::forward_live]
+    /// 同款）：避免持读锁期间 `tx.send` 阻塞与 `set_live(None)` 写锁互锁。
     async fn send_up(&self, msg: ChannelMessage) {
-        let live = self.live.read().await;
-        if let Some(tx) = live.as_ref() {
+        let live = self.live.read().await.clone();
+        if let Some(tx) = live {
             if tx.send(msg).await.is_err() {
                 tracing::warn!("工作区列表响应发送失败：通道已关闭");
             }

@@ -158,14 +158,18 @@ impl UpgradeUplink {
     }
 
     /// 上报一个升级阶段：更新最新缓冲 + 在线即发；离线仅缓冲（重连补发）。
+    ///
+    /// 先克隆发送器出读锁再 send（与 `logbuf::forward_live` 同款）：避免持读锁
+    /// 期间 `tx.send` 阻塞与 `set_live(None)` 写锁互锁。最新阶段恒已落 `pending`
+    /// 缓冲（下方先写缓冲再 send），故发送失败不丢——重连 `flush_pending` 补发。
     pub async fn report(&self, phase: UpgradePhase, error: &str) {
         let status = UpgradeStatus {
             phase: phase as i32,
             error: error.to_string(),
         };
         *self.pending.lock().expect("uplink 锁") = Some(status.clone());
-        let live = self.live.read().await;
-        if let Some(tx) = live.as_ref() {
+        let live = self.live.read().await.clone();
+        if let Some(tx) = live {
             let _ = tx
                 .send(ChannelMessage {
                     kind: Some(Kind::UpgradeStatus(status)),

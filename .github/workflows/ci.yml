@@ -29,3 +29,32 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
+
+  # Agent 全平台矩阵（票 B3-T10 / #55，ADR-0010 发布矩阵 Linux/Windows）：
+  # agent 只依赖 sisyphus-proto（vendored protoc 跨平台），不拉 server，故可在
+  # Windows 上独立构建/测试。docker 门控用例 `#[ignore]` 由 `cargo test` 默认跳过
+  # （需 `--ignored` 手动跑），故矩阵天然排除 docker 依赖、CI 确定性绿。
+  agent-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build agent
+        run: cargo build -p sisyphus-agent
+
+      - name: Test agent（#[ignore] docker 用例默认跳过）
+        run: cargo test -p sisyphus-agent
+
+      - name: Clippy agent
+        run: cargo clippy -p sisyphus-agent -- -D warnings

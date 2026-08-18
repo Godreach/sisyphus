@@ -233,9 +233,16 @@ impl LogBuffer {
 
     /// 活体转发：连接在线（`set_live(Some)`）时把帧送入上行邮箱（单 writer
     /// 保序）；断线（`None`）时不送——事件已落盘，重连重放补传。
+    ///
+    /// **先克隆发送器出读锁再 send**：避免「持读锁期间 `tx.send` 阻塞」与
+    /// [`LogBuffer::set_live`]`(None)` 的写锁互锁。断线时 writer 阻塞于上行流控、
+    /// `out_tx` 满；若 `forward_live` 持读锁等 `send`，`run_connection` 清理的
+    /// `set_live(None)` 写锁永等 → agent 卡在清理无法重连。克隆后读锁即释，
+    /// `set_live(None)` 可推进；`send` 在 writer 被清理 abort 后返 `Err`，事件已
+    /// 落盘由重连重放兜底（ADR-0013）。
     async fn forward_live(&self, msg: &ChannelMessage) {
-        let live = self.live.read().await;
-        if let Some(tx) = live.as_ref()
+        let live = self.live.read().await.clone();
+        if let Some(tx) = live
             && tx.send(msg.clone()).await.is_err()
         {
             // 连接刚断（对端关流）：事件已落盘，重连重放兜底，不判败。
