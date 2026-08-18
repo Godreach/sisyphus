@@ -7,8 +7,7 @@
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { authApi } from '@/api/client'
-import { ApiError, NETWORK_ERROR_CODE } from '@/api/http'
+import { describeSubmitError } from '@/api/errors'
 import { useAuthStore } from '@/stores/auth'
 import { useI18n } from 'vue-i18n'
 
@@ -22,33 +21,16 @@ const password = ref('')
 const submitting = ref(false)
 const errorMessage = ref('')
 
-/** 登录失败的错误信息（按 code 分支）：401 / 429 / 网络 / 其它。 */
-function describeError(err: unknown): string {
-  if (err instanceof ApiError) {
-    if (err.code === 'RATE_LIMITED') {
-      const ms = err.retryAfterMs
-      return ms != null ? t('auth.loginRateLimited', { seconds: Math.ceil(ms / 1000) }) : t('auth.loginRateLimitedGeneric')
-    }
-    if (err.code === NETWORK_ERROR_CODE) {
-      return t('errors.network')
-    }
-    // 401 与其它 4xx：直接用后端 message（人读、可展示）。
-    return err.message
-  }
-  return t('errors.generic')
-}
-
 async function submit(): Promise<void> {
   errorMessage.value = ''
   submitting.value = true
   try {
-    const me = await authApi.login({ username: username.value, password: password.value })
-    auth.setAuthed({ username: me.username, isAdmin: me.is_admin })
-    // 登录成功回跳原目标（路由守卫写入的 redirect 查询参数）。
+    // 登录换会话 cookie（auth store 单一动作），成功即回跳原目标。
+    await auth.login(username.value, password.value)
     const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/'
     await router.replace(redirect)
   } catch (err) {
-    errorMessage.value = describeError(err)
+    errorMessage.value = describeSubmitError(err)
   } finally {
     submitting.value = false
   }

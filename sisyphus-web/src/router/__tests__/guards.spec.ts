@@ -1,6 +1,7 @@
-// 路由守卫行为测试（ADR-0014，票 B4-T1 骨架）：
+// 路由守卫行为测试（ADR-0014/0010，票 B4-T1 骨架 + B4-T2 空库判定）：
 // - 会话恢复锚点：状态未知时经 `/auth/me`（restore）恢复
 // - 未认证访问受保护页 → 登录页 + redirect 回跳参数
+// - 空库（用户表为空）→ 受保护页先去 /setup 引导（不弹登录）
 // - 已登录访问 login/setup → 回首页
 // - 公开路由放行、已认证访问受保护页放行
 // 只测外部行为（导航返回值），不经真实浏览器路由。
@@ -60,6 +61,13 @@ describe('sessionGuard', () => {
     const auth = useAuthStore()
     auth.status = 'guest'
     auth.user = null
+    // 非空库：`POST /auth/setup` 404 → 回落登录页。
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ code: 'NOT_FOUND', message: 'x' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
 
     const to = route({ name: 'build-detail', fullPath: '/projects/a/pipelines/p/builds/42', meta: {} })
     const result = await sessionGuard(to)
@@ -67,6 +75,43 @@ describe('sessionGuard', () => {
       name: 'login',
       query: { redirect: '/projects/a/pipelines/p/builds/42' },
     })
+  })
+
+  it('空库（POST /auth/setup 422 探测）→ 受保护页先去 /setup 引导', async () => {
+    const auth = useAuthStore()
+    auth.status = 'guest'
+    auth.user = null
+    // 用户表为空：`POST /auth/setup` 用非法输入探测回落 422（空库不建号）
+    // → 去 /setup。
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          code: 'VALIDATION_FAILED',
+          message: 'x',
+          detail: { errors: [] },
+        }),
+        {
+          status: 422,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      ),
+    )
+
+    const result = await sessionGuard(route({ name: 'projects', fullPath: '/projects', meta: {} }))
+    expect(result).toEqual({ name: 'setup' })
+    // 探测结果缓存：随后同一 store 不重复探测。
+    await sessionGuard(route({ name: 'agents', fullPath: '/agents', meta: {} }))
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('空库判定失败（网络）→ 回落登录（非空库语义）', async () => {
+    const auth = useAuthStore()
+    auth.status = 'guest'
+    auth.user = null
+    globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
+
+    const result = await sessionGuard(route({ name: 'projects', fullPath: '/projects', meta: {} }))
+    expect(result).toEqual({ name: 'login', query: { redirect: '/projects' } })
   })
 
   it('server 不可达（unreachable）访问受保护页 → 放行（不弹登录，网络面非认证面）', async () => {

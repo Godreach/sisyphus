@@ -1,12 +1,14 @@
-// 路由守卫（ADR-0014，票 B4-T1 骨架）：
+// 路由守卫（ADR-0014/0010，票 B4-T1 骨架 + B4-T2 空库判定）：
 //
 // - `sessionGuard`：会话恢复锚点——导航时若认证态未知，先调 `/auth/me`
 //   恢复（SPA 刷新/深链直接命中）；未认证访问受保护页重定向登录（带回跳
 //   参数），登录成功回跳原目标（LoginView 消费 `route.query.redirect`）。
 //   已登录访问 login/setup 直接回首页（认证面不留空屏）。
-// - 空库自动判定（guest 访问受保护页 → 若 DB 空则先去 `/setup`）属
-//   B4-T2 setup wizard 的实现细节（需 `POST /auth/setup` 404 探测），
-//   本票不越界。
+// - 空库判定（ADR-0010 setup wizard 进入条件）：guest 访问受保护页 →
+//   经 `POST /auth/setup` 非法输入探测（空库 422 / 非空库 404）——用户
+//   表为空则先去 `/setup` 引导（不弹登录，避免「先建账号再登录」的两步），
+//   非空才去 `/login`。探测结果缓存；用户显式离开引导页后（dismiss）不再
+//   重定向。
 
 import type { NavigationGuardReturn, RouteLocationNormalized } from 'vue-router'
 
@@ -26,7 +28,8 @@ function isPublic(to: RouteLocationNormalized): boolean {
 
 /**
  * 会话守卫：导航到受保护页前确保认证态已判定；未登录重定向登录页，
- * 带 `redirect` 查询参数供登录成功回跳。
+ * 带 `redirect` 查询参数供登录成功回跳。空库（用户表为空）时未登录访问
+ * 受保护页先去 `/setup` 引导（ADR-0010）——否则登录页无账号可登。
  */
 export const sessionGuard: GuardFn = async (to) => {
   const auth = useAuthStore()
@@ -45,11 +48,15 @@ export const sessionGuard: GuardFn = async (to) => {
   }
 
   if (!auth.isAuthed) {
-    // 未认证访问受保护页 → 登录页，携带原目标供回跳。
     // server 不可达（unreachable）时不弹登录：网络不通不是「未登录」，
     // 放行让页面以 NETWORK_ERROR 展示（运维面，非认证面）。
     if (auth.status === 'unreachable') {
       return true
+    }
+    // 空库判定（仅 guest）：用户表为空 → 先去 /setup 引导（ADR-0010）。
+    // 显式离开引导页（dismiss）或探测失败（非 404）时回落 /login。
+    if (await auth.isSetupNeeded()) {
+      return { name: 'setup' }
     }
     return {
       name: 'login',

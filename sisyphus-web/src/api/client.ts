@@ -4,6 +4,12 @@
 
 import { http } from './http-singleton'
 import type { CredentialsRequest, MeResponse } from './http'
+import type {
+  CreateAgentRequest,
+  CreateProjectRequest,
+  CreatedAgentResponse,
+  ProjectResponse,
+} from './types'
 
 /** 认证端点（后端 `api/auth.rs`，ADR-0014）。 */
 export const authApi = {
@@ -22,4 +28,18 @@ export const authApi = {
 export const setupApi = {
   setup: (req: CredentialsRequest) =>
     http.post<MeResponse>('auth/setup', { json: req }),
+}
+
+/** Agent 端点（后端 `api/agents.rs`，ADR-0010/0008；管理面全局 admin）。 */
+export const agentsApi = {
+  /** 建 Agent 条目：签发 per-Agent token + 一次性注册码（明文仅此一次）。 */
+  create: (req: CreateAgentRequest) =>
+    http.post<CreatedAgentResponse>('agents', { json: req }),
+}
+
+/** 项目端点（后端 `api/projects.rs`；建项目为全局 admin 专属）。 */
+export const projectsApi = {
+  /** 建项目（git/svn + 仓库 URL + 可选默认分支）。 */
+  create: (req: CreateProjectRequest) =>
+    http.post<ProjectResponse>('projects', { json: req }),
 }
