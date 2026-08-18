@@ -11,7 +11,9 @@
 pub mod cache;
 pub mod channel;
 pub mod config;
+pub mod exec;
 pub mod logbuf;
+pub mod redact;
 pub mod register;
 pub mod runner;
 pub mod upgrader;
@@ -40,11 +42,14 @@ pub struct Agent {
     channel_cfg: ChannelConfig,
     /// 下行分派（reader → 各模块通道）。
     dispatch: channel::Dispatch,
-    /// 在途任务集（runner 维护，重连随 JobReported 上报；本批为空集）。
+    /// 在途任务集（runner 维护，重连随 JobReported 上报）。
     in_flight: Arc<RwLock<Vec<String>>>,
     /// 日志 seq 缓冲（ADR-0007/0013：先落盘再发出、断线累计、重连幂等重放、
     /// 终态宽限删除/孤儿补传后删除）。
     logbuf: LogBuffer,
+    /// runner 上行链路（JobAck/JobStatus 活体发送 + 离线终态缓冲；`run_connection`
+    /// 每连接 set_live / flush_pending）。
+    runner_uplink: runner::RunnerUplink,
     /// 工作区共享状态（ADR-0011：根 + 活体上行 + 占用采样源；`run_connection`
     /// 持引用 set_live/读采样）。
     workspace_state: Workspace,
@@ -102,17 +107,27 @@ impl Agent {
         };
         let receipts = ReceiptLog::default();
         let logbuf = LogBuffer::new(config.logbuf_dir(), DEFAULT_GRACE);
+        let in_flight = Arc::new(RwLock::new(Vec::new()));
+        let runner_uplink = runner::RunnerUplink::new();
         // Handle 持一份工作区状态克隆（与组合根共享内部；run_connection 用根上那份）。
         let handle_state = workspace_state.clone();
         Self {
             config,
             channel_cfg,
             dispatch,
-            in_flight: Arc::new(RwLock::new(Vec::new())),
-            logbuf,
+            in_flight: in_flight.clone(),
+            logbuf: logbuf.clone(),
+            runner_uplink: runner_uplink.clone(),
             workspace_state,
             workspace_sampler,
-            runner: runner::Handle::new(runner_rx, receipts.clone()),
+            runner: runner::Handle::new(
+                runner_rx,
+                runner_uplink,
+                in_flight,
+                handle_state.clone(),
+                logbuf,
+                receipts.clone(),
+            ),
             workspace: workspace::Handle::new(workspace_rx, handle_state, receipts.clone()),
             cache: cache::Handle::new(cache_rx, receipts.clone()),
             upgrader: upgrader::Handle::new(upgrader_rx, receipts.clone()),
@@ -164,6 +179,7 @@ impl Agent {
                     &self.dispatch,
                     self.in_flight.clone(),
                     &self.logbuf,
+                    &self.runner_uplink,
                     &self.workspace_state,
                 ) => r,
                 _ = shutdown_requested(&mut shutdown) => break,

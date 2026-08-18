@@ -402,6 +402,7 @@ pub async fn run_connection(
     dispatch: &Dispatch,
     in_flight: Arc<RwLock<Vec<String>>>,
     logbuf: &LogBuffer,
+    runner_uplink: &crate::runner::RunnerUplink,
     workspace: &Workspace,
 ) -> Result<(), ChannelError> {
     let channel = tonic::transport::Endpoint::from_shared(cfg.server_url.clone())
@@ -497,6 +498,10 @@ pub async fn run_connection(
     // workspace Handle 的列表响应经此单 writer 外送，断线置 None（断线不重发
     // 列表查询，UI 可重发）。
     workspace.set_live(Some(out_tx.clone())).await;
+    // runner 上行链路（ADR-0008/0013）：JobAck/JobStatus 活体发送 + 离线终态
+    // 缓冲。set_live 先于 flush_pending——离线期间完成的终态经此 sender 补发
+    // （< orphan 宽限窗口；超宽限由 Server orphan grace 兜底）。
+    runner_uplink.set_live(Some(out_tx.clone())).await;
     for msg in logbuf
         .replay_all()
         .await
@@ -510,6 +515,8 @@ pub async fn run_connection(
     for (job_id, attempt) in logbuf.orphans(&job_ids) {
         logbuf.clear_now(&job_id, attempt);
     }
+    // 离线期间缓冲的终态补发（日志重放之后；同一 writer 保写序）。
+    runner_uplink.flush_pending(&out_tx).await;
 
     // 心跳循环：15s 一报，附带磁盘占用（ADR-0019）。独立 task——连接期内
     // 与 reader 并行；流结束由外层 abort。工作区占用从 [`Workspace`] 的低频
@@ -540,6 +547,7 @@ pub async fn run_connection(
     let result = read_and_dispatch(&mut inbound, dispatch).await;
     logbuf.set_live(None).await;
     workspace.set_live(None).await;
+    runner_uplink.set_live(None).await;
     heartbeat.abort();
     writer.abort();
     result
@@ -674,7 +682,7 @@ mod tests {
         // 每段退避都应在该段指数值 ±20% 带内（含上限段：60 ± 12）。
         for _ in 0..20 {
             let d = b.next_delay().as_secs_f64();
-            let nominal = ((10.0 * 2f64.powi((b.attempt - 1) as i32)).min(60.0));
+            let nominal = (10.0 * 2f64.powi((b.attempt - 1) as i32)).min(60.0);
             assert!(
                 (nominal * 0.8 - 1e-6..=nominal * 1.2 + 1e-6).contains(&d),
                 "退避段 {nominal}s 的抖动应在 ±20% 带内：{d}"

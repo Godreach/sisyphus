@@ -189,7 +189,7 @@ impl AgentChannel for FakeServer {
         while let Some(msg) = inbound.message().await.map_err(|e| Status::internal(e.to_string()))?
         {
             if let Some(Kind::Handshake(h)) = msg.kind {
-                agent_version = h.agent_version.clone();
+                agent_version = h.agent_version;
                 state
                     .handshakes
                     .lock()
@@ -215,7 +215,7 @@ impl AgentChannel for FakeServer {
             let _ = tx
                 .send(Ok(ChannelMessage {
                     kind: Some(Kind::Handshake(Handshake {
-                        agent_version: Some(state.server_version.clone()),
+                        agent_version: Some(state.server_version),
                         agent_name: "fake-server".into(),
                     })),
                 }))
@@ -227,7 +227,7 @@ impl AgentChannel for FakeServer {
             if tx
                 .send(Ok(ChannelMessage {
                     kind: Some(Kind::Handshake(Handshake {
-                        agent_version: Some(state.server_version.clone()),
+                        agent_version: Some(state.server_version),
                         agent_name: "fake-server".into(),
                     })),
                 }))
@@ -408,11 +408,13 @@ async fn connect_once(
     let logbuf =
         sisyphus_agent::logbuf::LogBuffer::new(data_dir.join("logbuf"), Duration::from_secs(60));
     let workspace = sisyphus_agent::workspace::Workspace::new(data_dir.join("workspaces"));
+    let runner_uplink = sisyphus_agent::runner::RunnerUplink::new();
     sisyphus_agent::channel::run_connection(
         &cfg,
         &dispatch,
         Arc::new(RwLock::new(Vec::new())),
         &logbuf,
+        &runner_uplink,
         &workspace,
     )
     .await
@@ -712,12 +714,14 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
         dir.path().join("workspaces"),
     ));
     let (cfg_ha, dispatch_ha, logbuf_ha) = (cfg_a.clone(), dispatch_a.clone(), logbuf.clone());
+    let runner_uplink_a = sisyphus_agent::runner::RunnerUplink::new();
     let conn_a = tokio::spawn(async move {
         sisyphus_agent::channel::run_connection(
             &cfg_ha,
             &dispatch_ha,
             in_flight_a,
             &logbuf_ha,
+            &runner_uplink_a,
             &workspace_a,
         )
         .await
@@ -747,12 +751,14 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
         dir.path().join("workspaces"),
     ));
     let (cfg_hb, dispatch_hb, logbuf_hb) = (cfg_b.clone(), dispatch_b.clone(), logbuf.clone());
+    let runner_uplink_b = sisyphus_agent::runner::RunnerUplink::new();
     let conn_b = tokio::spawn(async move {
         sisyphus_agent::channel::run_connection(
             &cfg_hb,
             &dispatch_hb,
             in_flight_b,
             &logbuf_hb,
+            &runner_uplink_b,
             &workspace_b,
         )
         .await
