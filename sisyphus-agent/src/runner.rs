@@ -37,22 +37,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sisyphus_proto::agent::{
-    channel_message::Kind, execution_env::Kind as EnvKind, job_step::Kind as StepKind,
-    log_event::Kind as EventKind, JobAck, JobPhase, JobSpec, JobStatus, LogEvent, OutputChunk,
-    StepEvent, Stream, Truncated, ChannelMessage,
+    ChannelMessage, JobAck, JobPhase, JobSpec, JobStatus, channel_message::Kind,
+    execution_env::Kind as EnvKind, job_step::Kind as StepKind,
 };
-use tokio::io::AsyncReadExt;
-use tokio::sync::{mpsc, watch, RwLock, Mutex};
+use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use tokio::task::JoinSet;
 
+use crate::ReceiptLog;
+use crate::checkout;
 use crate::exec::{self, SpawnError, StepOutcome};
 use crate::logbuf::LogBuffer;
-use crate::redact::Redactor;
+use crate::stepio::{Truncation, emit_step, run_streamed_step, step_event};
 use crate::workspace::{self, Workspace};
-use crate::ReceiptLog;
 
-/// 单次 stdout/stderr 读取缓冲（16KiB；流式背压与 seq 粒度的平衡）。
-const READ_BUF: usize = 16 * 1024;
 /// per-job 日志上限默认值（ADR-0013：`log_limit_bytes = 0` → 50 MB）。
 const DEFAULT_LOG_LIMIT: u64 = 50 * 1024 * 1024;
 
@@ -111,10 +108,11 @@ impl RunnerUplink {
         let live = self.live.read().await;
         match live.as_ref() {
             Some(tx) => {
-                let _ = tx.send(ChannelMessage {
-                    kind: Some(Kind::JobStatus(status)),
-                })
-                .await;
+                let _ = tx
+                    .send(ChannelMessage {
+                        kind: Some(Kind::JobStatus(status)),
+                    })
+                    .await;
             }
             None => {
                 drop(live);
@@ -131,10 +129,11 @@ impl RunnerUplink {
     pub async fn flush_pending(&self, tx: &mpsc::Sender<ChannelMessage>) {
         let pending = std::mem::take(&mut *self.pending_terminals.lock().await);
         for (_, status) in pending {
-            let _ = tx.send(ChannelMessage {
-                kind: Some(Kind::JobStatus(status)),
-            })
-            .await;
+            let _ = tx
+                .send(ChannelMessage {
+                    kind: Some(Kind::JobStatus(status)),
+                })
+                .await;
         }
     }
 }
@@ -298,15 +297,16 @@ impl Handle {
 // job 执行
 // ============================================================
 
-/// job 终态（run_steps 产出，映射到 JobPhase 上报）。
+/// job 终态（run_steps 产出，映射到 JobPhase 上报；checkout::run 同形返回，
+/// 票 B3-T6 / #60）。`pub(crate)`：runner 与 checkout 共用，不外暴露。
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum JobOutcome {
+pub(crate) enum JobOutcome {
     Succeeded,
     /// 步骤非零退出（携带退出码 + detail）。
     Failed(i32, String),
     Cancelled,
     Timeout,
-    /// 步骤 spawn 失败（非零退出语义，detail 点名）。
+    /// 步骤 spawn 失败 / 缺二进制 / 规划错（非零退出语义，detail 点名）。
     SpawnFailed(String),
 }
 
@@ -387,7 +387,9 @@ async fn run_job(
     .await;
 
     let (phase, exit_code, detail) = outcome_phase(outcome);
-    uplink.report_terminal(&job_id, phase, exit_code, &detail).await;
+    uplink
+        .report_terminal(&job_id, phase, exit_code, &detail)
+        .await;
     // 终态上报成功后延迟宽限删除日志缓冲（ADR-0013：宽限内崩溃重启缓冲留作
     // 孤儿补传取证；宽限到期由 logbuf 删除 worker 清理）。
     logbuf.clear_deferred(&job_id, attempt);
@@ -407,7 +409,8 @@ fn outcome_phase(outcome: JobOutcome) -> (JobPhase, Option<i32>, String) {
 }
 
 /// 步骤序贯执行：shell 步骤起进程、流式编码日志、判退出/取消/超时；checkout
-/// 步骤占位失败（B3-T6）。任一步骤失败/取消/超时即终止并返回对应终态。
+/// 步骤交 [`checkout::run`]（B3-T6 / #60）。任一步骤失败/取消/超时即终止并
+/// 返回对应终态。
 async fn run_steps(
     spec: &JobSpec,
     ws_dir: &Path,
@@ -417,8 +420,8 @@ async fn run_steps(
     deadline: Option<Instant>,
     logbuf: &LogBuffer,
 ) -> JobOutcome {
-    // per-job 日志截断计数（ADR-0013：per-job 上限，非 per-step）：全步骤共享
-    // 同一计数，多步任务的总输出不越限。两流（stdout/stderr）亦共享。
+    // per-job 日志截断计数（ADR-0013：per-job 上限，非 per-step）：全步骤 + 全
+    // 子命令共享同一计数，多步任务的总输出不越限。两流（stdout/stderr）亦共享。
     let trunc = Arc::new(Truncation::new(log_limit));
     for step in &spec.steps {
         let step_seq = step.seq;
@@ -435,7 +438,7 @@ async fn run_steps(
                 )
                 .await;
 
-                let mut spawned = match exec::spawn_shell(&command, ws_dir, &spec.env) {
+                let spawned = match exec::spawn_shell(&command, ws_dir, &spec.env) {
                     Ok(s) => s,
                     Err(SpawnError(e)) => {
                         emit_step(
@@ -448,35 +451,22 @@ async fn run_steps(
                         return JobOutcome::SpawnFailed(format!("步骤 {step_seq} spawn 失败：{e}"));
                     }
                 };
-                let (stdout, stderr) = spawned.take_streams();
-
-                // 截断计数 per-job（循环外创建，两流共享）；脱敏器 per-stream（跨块边界）。
-                let out_task = tokio::spawn(stream_output(
-                    stdout,
-                    Stream::Stdout,
-                    secret_values.to_vec(),
-                    trunc.clone(),
-                    spec.job_id.clone(),
-                    spec.attempt,
-                    logbuf.clone(),
-                ));
-                let err_task = tokio::spawn(stream_output(
-                    stderr,
-                    Stream::Stderr,
-                    secret_values.to_vec(),
-                    trunc.clone(),
-                    spec.job_id.clone(),
-                    spec.attempt,
-                    logbuf.clone(),
-                ));
-
-                // job 级超时：本步取剩余配额（到点即 0 → 立即 timeout）。
+                // job 级超时：本步取剩余配额（到点即 0 → 立即 timeout）。流式编码 +
+                // wait（取消/超时竞争）+ 回收流任务封在 run_streamed_step（与 checkout
+                // 子命令同道）。
                 let step_timeout = deadline.map(|dl| dl.saturating_duration_since(Instant::now()));
-                let outcome = spawned.wait_until(step_timeout, cancel_rx.clone()).await;
-
-                // 回收读流任务（确保输出在 step end 前全部编码）。
-                let _ = out_task.await;
-                let _ = err_task.await;
+                let outcome = run_streamed_step(
+                    spawned,
+                    None,
+                    secret_values.to_vec(),
+                    trunc.clone(),
+                    &spec.job_id,
+                    spec.attempt,
+                    step_timeout,
+                    cancel_rx.clone(),
+                    logbuf,
+                )
+                .await;
 
                 let ended = now_ms();
                 match outcome {
@@ -489,7 +479,10 @@ async fn run_steps(
                         )
                         .await;
                         if code != 0 {
-                            return JobOutcome::Failed(code, format!("步骤 {step_seq} 退出码 {code}"));
+                            return JobOutcome::Failed(
+                                code,
+                                format!("步骤 {step_seq} 退出码 {code}"),
+                            );
                         }
                         // 退出码 0 → 下一步。
                     }
@@ -515,24 +508,86 @@ async fn run_steps(
                     }
                 }
             }
-            Some(StepKind::Checkout(_)) => {
-                // checkout 执行器占位，待 B3-T6（#60）：step start/end + 失败。
+            Some(StepKind::Checkout(checkout)) => {
+                // checkout 执行器（B3-T6 / #60）：命令编排 + 凭据递送 + 脱敏链路 +
+                // 取消/超时。step start/end 在本层包裹，子命令输出经 stepio 流式编码。
                 let started = now_ms();
+                // step start 命令回显：脱敏摘要（repo_url + 目标，绝不含凭据）。
+                let echo = checkout::step_echo(checkout);
                 emit_step(
                     logbuf,
                     &spec.job_id,
                     spec.attempt,
-                    step_event(step_seq, started, 0, None, "<checkout 占位>"),
+                    step_event(step_seq, started, 0, None, &echo),
                 )
                 .await;
-                emit_step(
-                    logbuf,
+                let outcome = checkout::run(
+                    checkout,
+                    ws_dir,
+                    spec.scm_credential.as_ref(),
+                    secret_values.to_vec(),
+                    trunc.clone(),
                     &spec.job_id,
                     spec.attempt,
-                    step_event(step_seq, started, now_ms(), Some(-1), ""),
+                    cancel_rx.clone(),
+                    deadline,
+                    logbuf,
+                    &checkout::ScmBins::default(),
                 )
                 .await;
-                return JobOutcome::Failed(-1, format!("步骤 {step_seq}：checkout 执行器未实现（B3-T6 / #60）"));
+                let ended = now_ms();
+                match outcome {
+                    JobOutcome::Succeeded => {
+                        emit_step(
+                            logbuf,
+                            &spec.job_id,
+                            spec.attempt,
+                            step_event(step_seq, started, ended, Some(0), ""),
+                        )
+                        .await;
+                        // 退出码 0 → 下一步。
+                    }
+                    JobOutcome::Failed(code, d) => {
+                        emit_step(
+                            logbuf,
+                            &spec.job_id,
+                            spec.attempt,
+                            step_event(step_seq, started, ended, Some(code), ""),
+                        )
+                        .await;
+                        return JobOutcome::Failed(code, format!("步骤 {step_seq}：{d}"));
+                    }
+                    JobOutcome::Cancelled => {
+                        emit_step(
+                            logbuf,
+                            &spec.job_id,
+                            spec.attempt,
+                            step_event(step_seq, started, ended, None, ""),
+                        )
+                        .await;
+                        return JobOutcome::Cancelled;
+                    }
+                    JobOutcome::Timeout => {
+                        emit_step(
+                            logbuf,
+                            &spec.job_id,
+                            spec.attempt,
+                            step_event(step_seq, started, ended, None, ""),
+                        )
+                        .await;
+                        return JobOutcome::Timeout;
+                    }
+                    JobOutcome::SpawnFailed(d) => {
+                        emit_step(
+                            logbuf,
+                            &spec.job_id,
+                            spec.attempt,
+                            step_event(step_seq, started, ended, Some(-1), ""),
+                        )
+                        .await;
+                        return JobOutcome::SpawnFailed(format!("步骤 {step_seq}：{d}"));
+                    }
+                }
             }
             None => {
                 // 无 kind 的步骤（契约演进，不应发生）：跳过。
@@ -542,104 +597,6 @@ async fn run_steps(
         }
     }
     JobOutcome::Succeeded
-}
-
-/// 流式读取一条输出流：读 → 脱敏 → 截断 → 编码 OutputChunk（经 logbuf 编号 seq）。
-/// EOF 时 flush 脱敏器暂留窗口（跨块边界的机密前缀在此补齐或作明文外发）。
-async fn stream_output<R>(
-    stream: Option<R>,
-    tag: Stream,
-    secrets: Vec<Vec<u8>>,
-    trunc: Arc<Truncation>,
-    job_id: String,
-    attempt: i32,
-    logbuf: LogBuffer,
-) where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
-    let mut reader = match stream {
-        Some(r) => r,
-        None => return,
-    };
-    let mut redactor = Redactor::new(secrets);
-    let mut buf = vec![0u8; READ_BUF];
-    loop {
-        let n = match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        let redacted = redactor.process(&buf[..n]);
-        emit_output(&logbuf, &job_id, attempt, tag, &redacted, &trunc).await;
-    }
-    let flushed = redactor.flush();
-    if !flushed.is_empty() {
-        emit_output(&logbuf, &job_id, attempt, tag, &flushed, &trunc).await;
-    }
-}
-
-/// 编码一段（已脱敏）输出字节为 OutputChunk + 必要的 Truncated 标记，经 logbuf
-/// 批量发出（seq 由 logbuf 编号）。
-async fn emit_output(
-    logbuf: &LogBuffer,
-    job_id: &str,
-    attempt: i32,
-    tag: Stream,
-    data: &[u8],
-    trunc: &Truncation,
-) {
-    if data.is_empty() {
-        return;
-    }
-    let (emit_bytes, mark_truncated) = trunc.acquire(data.len());
-    let mut events = Vec::with_capacity(2);
-    if emit_bytes > 0 {
-        events.push(LogEvent {
-            seq: 0,
-            kind: Some(EventKind::Output(OutputChunk {
-                stream: tag as i32,
-                data: data[..emit_bytes].to_vec(),
-            })),
-        });
-    }
-    if mark_truncated {
-        let dropped = (data.len() - emit_bytes) as u64;
-        events.push(LogEvent {
-            seq: 0,
-            kind: Some(EventKind::Truncated(Truncated { dropped_bytes: dropped })),
-        });
-    }
-    if !events.is_empty() {
-        let _ = logbuf.append_batch(job_id, attempt, events).await;
-    }
-}
-
-/// 构造一个步骤生命周期事件。start：`exit_code=None`、`ended_at=0`、`command`
-/// 携命令回显；end：`exit_code=Some`、`command` 空（回显只在 start 携带，
-/// ADR-0013）。纯函数，消除调用点重复构造。
-fn step_event(seq: i32, started: i64, ended: i64, exit_code: Option<i32>, command: &str) -> StepEvent {
-    StepEvent {
-        seq,
-        step_started_at_ms: started,
-        step_ended_at_ms: ended,
-        exit_code,
-        command: command.to_string(),
-    }
-}
-
-/// 编码一个步骤生命周期事件（start: exit_code=None / end: exit_code=Some）。
-/// 调用方经 [`step_event`] 构造 [`StepEvent`]。
-async fn emit_step(logbuf: &LogBuffer, job_id: &str, attempt: i32, event: StepEvent) {
-    let _ = logbuf
-        .append(
-            job_id,
-            attempt,
-            LogEvent {
-                seq: 0,
-                kind: Some(EventKind::Step(event)),
-            },
-        )
-        .await;
 }
 
 // ============================================================
@@ -699,54 +656,7 @@ fn now_ms() -> i64 {
 }
 
 // ============================================================
-// 日志截断计数（per-job，两流共享）
-// ============================================================
-
-/// per-job 日志字节截断计数：累计已发字节，超 `limit` 后丢弃并插入一次
-/// `Truncated` 标记（不判败，ADR-0013）。stdout/stderr 共享同一计数。
-struct Truncation {
-    inner: std::sync::Mutex<TruncationState>,
-}
-
-struct TruncationState {
-    limit: u64,
-    emitted: u64,
-    truncated: bool,
-}
-
-impl Truncation {
-    fn new(limit: u64) -> Self {
-        Self {
-            inner: std::sync::Mutex::new(TruncationState {
-                limit,
-                emitted: 0,
-                truncated: false,
-            }),
-        }
-    }
-
-    /// 申请发出 `len` 字节。返回 `(允许发出的字节数, 是否插入截断标记)`。
-    /// 已截断后再次调用 → `(0, false)`（整块丢弃、不再标记）。
-    fn acquire(&self, len: usize) -> (usize, bool) {
-        let mut s = self.inner.lock().expect("trunc 锁");
-        if s.truncated {
-            return (0, false);
-        }
-        let len64 = len as u64;
-        if s.emitted.saturating_add(len64) <= s.limit {
-            s.emitted = s.emitted.saturating_add(len64);
-            return (len, false);
-        }
-        // 越限：发剩余配额（可能为 0），置截断标记。
-        let fits = s.limit.saturating_sub(s.emitted);
-        s.emitted = s.limit;
-        s.truncated = true;
-        (fits as usize, true)
-    }
-}
-
-// ============================================================
-// 单元测试（纯逻辑助手：collect_secrets / log_limit / deadline / Truncation）
+// 单元测试（纯逻辑助手：collect_secrets / log_limit / deadline / outcome_phase）
 // ============================================================
 
 #[cfg(test)]
@@ -756,12 +666,19 @@ mod tests {
     use std::collections::HashMap;
 
     fn env_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn collect_secrets_from_env_and_scm_password() {
-        let mut env = env_map(&[("DEPLOY_KEY", "deploy-val"), ("PATH", "/bin"), ("EMPTY", "")]);
+        let mut env = env_map(&[
+            ("DEPLOY_KEY", "deploy-val"),
+            ("PATH", "/bin"),
+            ("EMPTY", ""),
+        ]);
         let spec = JobSpec {
             secrets: vec!["DEPLOY_KEY".into(), "MISSING".into(), "EMPTY".into()],
             env: std::mem::take(&mut env),
@@ -773,12 +690,12 @@ mod tests {
         };
         let secrets = collect_secrets(&spec);
         assert!(secrets.contains(&b"deploy-val".to_vec()), "env 机密值收录");
-        assert!(secrets.contains(&b"pw-token".to_vec()), "checkout 凭据 password 收录");
-        assert!(!secrets.iter().any(|s| s.is_empty()), "空值滤除");
         assert!(
-            !secrets.iter().any(|s| s == b"/bin"),
-            "非机密 env 值不收录"
+            secrets.contains(&b"pw-token".to_vec()),
+            "checkout 凭据 password 收录"
         );
+        assert!(!secrets.iter().any(|s| s.is_empty()), "空值滤除");
+        assert!(!secrets.iter().any(|s| s == b"/bin"), "非机密 env 值不收录");
         assert!(
             !secrets.iter().any(|s| s == b"u"),
             "checkout username 非机密，不收录"
@@ -834,35 +751,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn truncation_emits_until_limit_then_marker_then_drops() {
-        let trunc = Truncation::new(10);
-        // 前两块各 4 字节 → 全发，无标记。
-        assert_eq!(trunc.acquire(4), (4, false));
-        assert_eq!(trunc.acquire(4), (4, false));
-        // 第三块 4 字节：配额剩 2 → 发 2 + 标记（dropped 2）。
-        assert_eq!(trunc.acquire(4), (2, true));
-        // 后续全丢、不再标记。
-        assert_eq!(trunc.acquire(8), (0, false));
-        assert_eq!(trunc.acquire(8), (0, false));
-    }
-
-    #[test]
-    fn truncation_exact_limit_no_marker() {
-        let trunc = Truncation::new(4);
-        assert_eq!(trunc.acquire(4), (4, false), "恰好到上限不发标记");
-        assert_eq!(trunc.acquire(1), (0, true), "越限首块发标记、0 字节");
-        assert_eq!(trunc.acquire(1), (0, false));
-    }
-
-    #[test]
-    fn truncation_single_chunk_exceeding_limit() {
-        let trunc = Truncation::new(3);
-        // 一块 10 字节：发 3 + 标记（dropped 7）。
-        assert_eq!(trunc.acquire(10), (3, true));
-        assert_eq!(trunc.acquire(1), (0, false));
-    }
-
     /// emit_step / emit_output 的 seq 由 logbuf 编号、流式编码合流由集成测试
     /// 覆盖（需真实进程 + 通道）；此处仅断言纯助手。
     #[test]
@@ -871,7 +759,9 @@ mod tests {
         let ws = Path::new("/srv/ws/pipe/job");
         let expanded = workspace::expand_sisy_workspace("echo ${SISY_WORKSPACE}/out", ws);
         assert_eq!(expanded, "echo /srv/ws/pipe/job/out");
-        let _ = ShellStep { command: expanded.clone() };
+        let _ = ShellStep {
+            command: expanded.clone(),
+        };
         assert!(expanded.contains("/srv/ws/pipe/job"));
     }
 
@@ -907,16 +797,7 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let deadline = Some(Instant::now() + Duration::from_millis(300));
         let started = std::time::Instant::now();
-        let outcome = run_steps(
-            &spec,
-            &ws_dir,
-            &cancel_rx,
-            &[],
-            u64::MAX,
-            deadline,
-            &logbuf,
-        )
-        .await;
+        let outcome = run_steps(&spec, &ws_dir, &cancel_rx, &[], u64::MAX, deadline, &logbuf).await;
         assert_eq!(outcome, JobOutcome::Timeout, "近 deadline 应使步骤超时");
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -953,7 +834,11 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(true); // 预置取消
         let started = std::time::Instant::now();
         let outcome = run_steps(&spec, &ws_dir, &cancel_rx, &[], u64::MAX, None, &logbuf).await;
-        assert_eq!(outcome, JobOutcome::Cancelled, "预置取消应使步骤即取 cancelled");
+        assert_eq!(
+            outcome,
+            JobOutcome::Cancelled,
+            "预置取消应使步骤即取 cancelled"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "预置取消应立即返回"

@@ -10,12 +10,14 @@
 
 pub mod cache;
 pub mod channel;
+pub mod checkout;
 pub mod config;
 pub mod exec;
 pub mod logbuf;
 pub mod redact;
 pub mod register;
 pub mod runner;
+pub mod stepio;
 pub mod upgrader;
 pub mod workspace;
 
