@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApiClient, apiPath, NETWORK_ERROR_CODE, parseErrorResponse } from '@/api/http'
 import type { ApiClient } from '@/api/http'
 import { ApiError } from '@/api/types'
-
 /** 构造一个 mock Response（jsdom 无 fetch，需自造 Response 壳）。 */
 function jsonResponse(status: number, body: unknown): Response {
   const headers = new Headers({ 'Content-Type': 'application/json' })
@@ -160,6 +159,25 @@ describe('API 客户端', () => {
     )
     expect(err.code).toBe('RATE_LIMITED')
     expect(err.retryAfterMs).toBe(30000)
+  })
+
+  it('query 参数拼接到 URL（null/undefined/空串剔除；布尔转字符串）', async () => {
+    // mockImplementation：每次调用给新 Response（本测试两次请求）。
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(jsonResponse(200, { items: [], total: 0, page: 1, limit: 20 })),
+    )
+    await client.get('projects/p/pipelines/pl/builds', {
+      query: { page: 2, limit: 20, status: 'failed', empty: '', nil: null, flag: true },
+    })
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(
+      '/api/v1/projects/p/pipelines/pl/builds?page=2&limit=20&status=failed&flag=true',
+    )
+
+    // 无 query 时不带 ?。
+    await client.get('auth/me')
+    const [url2] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(url2).toBe('/api/v1/auth/me')
   })
 
   it('无响应体成功（200 空体）返回 undefined', async () => {

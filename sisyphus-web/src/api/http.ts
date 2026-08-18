@@ -28,6 +28,9 @@ export interface HttpOptions {
   body?: BodyInit
   /** 覆盖默认的 method（GET/POST/PUT/PATCH/DELETE）。 */
   method?: string
+  /** 查询参数（拼到 path 上；string/number/boolean 直传，null/undefined/空串
+   *  剔除——构建列表分页/状态过滤消费，票 B4-T4）。 */
+  query?: Record<string, string | number | boolean | null | undefined>
 }
 
 export interface ApiClient {
@@ -49,6 +52,22 @@ export interface ApiClient {
 export function apiPath(path: string): string {
   const trimmed = path.startsWith('/') ? path.slice(1) : path
   return `/api/v1/${trimmed}`
+}
+
+/** 查询参数拼接到 URL（null/undefined/空串剔除；数组不支持——列表端点
+ *  都是单值过滤）。value 为布尔时转字符串（`true`/`false`）。 */
+export function withQuery(
+  path: string,
+  query?: Record<string, string | number | boolean | null | undefined>,
+): string {
+  if (!query) return path
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    if (value == null || value === '') continue
+    search.set(key, String(value))
+  }
+  const qs = search.toString()
+  return qs ? `${path}?${qs}` : path
 }
 
 /** 解析非 2xx 响应为统一错误形态；解析失败（形态异常）回落 NETWORK_ERROR。 */
@@ -92,6 +111,7 @@ export function createApiClient(): ApiClient {
       credentials = 'include',
       body,
       method,
+      query,
     } = options
 
     const headersOut: Record<string, string> = {
@@ -102,7 +122,7 @@ export function createApiClient(): ApiClient {
 
     let res: Response
     try {
-      res = await fetch(apiPath(path), {
+      res = await fetch(withQuery(apiPath(path), query), {
         method: method ?? (json !== undefined || body !== undefined ? 'POST' : 'GET'),
         headers: headersOut,
         credentials,

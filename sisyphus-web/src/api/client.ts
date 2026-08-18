@@ -6,6 +6,10 @@ import { http } from './http-singleton'
 import type { CredentialsRequest, MeResponse } from './http'
 import type {
   AgentResponse,
+  BuildAcceptedResponse,
+  BuildDetailResponse,
+  BuildListResponse,
+  BuildStatusDto,
   CreateAgentRequest,
   CreateProjectRequest,
   CreatedAgentResponse,
@@ -14,6 +18,8 @@ import type {
   MemberResponse,
   PipelineDefinitionResponse,
   ProjectResponse,
+  RerunBuildRequest,
+  TriggerBuildRequest,
 } from './types'
 
 /** 认证端点（后端 `api/auth.rs`，ADR-0014）。 */
@@ -81,4 +87,60 @@ export const projectsApi = {
 export const usersApi = {
   /** 最小用户目录（仅 id + 用户名，排除已禁用；成员分配下拉源）。 */
   directory: () => http.get<DirectoryEntryResponse[]>('users/directory'),
+}
+
+/** Pipeline 定义端点（后端 `api/pipelines.rs`）。 */
+export const pipelinesApi = {
+  /** 读 pipeline 定义 + 修订版本（构建详情页触发参数/等待标签态/产物声明
+   *  的只读消费面，ADR-0009 model 为单一事实源）。 */
+  getDefinition: (project: string, pipeline: string) =>
+    http.get<PipelineDefinitionResponse>(
+      `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}`,
+    ),
+}
+
+/** 构建端点（后端 `api/builds.rs`，ADR-0006/0008/0013）。 */
+export const buildsApi = {
+  /** 手动触发构建（runner 档）：参数覆盖 + 可选分支/commit/revision，
+   *  返回 202 + 构建号（异步推进）。 */
+  trigger: (
+    project: string,
+    pipeline: string,
+    req: TriggerBuildRequest,
+  ) =>
+    http.post<BuildAcceptedResponse>(
+      `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds`,
+      { json: req },
+    ),
+
+  /** 取消构建（runner 档，build 级）：终态幂等 202。 */
+  cancel: (project: string, pipeline: string, number: number) =>
+    http.post<BuildAcceptedResponse>(
+      `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}/cancel`,
+    ),
+
+  /** 重跑构建（runner 档）：from_scratch 新号 / from_failed 同号 attempt+1；
+   *  非失败终态 from_failed 409。 */
+  rerun: (project: string, pipeline: string, number: number, req: RerunBuildRequest) =>
+    http.post<BuildAcceptedResponse>(
+      `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}/rerun`,
+      { json: req },
+    ),
+
+  /** 构建列表（viewer 档）：按号倒序 + 分页(page/limit) + 状态过滤。 */
+  list: (
+    project: string,
+    pipeline: string,
+    query: { page?: number; limit?: number; status?: BuildStatusDto | '' },
+  ) =>
+    http.get<BuildListResponse>(
+      `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds`,
+      { query },
+    ),
+
+  /** 构建详情（viewer 档）：状态/触发人/attempt/耗时/阶段与任务状态。 */
+  detail: (project: string, pipeline: string, number: number) =>
+    http.get<BuildDetailResponse>(
+      `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}`,
+    ),
 }

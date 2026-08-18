@@ -49,9 +49,15 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'routes.pipelineEdit' },
   },
   {
+    path: '/projects/:name/pipelines/:pipeline/builds',
+    name: 'build-list',
+    component: () => import('@/views/BuildListView.vue'),
+    meta: { title: 'routes.buildList' },
+  },
+  {
     path: '/projects/:name/pipelines/:pipeline/builds/:number',
     name: 'build-detail',
-    component: () => import('@/views/PlaceholderView.vue'),
+    component: () => import('@/views/BuildDetailView.vue'),
     meta: { title: 'routes.buildDetail' },
   },
   {
