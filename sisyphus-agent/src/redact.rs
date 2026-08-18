@@ -133,7 +133,10 @@ mod tests {
 
     #[test]
     fn redacts_full_literal_in_one_chunk() {
-        assert_eq!(redact_one(&[b"secret"], b"prefix secret suffix"), b"prefix *** suffix");
+        assert_eq!(
+            redact_one(&[b"secret"], b"prefix secret suffix"),
+            b"prefix *** suffix"
+        );
     }
 
     #[test]

@@ -80,6 +80,16 @@ async fn main() {
         "sisyphus-agent 启动"
     );
 
+    // 启动清扫残留容器（ADR-0018：兜住 CLI 被 SIGKILL 窗口留下的孤儿容器；按
+    // `sisyphus.managed=true` label 清扫）。best-effort——无 docker / 列举失败
+    // 即跳过（返回 Ok）；逐个 `docker rm -f`，失败忽略。在 Agent::run 接受任务前完成。
+    if let Err(e) =
+        sisyphus_agent::container::cleanup_orphan_containers(sisyphus_agent::container::DOCKER_BIN)
+            .await
+    {
+        tracing::warn!(error = %e, "启动清扫残留容器失败（继续启动）");
+    }
+
     // 注册引导（票 #57，Spec B3 §7）：`--reg-key` 存在 → 先兑 token 落盘
     // 再常驻；失败明确报错退出（注册是引导步骤，无 token 连不上通道）。
     if let Some(reg_key) = &args.reg_key
@@ -100,7 +110,10 @@ async fn main() {
 /// 注册引导：`--reg-key` 兑 token 落盘。Agent 名取主机名（与通道握手
 /// agent_name 同源——Server 建条目时的构建机名即主机名）。`api_url` 缺则
 /// 明确报错（注册走 REST HTTP 面，与 gRPC 通道地址不同端口）。
-async fn bootstrap_register(config: &Config, reg_key: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn bootstrap_register(
+    config: &Config,
+    reg_key: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let api_url = config
         .api_url
         .as_deref()

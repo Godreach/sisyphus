@@ -19,15 +19,17 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use sisyphus_proto::agent::{
-    agent_channel_client::AgentChannelClient, channel_message::Kind, ChannelMessage, DiskUsage,
-    Handshake, Heartbeat, JobReported, Version,
+    ChannelMessage, DiskUsage, Handshake, Heartbeat, JobReported, Version,
+    agent_channel_client::AgentChannelClient, channel_message::Kind,
 };
 use sisyphus_proto::version;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 
@@ -93,15 +95,99 @@ pub const META_ARCH: &str = "x-sisyphus-arch";
 /// 容器标签 metadata 头名（探测成功才置 `docker`，失败即不置）。
 pub const META_CONTAINER: &str = "x-sisyphus-container";
 
+/// 容器探测周期（ADR-0018：周期 `docker version`；默认 60s）。
+pub const CONTAINER_PROBE_INTERVAL: Duration = Duration::from_secs(60);
+
 /// 系统标签源：os/arch 静态 + 容器探测动态（探测结果随每次连接刷新）。
+/// `probe_handle` 暴露容器探测句柄，供 [`crate::Agent::run`] spawn 周期探测
+/// （静态源返回 `None`，不探测）。
 pub trait LabelSource: Send + Sync {
     /// 当前系统标签（metadata 头名 → 值）。
     fn labels(&self) -> Vec<(&'static str, String)>;
+    /// 容器探测刷新句柄（[`PlatformLabels`] 返回 `Some`；[`StaticLabels`] 等
+    /// 静态源返回 `None`）。[`crate::Agent::run`] 据此 spawn 周期 `docker version`
+    /// 探测；`None` = 不探测（测试静态源避免依赖宿主 docker）。
+    fn probe_handle(&self) -> Option<Arc<ContainerProbe>> {
+        None
+    }
 }
 
-/// 生产实现：os/arch 静态常量 + 容器探测占位（`None`——docker 探测随容器
-/// 批次换入真实实现，见 ADR-0008「容器运行时定期探测」）。
-pub struct PlatformLabels;
+/// 容器探测状态（ADR-0018）：周期 `docker version` 探测结果，`sisyphus/container=docker`
+/// 标签据此随连接 metadata 上报（探测成功置 true、失败置 false）。`AtomicBool` 经
+/// [`LabelSource::labels`] 在每次连接（含重连）即时读取——非阻塞、不在连接路径
+/// spawn。周期探测由 [`Self::spawn_refresh`] 后台驱动（首帧即探、之后每
+/// [`CONTAINER_PROBE_INTERVAL`]）。
+#[derive(Debug)]
+pub struct ContainerProbe {
+    available: AtomicBool,
+}
+
+impl ContainerProbe {
+    /// 新建（available=false——首次探测前不置标签）。
+    pub fn new() -> Self {
+        Self {
+            available: AtomicBool::new(false),
+        }
+    }
+
+    /// 当前 docker 是否可用（探测成功为 true）。
+    pub fn available(&self) -> bool {
+        self.available.load(Ordering::Relaxed)
+    }
+
+    /// 置探测结果（[`Self::spawn_refresh`] 内部用；同模块测试用）。
+    fn set(&self, v: bool) {
+        self.available.store(v, Ordering::Relaxed);
+    }
+
+    /// spawn 后台周期探测：首帧即探（首次连接前结果就绪），之后每 `interval`
+    /// 重探。返回任务句柄（调用方在退出时 abort）。`docker_bin` 默认
+    /// [`crate::container::DOCKER_BIN`]，可注入便于测试。
+    pub fn spawn_refresh(
+        self: Arc<Self>,
+        interval: Duration,
+        docker_bin: String,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                self.set(probe_once(&docker_bin).await);
+                tokio::time::sleep(interval).await;
+            }
+        })
+    }
+}
+
+impl Default for ContainerProbe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 执行一次 `docker version` 探测：退出 0 = 可用（true）；非零 / spawn 失败 =
+/// 不可用（false）。缺 docker 二进制 → spawn 失败 → false（不阻塞启动）。
+async fn probe_once(docker_bin: &str) -> bool {
+    tokio::process::Command::new(docker_bin)
+        .arg("version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|s| s.success())
+}
+
+/// 生产标签源：os/arch 静态 + 容器探测动态（[`ContainerProbe`] 最新结果）。
+pub struct PlatformLabels {
+    container: Arc<ContainerProbe>,
+}
+
+impl PlatformLabels {
+    /// 以容器探测状态构造（与 [`crate::Agent`] 共享同一 `Arc<ContainerProbe>`——
+    /// 后台周期探测更新，连接面 `labels` 即时读取）。
+    pub fn new(container: Arc<ContainerProbe>) -> Self {
+        Self { container }
+    }
+}
 
 impl LabelSource for PlatformLabels {
     fn labels(&self) -> Vec<(&'static str, String)> {
@@ -109,10 +195,28 @@ impl LabelSource for PlatformLabels {
             (META_OS, os_label().to_string()),
             (META_ARCH, arch_label().to_string()),
         ];
-        if let Some(container) = container_probe() {
-            labels.push((META_CONTAINER, container));
+        if self.container.available() {
+            labels.push((META_CONTAINER, "docker".to_string()));
         }
         labels
+    }
+
+    fn probe_handle(&self) -> Option<Arc<ContainerProbe>> {
+        Some(self.container.clone())
+    }
+}
+
+/// 测试用静态标签源（os/arch，无容器探测）——确定性，不依赖宿主 docker。
+/// 集成测试注入此源避免 docker 可用性影响标签断言。
+#[derive(Debug, Clone, Default)]
+pub struct StaticLabels;
+
+impl LabelSource for StaticLabels {
+    fn labels(&self) -> Vec<(&'static str, String)> {
+        vec![
+            (META_OS, os_label().to_string()),
+            (META_ARCH, arch_label().to_string()),
+        ]
     }
 }
 
@@ -134,12 +238,6 @@ fn arch_label() -> &'static str {
         "aarch64" => "arm64",
         other => other,
     }
-}
-
-/// 容器探测（占位）：真实 docker 探测随容器批次换入；占位恒 `None`——
-/// `sisyphus/container=docker` 标签不置，调度隐式容器标签不可命中。
-fn container_probe() -> Option<String> {
-    None
 }
 
 // ============================================================
@@ -171,7 +269,7 @@ impl DiskSampler for PlatformDiskSampler {
     fn sample(&self) -> DiskUsage {
         DiskUsage {
             volumes: platform_volumes(&self.base).unwrap_or_default(),
-            cache_bytes: 0,   // 占位：缓存 registry 记账随 cache 批次（ADR-0012）
+            cache_bytes: 0,     // 占位：缓存 registry 记账随 cache 批次（ADR-0012）
             workspace_bytes: 0, // 占位：工作区低频采样随 workspace 批次（ADR-0019）
         }
     }
@@ -190,7 +288,11 @@ fn platform_volumes(base: &std::path::Path) -> Option<Vec<sisyphus_proto::agent:
         return None;
     }
     // f_frsize 缺失（为 0）的平台回退 f_bsize；free 取 f_bavail（非特权可用）。
-    let frsize = if st.f_frsize == 0 { st.f_bsize } else { st.f_frsize };
+    let frsize = if st.f_frsize == 0 {
+        st.f_bsize
+    } else {
+        st.f_frsize
+    };
     let total = (st.f_blocks as u64).saturating_mul(frsize as u64);
     let free = (st.f_bavail as u64).saturating_mul(frsize as u64);
     Some(vec![sisyphus_proto::agent::VolumeUsage {
@@ -215,9 +317,8 @@ fn platform_volumes(base: &std::path::Path) -> Option<Vec<sisyphus_proto::agent:
     let mut free_total: u64 = 0;
     // 第三个参数输出的是卷总字节，第四个是卷剩余字节；free 取「调用者可
     // 用」= 第一个参数（配额感知，语义与 Unix f_bavail 对齐）。
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(wide.as_ptr(), &mut free_avail, &mut total, &mut free_total)
-    };
+    let ok =
+        unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free_avail, &mut total, &mut free_total) };
     if ok == 0 {
         return None;
     }
@@ -291,10 +392,7 @@ impl Backoff {
     /// 下一轮等待时长并推进序列。`attempt` 饱和后钉在 `cap`（上限防无限增长）。
     pub fn next_delay(&mut self) -> Duration {
         let shift = self.attempt.min(BACKOFF_SHIFT_SATURATION);
-        let raw = self
-            .base
-            .saturating_mul(1u32 << shift)
-            .min(self.cap);
+        let raw = self.base.saturating_mul(1u32 << shift).min(self.cap);
         let jittered = if self.jitter > 0.0 {
             // 抖动幅度 = raw × jitter（±）：同机多 Agent 重连去同步。
             // 有符号偏移在 f64 面算（Duration 乘法不接受负数），再按正负
@@ -479,7 +577,9 @@ pub async fn run_connection(
     let job_ids = in_flight.read().await.clone();
     out_tx
         .send(ChannelMessage {
-            kind: Some(Kind::JobReported(JobReported { job_ids: job_ids.clone() })),
+            kind: Some(Kind::JobReported(JobReported {
+                job_ids: job_ids.clone(),
+            })),
         })
         .await
         .map_err(|_| ChannelError("上行邮箱关闭".into()))?;
@@ -645,24 +745,92 @@ mod tests {
     #[test]
     fn version_window_rejects_server_newer_and_accepts_rest() {
         let local = v(1, 0, 0);
-        assert_eq!(version_window(&v(1, 0, 0), &local), VersionVerdict::Compatible);
-        assert_eq!(version_window(&v(0, 9, 0), &local), VersionVerdict::Compatible, "旧 Server 可连");
-        assert_eq!(version_window(&v(1, 1, 0), &local), VersionVerdict::ServerTooNew);
-        assert_eq!(version_window(&v(2, 0, 0), &local), VersionVerdict::ServerTooNew);
+        assert_eq!(
+            version_window(&v(1, 0, 0), &local),
+            VersionVerdict::Compatible
+        );
+        assert_eq!(
+            version_window(&v(0, 9, 0), &local),
+            VersionVerdict::Compatible,
+            "旧 Server 可连"
+        );
+        assert_eq!(
+            version_window(&v(1, 1, 0), &local),
+            VersionVerdict::ServerTooNew
+        );
+        assert_eq!(
+            version_window(&v(2, 0, 0), &local),
+            VersionVerdict::ServerTooNew
+        );
     }
 
     #[test]
-    fn platform_labels_carry_os_arch_and_no_container_placeholder() {
-        let labels = PlatformLabels.labels();
+    fn platform_labels_reflect_container_probe() {
+        // probe=false（默认）→ os/arch 上报、不置容器标签。
+        let probe = Arc::new(ContainerProbe::new());
+        let labels = PlatformLabels::new(probe).labels();
         let names: Vec<_> = labels.iter().map(|(n, _)| *n).collect();
         assert!(names.contains(&META_OS), "os 标签应上报");
         assert!(names.contains(&META_ARCH), "arch 标签应上报");
-        assert!(!names.contains(&META_CONTAINER), "容器探测占位不置标签");
-
-        let os = labels.iter().find(|(n, _)| *n == META_OS).expect("os").1.clone();
+        assert!(!names.contains(&META_CONTAINER), "probe=false 不置容器标签");
+        let os = labels
+            .iter()
+            .find(|(n, _)| *n == META_OS)
+            .expect("os")
+            .1
+            .clone();
         assert!(matches!(os.as_str(), "linux" | "macos" | "windows"));
-        let arch = labels.iter().find(|(n, _)| *n == META_ARCH).expect("arch").1.clone();
-        assert!(matches!(arch.as_str(), "amd64" | "arm64"), "arch 应落在调度取值域");
+        let arch = labels
+            .iter()
+            .find(|(n, _)| *n == META_ARCH)
+            .expect("arch")
+            .1
+            .clone();
+        assert!(
+            matches!(arch.as_str(), "amd64" | "arm64"),
+            "arch 应落在调度取值域"
+        );
+
+        // probe=true → sisyphus/container=docker 随 labels 上报。
+        let probe = Arc::new(ContainerProbe::new());
+        probe.set(true);
+        let labels = PlatformLabels::new(probe).labels();
+        assert!(
+            labels
+                .iter()
+                .any(|(n, v)| *n == META_CONTAINER && v == "docker"),
+            "probe=true → sisyphus/container=docker"
+        );
+
+        // probe_handle：PlatformLabels 返回 Some（供 Agent::run spawn 周期探测）。
+        let probe = Arc::new(ContainerProbe::new());
+        let labels = PlatformLabels::new(probe.clone());
+        assert!(
+            labels.probe_handle().is_some(),
+            "PlatformLabels 有 probe_handle"
+        );
+        // StaticLabels：os/arch、无容器、无 probe_handle（确定性，不依赖宿主 docker）。
+        let labels = StaticLabels.labels();
+        let names: Vec<_> = labels.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&META_OS));
+        assert!(names.contains(&META_ARCH));
+        assert!(
+            !names.contains(&META_CONTAINER),
+            "StaticLabels 不置容器标签"
+        );
+        assert!(
+            StaticLabels.probe_handle().is_none(),
+            "StaticLabels 无 probe_handle"
+        );
+    }
+
+    /// probe_once：缺二进制 → spawn 失败 → false（不阻塞、确定性，无需 daemon）。
+    #[tokio::test]
+    async fn probe_once_missing_binary_returns_false() {
+        assert!(
+            !probe_once("sisyphus-no-such-docker-zzz").await,
+            "缺 docker 二进制 → false"
+        );
     }
 
     #[test]

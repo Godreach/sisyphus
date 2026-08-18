@@ -550,11 +550,11 @@ mod tests {
         let child_pid: u32 = {
             let mut got = None;
             for _ in 0..50 {
-                if let Ok(text) = std::fs::read_to_string(&pidfile_clone) {
-                    if let Ok(p) = text.trim().parse::<u32>() {
-                        got = Some(p);
-                        break;
-                    }
+                if let Ok(text) = std::fs::read_to_string(&pidfile_clone)
+                    && let Ok(p) = text.trim().parse::<u32>()
+                {
+                    got = Some(p);
+                    break;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }

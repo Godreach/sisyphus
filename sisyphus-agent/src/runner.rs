@@ -1,7 +1,9 @@
 //! runner：JobSpec → ack → 步骤序贯执行 → 终态上报（ADR-0002/0006/0008/
-//! 0013/0015；票 B3-T5 / #59）。
+//! 0013/0015/0018；票 B3-T5 / #59、B3-T7 / #53）。
 //!
-//! host 后端执行主体。JobSpec / Cancel 经 channel reader 投递到本模块通道：
+//! host + 容器后端执行主体（ADR-0018：两后端只差「进程怎么起」，步骤编排共用
+//! [`run_steps`]，后端经 [`Backend`] 在 spawn 缝上分叉）。JobSpec / Cancel 经
+//! channel reader 投递到本模块通道：
 //!
 //! - **ack（占槽位）**：收 JobSpec 即回 [`JobAck`]；内存级同 job 去重（已在跑
 //!   → 拒收）。去重与在途上报共用组合根的 `in_flight` 集（[`Handle`] 持其
@@ -9,21 +11,28 @@
 //!   `JobReported`），单一在途真源，避免与 [`crate::workspace::RunningJobs`]
 //!   并存两套集合发散。
 //! - **running**：步骤执行前上报 [`JobStatus`](running)。
-//! - **步骤序贯**：shell 步骤经 [`crate::exec`] 起 tokio Command（cwd = 任务
-//!   工作区、env = JobSpec.env）；每步骤 `StepEvent`（start 含命令回显 / end
-//!   含退出码）；stdout/stderr 合流带 stream 标记、per-job 按 attempt 单调
-//!   seq（经 [`crate::logbuf`] 编号）；机密输出字面量脱敏（[`crate::redact`]，
-//!   跨输出块边界）；超 `log_limit_bytes` 截断插 `Truncated` 标记不判败。
-//! - **`${SISY_WORKSPACE}`**：任何步骤执行前替换为 job 工作区绝对路径
+//! - **执行后端**：host 直跑（默认）或容器。容器任务由 [`crate::container::ContainerTask`]
+//!   装配 per-task 上下文（临时 env 文件 + ASKPASS 挂载 + 容器用户），首步前显式
+//!   `docker pull`（always），每步一个一次性 `docker run --rm`（[`Backend::spawn_shell`]
+//!   / [`Backend::run_checkout`]）；host 后端经 [`crate::exec`] 起 tokio Command。
+//! - **步骤序贯**：每步骤 `StepEvent`（start 含命令回显 / end 含退出码）；
+//!   stdout/stderr 合流带 stream 标记、per-job 按 attempt 单调 seq（经
+//!   [`crate::logbuf`] 编号）；机密输出字面量脱敏（[`crate::redact`]，跨输出块
+//!   边界）；超 `log_limit_bytes` 截断插 `Truncated` 标记不判败。checkout 子命令
+//!   经 [`crate::checkout::run_planned`] 共享循环（host/容器只换 spawner）。
+//! - **`${SISY_WORKSPACE}`**：任何 shell 步骤执行前替换——host = job 工作区宿主
+//!   绝对路径、container = 容器内 `/sisyphus/workspace`
 //!   （[`crate::workspace::expand_sisy_workspace`]）。
 //! - **取消/超时**：[`crate::exec::kill_tree`] 进程树终止（含子进程）；终态
-//!   cancelled / timeout。取消是电平触发（`watch`）：步骤间到达亦在下一步
-//!   `wait_until` 立即生效。
+//!   cancelled / timeout。容器后端额外按名 `docker rm -f` 补刀（幂等，
+//!   [`Backend::cleanup_container`]）。取消是电平触发（`watch`）：步骤间到达
+//!   亦在下一步 `wait_until` 立即生效。
 //! - **终态**：[`JobStatus`](succeeded/failed/cancelled/timeout) + exit_code/
 //!   detail；从在途集释放。**离线时完成的终态**缓冲到 [`RunnerUplink`]，重连
 //!   经 `flush_pending` 补发（< orphan 宽限窗口；超宽限由 Server orphan grace
 //!   兜底判 failed，ADR-0008）。
-//! - **checkout 步骤**：占位失败（detail 点名 B3-T6 / #60），真实执行随该批次。
+//! - **checkout 步骤**：交 [`crate::checkout`]（B3-T6 / #60）；容器任务在容器内
+//!   执行（镜像须带 git/svn，B3-T7 / #53）。
 //! - **产物上传/下载**：本批不做（仅留时序钩子位，票 #59 范围边界）。
 //!
 //! 上行纪律：JobAck / JobStatus(running) / 终态经 [`RunnerUplink`] 的活体发送器
@@ -32,19 +41,20 @@
 //! 兜底（ADR-0008）。
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sisyphus_proto::agent::{
-    ChannelMessage, JobAck, JobPhase, JobSpec, JobStatus, channel_message::Kind,
-    execution_env::Kind as EnvKind, job_step::Kind as StepKind,
+    ChannelMessage, CheckoutStep, JobAck, JobPhase, JobSpec, JobStatus, ScmCredential,
+    channel_message::Kind, execution_env::Kind as EnvKind, job_step::Kind as StepKind,
 };
 use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::ReceiptLog;
 use crate::checkout;
+use crate::container;
 use crate::exec::{self, SpawnError, StepOutcome};
 use crate::logbuf::LogBuffer;
 use crate::stepio::{Truncation, emit_step, run_streamed_step, step_event};
@@ -310,8 +320,127 @@ pub(crate) enum JobOutcome {
     SpawnFailed(String),
 }
 
-/// 单个 job 的执行主体：running 上报 → 工作区解析 → 步骤序贯 → 终态上报 →
-/// 在途释放。
+// ============================================================
+// 执行后端（host / 容器；ADR-0018：两后端只差「进程怎么起」）
+// ============================================================
+
+/// 执行后端：host 直跑（默认）或容器。步骤编排（emit start/end、per-job 截断、
+/// 机密脱敏、取消/超时竞争、终态映射）共用 [`run_steps`]；后端在此缝上分叉——
+/// `${SISY_WORKSPACE}` 展开路径、shell 步骤 spawn、checkout 执行、取消/超时容器补刀。
+/// 容器后端持有 per-task [`container::ContainerTask`]（env 文件 + ASKPASS 上下文）。
+enum Backend<'a> {
+    /// 宿主机直跑。
+    Host,
+    /// 容器后端（per-task 上下文引用）。
+    Container(&'a container::ContainerTask),
+}
+
+impl<'a> Backend<'a> {
+    /// `${SISY_WORKSPACE}` 展开目标路径：host = 宿主工作区路径；container = 容器内
+    /// `/sisyphus/workspace`（挂载点固定，ADR-0011/0018）。
+    fn expand_root(&self, ws_dir: &Path) -> PathBuf {
+        match self {
+            Backend::Host => ws_dir.to_path_buf(),
+            Backend::Container(_) => PathBuf::from(container::WORKSPACE_MOUNT_TARGET),
+        }
+    }
+
+    /// 起一个 shell 步骤进程。host = [`exec::spawn_shell`]（cwd = 工作区、env 注入）；
+    /// container = `docker run ... /bin/sh -c <command>`（env 经 env 文件、cwd 经
+    /// `-w /sisyphus/workspace`）。返回 (进程句柄, 可选容器名——取消/超时补刀用)。
+    fn spawn_shell(
+        &self,
+        command: &str,
+        ws_dir: &Path,
+        spec_env: &HashMap<String, String>,
+        step_seq: i32,
+    ) -> Result<(exec::SpawnedStep, Option<String>), SpawnError> {
+        match self {
+            Backend::Host => {
+                let s = exec::spawn_shell(command, ws_dir, spec_env)?;
+                Ok((s, None))
+            }
+            Backend::Container(task) => {
+                let (s, name) = task.spawn_shell(command, step_seq)?;
+                Ok((s, Some(name)))
+            }
+        }
+    }
+
+    /// 执行一个 checkout 步骤。host = [`checkout::run`]（宿主侧 git/svn + ASKPASS
+    /// 凭据递送）；container = 容器内 checkout（复用 `checkout::plan` +
+    /// `checkout::run_planned` + 容器 spawner，凭据经 env 文件 + ASKPASS 挂载）。
+    /// 返回 (终态, 可选容器名——取消/超时补刀用)。
+    //
+    // 参数多于 clippy 阈值：step/ws/credential 是 checkout 输入、余下是 step 上下文
+    // ——与 [`checkout::run`] 同款 allow。
+    #[allow(clippy::too_many_arguments)]
+    async fn run_checkout(
+        &self,
+        step: &CheckoutStep,
+        ws_dir: &Path,
+        credential: Option<&ScmCredential>,
+        secrets: Vec<Vec<u8>>,
+        trunc: Arc<Truncation>,
+        job_id: &str,
+        attempt: i32,
+        cancel_rx: watch::Receiver<bool>,
+        deadline: Option<Instant>,
+        logbuf: &LogBuffer,
+        step_seq: i32,
+    ) -> (JobOutcome, Option<String>) {
+        match self {
+            Backend::Host => {
+                let outcome = checkout::run(
+                    step,
+                    ws_dir,
+                    credential,
+                    secrets,
+                    trunc,
+                    job_id,
+                    attempt,
+                    cancel_rx,
+                    deadline,
+                    logbuf,
+                    &checkout::ScmBins::default(),
+                )
+                .await;
+                (outcome, None)
+            }
+            Backend::Container(task) => {
+                task.run_checkout(
+                    step, ws_dir, credential, secrets, trunc, job_id, attempt, cancel_rx, deadline,
+                    logbuf, step_seq,
+                )
+                .await
+            }
+        }
+    }
+
+    /// 取消/超时后补刀（ADR-0018）：host = no-op；container = `docker rm -f <name>`
+    /// （幂等——`--rm` 已清则 No such container 报错忽略）。`name = None`（host）no-op。
+    async fn cleanup_container(&self, name: Option<String>) {
+        if let (Backend::Container(task), Some(name)) = (self, name) {
+            task.rm_f(&name).await;
+        }
+    }
+
+    /// 容器步骤非零退出时的 detail 增补（ADR-0018「镜像缺 sh/所需二进制 = 清晰
+    /// 报错」，与 host 后端「缺 X 二进制」哲学对齐）：退出码 127（command not
+    /// found）提示镜像可能缺 `sh` 或 `git`/`svn` 等二进制——容器内缺二进制无法像
+    /// host 那样在 spawn 时判（二进制在镜像内），退而以 127 退出码兜底给清晰提示。
+    /// host 后端 / 非 127 退出原样返回。
+    fn augment_failed_detail(&self, code: i32, detail: String) -> String {
+        if matches!(self, Backend::Container(_)) && code == 127 {
+            format!("{detail}（容器内未找到命令——镜像可能缺 sh 或 git/svn 等二进制）")
+        } else {
+            detail
+        }
+    }
+}
+
+/// 单个 job 的执行主体：running 上报 → 工作区解析 → 执行后端装配 → 步骤序贯 →
+/// 终态上报 → 在途释放。
 async fn run_job(
     spec: JobSpec,
     cancel_rx: watch::Receiver<bool>,
@@ -352,35 +481,40 @@ async fn run_job(
         }
     };
 
-    // 容器后端占位（B3-T7 / #53）：host 后端不执行容器任务，明确失败而非
-    // 静默在宿主机上跑（隔离/环境语义不符）。调度侧已以容器标签 gating，
-    // 此为兜底。
-    if matches!(
-        spec.exec_env.as_ref().and_then(|e| e.kind.as_ref()),
-        Some(EnvKind::Container(_))
-    ) {
-        uplink
-            .report_terminal(
-                &job_id,
-                JobPhase::JobFailed,
-                None,
-                "容器后端未实现（B3-T7 / #53）",
-            )
-            .await;
-        release_inflight(&in_flight, &job_id).await;
-        return;
-    }
-
     let secret_values = collect_secrets(&spec);
-    let log_limit = log_limit_bytes(spec.log_limit_bytes);
+    let trunc = Arc::new(Truncation::new(log_limit_bytes(spec.log_limit_bytes)));
     let deadline = job_deadline(spec.timeout_minutes);
+
+    // 执行后端（ADR-0018）：容器任务装配 per-task 上下文（env 文件 + ASKPASS；
+    // pull 在 run_steps 首步前）；装配失败（image 空 / 写盘失败）→ 任务直接失败。
+    // host 直跑无装配。`${SISY_WORKSPACE}` 展开、shell/checkout spawn、取消/超时
+    // 补刀经 [`Backend`] 在 run_steps 缝上分叉。`container_task` 持有所有权到
+    // run_steps 结束（Drop 删 env 文件 + ASKPASS），`backend` 借用之。
+    let container_task = match spec.exec_env.as_ref().and_then(|e| e.kind.as_ref()) {
+        Some(EnvKind::Container(c)) => match container::ContainerTask::prepare(c, &spec, &ws_dir) {
+            Ok(task) => Some(task),
+            Err(e) => {
+                uplink
+                    .report_terminal(&job_id, JobPhase::JobFailed, None, &e)
+                    .await;
+                release_inflight(&in_flight, &job_id).await;
+                return;
+            }
+        },
+        _ => None,
+    };
+    let backend = match &container_task {
+        Some(task) => Backend::Container(task),
+        None => Backend::Host,
+    };
 
     let outcome = run_steps(
         &spec,
         &ws_dir,
+        &backend,
         &cancel_rx,
         &secret_values,
-        log_limit,
+        trunc,
         deadline,
         &logbuf,
     )
@@ -394,6 +528,7 @@ async fn run_job(
     // 孤儿补传取证；宽限到期由 logbuf 删除 worker 清理）。
     logbuf.clear_deferred(&job_id, attempt);
     release_inflight(&in_flight, &job_id).await;
+    // container_task drop：env 文件 + ASKPASS 任务毕即删（ADR-0018）。
 }
 
 /// job 终态 → 上报三元组（phase / exit_code / detail）。纯函数，便于单测覆盖
@@ -409,26 +544,50 @@ fn outcome_phase(outcome: JobOutcome) -> (JobPhase, Option<i32>, String) {
 }
 
 /// 步骤序贯执行：shell 步骤起进程、流式编码日志、判退出/取消/超时；checkout
-/// 步骤交 [`checkout::run`]（B3-T6 / #60）。任一步骤失败/取消/超时即终止并
-/// 返回对应终态。
+/// 步骤交后端（host = [`checkout::run`]；容器 = 容器内 checkout，B3-T6/T7）。任一
+/// 步骤失败/取消/超时即终止并返回对应终态。容器任务首步前显式 `docker pull`
+/// （always，ADR-0018）。`trunc` 由调用方 per-job 创建，pull + 全步骤 + 全子命令共享。
+//
+// 参数多于 clippy 阈值：spec/ws/backend 是步骤输入、余下是 step 上下文（取消/脱敏/
+// 截断/超时/日志）——与 [`Backend::run_checkout`] 同款 allow。
+#[allow(clippy::too_many_arguments)]
 async fn run_steps(
     spec: &JobSpec,
     ws_dir: &Path,
+    backend: &Backend<'_>,
     cancel_rx: &watch::Receiver<bool>,
     secret_values: &[Vec<u8>],
-    log_limit: u64,
+    trunc: Arc<Truncation>,
     deadline: Option<Instant>,
     logbuf: &LogBuffer,
 ) -> JobOutcome {
-    // per-job 日志截断计数（ADR-0013：per-job 上限，非 per-step）：全步骤 + 全
-    // 子命令共享同一计数，多步任务的总输出不越限。两流（stdout/stderr）亦共享。
-    let trunc = Arc::new(Truncation::new(log_limit));
+    // 容器：首步前显式 docker pull（always，ADR-0018）。pull 输出流式进日志；
+    // 失败 = 任务失败（detail 含镜像 + 私仓提示）；取消/超时映射对应终态。pull
+    // 不创建容器，无需补刀。host 后端跳过。
+    if let Backend::Container(task) = backend {
+        let pull_outcome = task
+            .pull(
+                trunc.clone(),
+                cancel_rx.clone(),
+                deadline,
+                logbuf,
+                &spec.job_id,
+                spec.attempt,
+            )
+            .await;
+        if !matches!(pull_outcome, JobOutcome::Succeeded) {
+            return pull_outcome;
+        }
+    }
+    // `${SISY_WORKSPACE}` 展开根：host = 宿主工作区；container = /sisyphus/workspace。
+    let expand_root = backend.expand_root(ws_dir);
     for step in &spec.steps {
         let step_seq = step.seq;
         match step.kind.as_ref() {
             Some(StepKind::Shell(shell)) => {
-                // `${SISY_WORKSPACE}` 执行前替换（ADR-0006/0011）。
-                let command = workspace::expand_sisy_workspace(&shell.command, ws_dir);
+                // `${SISY_WORKSPACE}` 执行前替换（host = 宿主工作区；container =
+                // /sisyphus/workspace，ADR-0006/0011/0018）。
+                let command = workspace::expand_sisy_workspace(&shell.command, &expand_root);
                 let started = now_ms();
                 emit_step(
                     logbuf,
@@ -438,7 +597,9 @@ async fn run_steps(
                 )
                 .await;
 
-                let spawned = match exec::spawn_shell(&command, ws_dir, &spec.env) {
+                let (spawned, container_name) = match backend
+                    .spawn_shell(&command, ws_dir, &spec.env, step_seq)
+                {
                     Ok(s) => s,
                     Err(SpawnError(e)) => {
                         emit_step(
@@ -481,7 +642,10 @@ async fn run_steps(
                         if code != 0 {
                             return JobOutcome::Failed(
                                 code,
-                                format!("步骤 {step_seq} 退出码 {code}"),
+                                backend.augment_failed_detail(
+                                    code,
+                                    format!("步骤 {step_seq} 退出码 {code}"),
+                                ),
                             );
                         }
                         // 退出码 0 → 下一步。
@@ -494,6 +658,7 @@ async fn run_steps(
                             step_event(step_seq, started, ended, None, ""),
                         )
                         .await;
+                        backend.cleanup_container(container_name).await;
                         return JobOutcome::Cancelled;
                     }
                     StepOutcome::Timeout => {
@@ -504,6 +669,7 @@ async fn run_steps(
                             step_event(step_seq, started, ended, None, ""),
                         )
                         .await;
+                        backend.cleanup_container(container_name).await;
                         return JobOutcome::Timeout;
                     }
                 }
@@ -521,20 +687,21 @@ async fn run_steps(
                     step_event(step_seq, started, 0, None, &echo),
                 )
                 .await;
-                let outcome = checkout::run(
-                    checkout,
-                    ws_dir,
-                    spec.scm_credential.as_ref(),
-                    secret_values.to_vec(),
-                    trunc.clone(),
-                    &spec.job_id,
-                    spec.attempt,
-                    cancel_rx.clone(),
-                    deadline,
-                    logbuf,
-                    &checkout::ScmBins::default(),
-                )
-                .await;
+                let (outcome, container_name) = backend
+                    .run_checkout(
+                        checkout,
+                        ws_dir,
+                        spec.scm_credential.as_ref(),
+                        secret_values.to_vec(),
+                        trunc.clone(),
+                        &spec.job_id,
+                        spec.attempt,
+                        cancel_rx.clone(),
+                        deadline,
+                        logbuf,
+                        step_seq,
+                    )
+                    .await;
                 let ended = now_ms();
                 match outcome {
                     JobOutcome::Succeeded => {
@@ -555,7 +722,10 @@ async fn run_steps(
                             step_event(step_seq, started, ended, Some(code), ""),
                         )
                         .await;
-                        return JobOutcome::Failed(code, format!("步骤 {step_seq}：{d}"));
+                        return JobOutcome::Failed(
+                            code,
+                            backend.augment_failed_detail(code, format!("步骤 {step_seq}：{d}")),
+                        );
                     }
                     JobOutcome::Cancelled => {
                         emit_step(
@@ -565,6 +735,7 @@ async fn run_steps(
                             step_event(step_seq, started, ended, None, ""),
                         )
                         .await;
+                        backend.cleanup_container(container_name).await;
                         return JobOutcome::Cancelled;
                     }
                     JobOutcome::Timeout => {
@@ -575,6 +746,7 @@ async fn run_steps(
                             step_event(step_seq, started, ended, None, ""),
                         )
                         .await;
+                        backend.cleanup_container(container_name).await;
                         return JobOutcome::Timeout;
                     }
                     JobOutcome::SpawnFailed(d) => {
@@ -662,7 +834,10 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sisyphus_proto::agent::{JobStep, ScmCredential, ShellStep};
+    use sisyphus_proto::agent::{
+        ContainerEnv, ExecutionEnv, JobStep, ScmCredential, ShellStep,
+        execution_env::Kind as EnvKind,
+    };
     use std::collections::HashMap;
 
     fn env_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -751,6 +926,49 @@ mod tests {
         );
     }
 
+    /// AC（ADR-0018「镜像缺 sh/所需二进制 = 清晰报错」）：容器步骤退出 127（command
+    /// not found）→ detail 增补「镜像可能缺 sh 或 git/svn」；host 后端 + 非 127 退出
+    /// 原样。无需 daemon（纯 Backend 逻辑）。
+    #[tokio::test]
+    async fn backend_container_exit_127_adds_missing_binary_hint() {
+        let dir = tempfile::tempdir().expect("临时工作区");
+        let ws = Workspace::new(dir.path().join("workspaces"));
+        let ws_dir = ws.resolve("pipe", "job").expect("resolve 工作区");
+        let spec = JobSpec {
+            job_id: "job-bin".into(),
+            pipeline_name: "pipe".into(),
+            job_name: "job".into(),
+            exec_env: Some(ExecutionEnv {
+                kind: Some(EnvKind::Container(ContainerEnv {
+                    image: "alpine:3.20".into(),
+                })),
+            }),
+            ..Default::default()
+        };
+        let c = match spec.exec_env.as_ref().and_then(|e| e.kind.as_ref()) {
+            Some(EnvKind::Container(c)) => c,
+            _ => panic!("spec 应为容器执行环境"),
+        };
+        let task =
+            container::ContainerTask::prepare(c, &spec, &ws_dir).expect("prepare container task");
+        let backend = Backend::Container(&task);
+
+        // 容器退出 127 → 增补缺二进制提示。
+        let d127 = backend.augment_failed_detail(127, "步骤 0 退出码 127".into());
+        assert!(
+            d127.contains("镜像可能缺 sh"),
+            "容器 127 应提示镜像缺二进制：{d127}"
+        );
+        // 容器非 127 退出（如 7）→ 不增补。
+        let d7 = backend.augment_failed_detail(7, "步骤 0 退出码 7".into());
+        assert!(!d7.contains("镜像可能缺"), "非 127 不增补：{d7}");
+
+        // host 后端退出 127 → 不增补（host 的缺二进制在 spawn 时已清晰报错）。
+        let host = Backend::Host;
+        let dh = host.augment_failed_detail(127, "步骤 0 退出码 127".into());
+        assert!(!dh.contains("镜像可能缺"), "host 不增补容器提示：{dh}");
+    }
+
     /// emit_step / emit_output 的 seq 由 logbuf 编号、流式编码合流由集成测试
     /// 覆盖（需真实进程 + 通道）；此处仅断言纯助手。
     #[test]
@@ -797,7 +1015,18 @@ mod tests {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let deadline = Some(Instant::now() + Duration::from_millis(300));
         let started = std::time::Instant::now();
-        let outcome = run_steps(&spec, &ws_dir, &cancel_rx, &[], u64::MAX, deadline, &logbuf).await;
+        let trunc = Arc::new(Truncation::new(u64::MAX));
+        let outcome = run_steps(
+            &spec,
+            &ws_dir,
+            &Backend::Host,
+            &cancel_rx,
+            &[],
+            trunc,
+            deadline,
+            &logbuf,
+        )
+        .await;
         assert_eq!(outcome, JobOutcome::Timeout, "近 deadline 应使步骤超时");
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -833,7 +1062,18 @@ mod tests {
         };
         let (_cancel_tx, cancel_rx) = watch::channel(true); // 预置取消
         let started = std::time::Instant::now();
-        let outcome = run_steps(&spec, &ws_dir, &cancel_rx, &[], u64::MAX, None, &logbuf).await;
+        let trunc = Arc::new(Truncation::new(u64::MAX));
+        let outcome = run_steps(
+            &spec,
+            &ws_dir,
+            &Backend::Host,
+            &cancel_rx,
+            &[],
+            trunc,
+            None,
+            &logbuf,
+        )
+        .await;
         assert_eq!(
             outcome,
             JobOutcome::Cancelled,

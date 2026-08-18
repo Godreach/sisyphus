@@ -416,7 +416,10 @@ fn event_to_json(seq: u64, event: &LogEvent) -> String {
         Some(EventKind::Output(o)) => {
             obj.insert("kind".into(), json!("output"));
             obj.insert("stream".into(), json!(o.stream));
-            obj.insert("data".into(), json!(Base64UrlUnpadded::encode_string(&o.data)));
+            obj.insert(
+                "data".into(),
+                json!(Base64UrlUnpadded::encode_string(&o.data)),
+            );
         }
         Some(EventKind::Step(s)) => {
             obj.insert("kind".into(), json!("step"));
@@ -452,7 +455,10 @@ fn event_from_json(line: &str) -> Option<LogEvent> {
             let seq_no = v.get("step_seq")?.as_i64()? as i32;
             let started = v.get("started_at")?.as_i64()?;
             let ended = v.get("ended_at")?.as_i64()?;
-            let exit_code = v.get("exit_code").and_then(serde_json::Value::as_i64).map(|x| x as i32);
+            let exit_code = v
+                .get("exit_code")
+                .and_then(serde_json::Value::as_i64)
+                .map(|x| x as i32);
             let command = v.get("command")?.as_str()?.to_string();
             Some(EventKind::Step(StepEvent {
                 seq: seq_no,
@@ -519,7 +525,12 @@ mod tests {
     }
 
     fn output_data(msg: &ChannelMessage) -> &[u8] {
-        match log_event_of(msg).expect("事件").kind.as_ref().expect("kind") {
+        match log_event_of(msg)
+            .expect("事件")
+            .kind
+            .as_ref()
+            .expect("kind")
+        {
             EventKind::Output(o) => &o.data,
             _ => panic!("非输出事件"),
         }
@@ -530,8 +541,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("临时目录");
         let buf = LogBuffer::new(dir.path().to_path_buf(), DEFAULT_GRACE);
 
-        let m1 = buf.append("job-1", 0, output_event(b"hello")).await.unwrap();
-        let m2 = buf.append("job-1", 0, output_event(b"world")).await.unwrap();
+        let m1 = buf
+            .append("job-1", 0, output_event(b"hello"))
+            .await
+            .unwrap();
+        let m2 = buf
+            .append("job-1", 0, output_event(b"world"))
+            .await
+            .unwrap();
         assert_eq!(seq_of(&m1), 0, "首个事件 seq=0");
         assert_eq!(seq_of(&m2), 1, "同 (job, attempt) 单调");
 
@@ -551,7 +568,11 @@ mod tests {
         buf.append("job-1", 0, output_event(b"a")).await.unwrap();
         buf.append("job-1", 0, output_event(b"b")).await.unwrap();
         let m = buf.append("job-1", 1, output_event(b"c")).await.unwrap();
-        assert_eq!(seq_of(&m), 0, "attempt=1 从头计 seq（与 attempt=0 互不污染）");
+        assert_eq!(
+            seq_of(&m),
+            0,
+            "attempt=1 从头计 seq（与 attempt=0 互不污染）"
+        );
 
         assert!(buf.path("job-1", 0).exists(), "attempt 0 缓冲独立保留");
         assert!(buf.path("job-1", 1).exists(), "attempt 1 缓冲独立");
@@ -620,7 +641,11 @@ mod tests {
         let binary = vec![0u8, 1, 2, 255, 254, b'\n', b'"', 0x80];
         buf.append("job-1", 0, output_event(&binary)).await.unwrap();
         let replayed = buf.replay("job-1", 0).await.unwrap();
-        assert_eq!(output_data(&replayed[0]), binary.as_slice(), "二进制字节原样往返");
+        assert_eq!(
+            output_data(&replayed[0]),
+            binary.as_slice(),
+            "二进制字节原样往返"
+        );
     }
 
     #[tokio::test]
@@ -657,7 +682,12 @@ mod tests {
         .unwrap();
         let replayed = buf.replay("job-1", 0).await.unwrap();
         assert_eq!(replayed.len(), 2);
-        match log_event_of(&replayed[0]).expect("事件").kind.as_ref().expect("kind") {
+        match log_event_of(&replayed[0])
+            .expect("事件")
+            .kind
+            .as_ref()
+            .expect("kind")
+        {
             EventKind::Step(s) => {
                 assert_eq!(s.seq, 2);
                 assert_eq!(s.exit_code, Some(0));
@@ -665,7 +695,12 @@ mod tests {
             }
             _ => panic!("期望 step 事件"),
         }
-        match log_event_of(&replayed[1]).expect("事件").kind.as_ref().expect("kind") {
+        match log_event_of(&replayed[1])
+            .expect("事件")
+            .kind
+            .as_ref()
+            .expect("kind")
+        {
             EventKind::Truncated(t) => assert_eq!(t.dropped_bytes, 4096),
             _ => panic!("期望 truncated 事件"),
         }

@@ -38,11 +38,11 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use sisyphus_proto::agent::{
     ChannelMessage, WorkspaceCommand, WorkspaceEntry, WorkspaceList, channel_message::Kind,
     workspace_command::Kind as WorkspaceKind,
 };
-use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
 
@@ -296,7 +296,7 @@ impl Workspace {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     "pipeline 目录清洗冲突耗尽后缀空间",
-                ))
+                ));
             }
         };
         // job 目录：按 job 标记（pipeline + job 双匹配）。
@@ -318,7 +318,7 @@ impl Workspace {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     "job 目录清洗冲突耗尽后缀空间",
-                ))
+                ));
             }
         };
         Ok(j_dir)
@@ -425,10 +425,14 @@ impl Workspace {
     /// 按标记定位 pipeline 目录（清洗冲突时取真名匹配的 `-<N>` 目录）。无标记
     /// 目录返回 `Some(false)`（不复用，触发后缀回退）——与 [`probe`] 约定一致。
     fn find_pipeline_dir(&self, pipeline: &str) -> Option<PathBuf> {
-        match probe(&self.root, &sanitize(pipeline), |d| match read_pipeline_marker(d) {
-            Some(m) => Some(m.pipeline == pipeline),
-            None => Some(false),
-        }) {
+        match probe(
+            &self.root,
+            &sanitize(pipeline),
+            |d| match read_pipeline_marker(d) {
+                Some(m) => Some(m.pipeline == pipeline),
+                None => Some(false),
+            },
+        ) {
             Probe::Found(p) => Some(p),
             _ => None,
         }
@@ -455,7 +459,9 @@ impl Workspace {
             Some(WorkspaceKind::Clean(req)) => {
                 let (pipeline, job) = (req.pipeline, req.job);
                 match self.clean(&pipeline, &job) {
-                    Ok(n) => tracing::info!(pipeline = %pipeline, job = %job, removed = n, "工作区清理完成"),
+                    Ok(n) => {
+                        tracing::info!(pipeline = %pipeline, job = %job, removed = n, "工作区清理完成")
+                    }
                     Err(e) => tracing::warn!(error = %e, "工作区清理失败"),
                 }
             }
@@ -520,7 +526,9 @@ fn remove_job_marker_best_effort(job_dir: &Path) {
         match std::fs::remove_file(&marker) {
             Ok(()) => tracing::debug!(path = %marker.display(), "job 标记 sidecar 已删除"),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!(path = %marker.display(), error = %e, "job 标记 sidecar 删除失败"),
+            Err(e) => {
+                tracing::warn!(path = %marker.display(), error = %e, "job 标记 sidecar 删除失败")
+            }
         }
     }
 }
@@ -566,7 +574,12 @@ impl RunningJobs {
     /// 快照（重连在途上报 #59 用；当前由 Agent 根 `in_flight` 承载，此为
     /// #59 统一时的迁移面）。
     pub fn snapshot(&self) -> Vec<String> {
-        self.inner.lock().expect("运行集合锁").clone().into_iter().collect()
+        self.inner
+            .lock()
+            .expect("运行集合锁")
+            .clone()
+            .into_iter()
+            .collect()
     }
 }
 
@@ -821,7 +834,10 @@ mod tests {
             job_dir.parent().unwrap().join(".sisyphus-ws.job.json"),
             "sidecar 命名 = 前缀 + job 目录名 + .json"
         );
-        assert!(sidecar.parent() == job_dir.parent(), "sidecar 与 job 目录同级");
+        assert!(
+            sidecar.parent() == job_dir.parent(),
+            "sidecar 与 job 目录同级"
+        );
     }
 
     #[tokio::test]
@@ -873,8 +889,14 @@ mod tests {
             ws.root().join("my_pipe-2").join("job"),
             "pipeline 冲突追加 -2"
         );
-        assert_eq!(read_pipeline_marker(a.parent().unwrap()).unwrap().pipeline, "my pipe");
-        assert_eq!(read_pipeline_marker(b.parent().unwrap()).unwrap().pipeline, "my|pipe");
+        assert_eq!(
+            read_pipeline_marker(a.parent().unwrap()).unwrap().pipeline,
+            "my pipe"
+        );
+        assert_eq!(
+            read_pipeline_marker(b.parent().unwrap()).unwrap().pipeline,
+            "my|pipe"
+        );
     }
 
     #[tokio::test]
@@ -988,12 +1010,23 @@ mod tests {
         let cache_root = data.path().join("cache");
         std::fs::create_dir_all(&ws_root).unwrap();
         std::fs::create_dir_all(cache_root.join("some-pipe").join("some-key")).unwrap();
-        std::fs::write(cache_root.join("some-pipe").join("some-key").join("artifact"), b"v").unwrap();
+        std::fs::write(
+            cache_root
+                .join("some-pipe")
+                .join("some-key")
+                .join("artifact"),
+            b"v",
+        )
+        .unwrap();
         let ws = Workspace::new(ws_root);
         ws.resolve("pipe", "job").unwrap();
         ws.clean("", "").unwrap();
         assert!(
-            cache_root.join("some-pipe").join("some-key").join("artifact").exists(),
+            cache_root
+                .join("some-pipe")
+                .join("some-key")
+                .join("artifact")
+                .exists(),
             "缓存目录未被清理触及"
         );
     }
@@ -1034,10 +1067,7 @@ mod tests {
             "${SISY_WORKSPACE}",
             "转义输出字面量"
         );
-        assert_eq!(
-            expand_sisy_workspace("no var here", ws),
-            "no var here"
-        );
+        assert_eq!(expand_sisy_workspace("no var here", ws), "no var here");
         assert_eq!(
             expand_sisy_workspace("${SISY_WORKSPACE}${SISY_WORKSPACE}", ws),
             "/srv/ws/pipe/job/srv/ws/pipe/job",
@@ -1062,11 +1092,7 @@ mod tests {
         let job_dir = pipe_dir.join("job");
         std::fs::create_dir_all(&job_dir).unwrap();
         std::fs::write(pipe_dir.join(MARKER_PIPELINE), b"{}").unwrap();
-        std::fs::write(
-            pipe_dir.join(format!("{MARKER_JOB_PREFIX}job.json")),
-            b"{}",
-        )
-        .unwrap();
+        std::fs::write(pipe_dir.join(format!("{MARKER_JOB_PREFIX}job.json")), b"{}").unwrap();
         std::fs::write(job_dir.join("out.bin"), vec![0u8; 1000]).unwrap();
         std::fs::write(job_dir.join("log.txt"), b"hello").unwrap();
         let sampler = WorkspaceSampler::new(root);

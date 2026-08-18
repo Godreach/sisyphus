@@ -37,7 +37,7 @@ use std::time::Instant;
 use sisyphus_proto::agent::{CheckoutStep, ScmCredential, VcsType};
 use tokio::sync::watch;
 
-use crate::exec::{self, SpawnError};
+use crate::exec::SpawnError;
 use crate::logbuf::LogBuffer;
 use crate::runner::JobOutcome;
 use crate::stepio::{self, Truncation};
@@ -73,7 +73,7 @@ impl Default for ScmBins {
 /// `args`）+ `cred_env`（git ASKPASS/credential store env）+ `stdin`（svn
 /// `--password-from-stdin` 的密码）+ `cwd`。`label` 供失败报错点名。
 #[derive(Debug, Clone)]
-struct PlannedCommand {
+pub(crate) struct PlannedCommand {
     program: String,
     args: Vec<String>,
     cred_env: Vec<(String, String)>,
@@ -89,7 +89,7 @@ struct PlannedCommand {
 /// `CheckoutStep.vcs`（裸 i32）→ `Option<VcsType>`。prost 枚举字段是裸 i32、
 /// 越界值（如 999）不报错；本助手显式判越界以清晰报错（ADR-0016「缺/未知不
 /// 静默降级」）。
-fn vcs_of(step: &CheckoutStep) -> Option<VcsType> {
+pub(crate) fn vcs_of(step: &CheckoutStep) -> Option<VcsType> {
     match step.vcs {
         x if x == VcsType::VcsGit as i32 => Some(VcsType::VcsGit),
         x if x == VcsType::VcsSvn as i32 => Some(VcsType::VcsSvn),
@@ -131,7 +131,7 @@ pub(crate) fn step_echo(step: &CheckoutStep) -> String {
 /// `need_init = true` → 首次（git clone / svn checkout）；`false` → 增量
 /// （git fetch / svn cleanup+update）。规划错（缺 repo_url / 未知 vcs / git
 /// 无 commit 无 branch）→ `Err(detail)`，调用方映射到 `SpawnFailed`。
-fn plan(
+pub(crate) fn plan(
     step: &CheckoutStep,
     ws_dir: &Path,
     need_init: bool,
@@ -540,6 +540,107 @@ fn cred_artifact_path(job_id: &str) -> PathBuf {
 }
 
 // ============================================================
+// 子命令执行器（host / 容器共用缝：只差「进程怎么起」，ADR-0018）
+// ============================================================
+
+/// checkout 子命令执行器：把 (program, args, cwd, env, pipe_stdin) 起成一个
+/// [`crate::exec::SpawnedStep`]（+ 可选容器名，供取消/超时补刀 `docker rm -f`）。
+/// host 后端 argv 直传、返回 `None` 名；容器后端包成 `docker run`、返回 `Some(name)`
+/// （见 [`crate::container`]）。[`run_planned`] 经此 trait 与后端解耦——两后端共用
+/// 同一套子命令执行循环，只换 spawner。
+pub(crate) trait CommandSpawner: Send + Sync {
+    /// 起一个子命令进程，返回 (进程句柄, 可选容器名)。缺二进制（host）→
+    /// [`crate::exec::SpawnError`] 携「缺 X 二进制」清晰报错，不静默降级（ADR-0016）。
+    fn spawn(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: &std::path::Path,
+        env: &HashMap<String, String>,
+        pipe_stdin: bool,
+    ) -> Result<(crate::exec::SpawnedStep, Option<String>), SpawnError>;
+}
+
+/// 宿主机直跑执行器：argv 直传 [`crate::exec::spawn_command`]；无容器名（`None`）。
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct HostSpawner;
+
+impl CommandSpawner for HostSpawner {
+    fn spawn(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: &std::path::Path,
+        env: &HashMap<String, String>,
+        pipe_stdin: bool,
+    ) -> Result<(crate::exec::SpawnedStep, Option<String>), SpawnError> {
+        let spawned = crate::exec::spawn_command(program, args, cwd, env, pipe_stdin)?;
+        Ok((spawned, None))
+    }
+}
+
+/// 执行一组已规划的 checkout 子命令（共享循环）：逐条 spawn → 流式编码 →
+/// 与取消/超时竞争 wait → 映射终态。host 与容器后端共用——只差 spawner。任一
+/// 子命令非零退出/取消/超时即终止余下并返回对应终态。
+///
+/// 返回 `(终态, 可选容器名)`：取消/超时时携带在跑容器名（供调用方 `docker rm -f`
+/// 补刀，ADR-0018）；正常退出/失败/spawn 失败时为 `None`（`--rm` 已自清或未起容器）。
+//
+// 参数多于 clippy 阈值：cmds/spawner 是执行输入、余下是 step 上下文（脱敏集/
+// 截断/标识/取消/deadline/日志）——与 [`run`] 同款 allow。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_planned(
+    cmds: &[PlannedCommand],
+    secrets: Vec<Vec<u8>>,
+    trunc: Arc<Truncation>,
+    job_id: &str,
+    attempt: i32,
+    cancel_rx: watch::Receiver<bool>,
+    deadline: Option<Instant>,
+    logbuf: &LogBuffer,
+    spawner: &dyn CommandSpawner,
+) -> (JobOutcome, Option<String>) {
+    for cmd in cmds {
+        let env = env_map(&cmd.cred_env);
+        let pipe_stdin = cmd.stdin.is_some();
+        let (spawned, name) =
+            match spawner.spawn(&cmd.program, &cmd.args, &cmd.cwd, &env, pipe_stdin) {
+                Ok(p) => p,
+                Err(SpawnError(e)) => {
+                    return (JobOutcome::SpawnFailed(format!("checkout 失败：{e}")), None);
+                }
+            };
+        // 每子命令取 job 级 deadline 的剩余配额（到点即 0 → 立即 timeout）。
+        let remaining = deadline.map(|dl| dl.saturating_duration_since(Instant::now()));
+        let outcome = stepio::run_streamed_step(
+            spawned,
+            cmd.stdin.clone(),
+            secrets.clone(),
+            trunc.clone(),
+            job_id,
+            attempt,
+            remaining,
+            cancel_rx.clone(),
+            logbuf,
+        )
+        .await;
+        match outcome {
+            crate::exec::StepOutcome::Exited(0) => continue,
+            crate::exec::StepOutcome::Exited(code) => {
+                return (
+                    JobOutcome::Failed(code, format!("{} 退出码 {code}", cmd.label)),
+                    None,
+                );
+            }
+            // 取消/超时：回传在跑容器名（调用方 docker rm -f 补刀；host 为 None）。
+            crate::exec::StepOutcome::Cancelled => return (JobOutcome::Cancelled, name),
+            crate::exec::StepOutcome::Timeout => return (JobOutcome::Timeout, name),
+        }
+    }
+    (JobOutcome::Succeeded, None)
+}
+
+// ============================================================
 // run：执行 checkout 子命令序列 → JobOutcome
 // ============================================================
 
@@ -598,40 +699,22 @@ pub(crate) async fn run(
         Err(e) => return JobOutcome::SpawnFailed(format!("checkout 失败：{e}")),
     };
 
-    for cmd in &plan_cmds {
-        let env = env_map(&cmd.cred_env);
-        let pipe_stdin = cmd.stdin.is_some();
-        let spawned = match exec::spawn_command(&cmd.program, &cmd.args, &cmd.cwd, &env, pipe_stdin)
-        {
-            Ok(s) => s,
-            Err(SpawnError(e)) => {
-                return JobOutcome::SpawnFailed(format!("checkout 失败：{e}"));
-            }
-        };
-        // 每子命令取 job 级 deadline 的剩余配额（到点即 0 → 立即 timeout）。
-        let remaining = deadline.map(|dl| dl.saturating_duration_since(Instant::now()));
-        let outcome = stepio::run_streamed_step(
-            spawned,
-            cmd.stdin.clone(),
-            secrets.clone(),
-            trunc.clone(),
-            job_id,
-            attempt,
-            remaining,
-            cancel_rx.clone(),
-            logbuf,
-        )
-        .await;
-        match outcome {
-            crate::exec::StepOutcome::Exited(0) => continue,
-            crate::exec::StepOutcome::Exited(code) => {
-                return JobOutcome::Failed(code, format!("{} 退出码 {code}", cmd.label));
-            }
-            crate::exec::StepOutcome::Cancelled => return JobOutcome::Cancelled,
-            crate::exec::StepOutcome::Timeout => return JobOutcome::Timeout,
-        }
-    }
-    JobOutcome::Succeeded
+    // 子命令执行循环（spawn → 流式编码 → 取消/超时竞争 → 映射终态）抽出为
+    // [`run_planned`]：容器后端复用同一循环，只换 spawner（ADR-0018）。host 后端
+    // 无容器名（`.0` 取终态，丢弃 `None` 名）。
+    run_planned(
+        &plan_cmds,
+        secrets,
+        trunc,
+        job_id,
+        attempt,
+        cancel_rx,
+        deadline,
+        logbuf,
+        &HostSpawner,
+    )
+    .await
+    .0
 }
 
 /// `Vec<(String,String)>` → `HashMap`（`exec::spawn_command` 接口）。

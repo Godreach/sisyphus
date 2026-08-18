@@ -11,8 +11,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
-use sisyphus_agent::register::{RegisterError, persist_token, register};
 use sisyphus_agent::config::TOKEN_FILE_NAME;
+use sisyphus_agent::register::{RegisterError, persist_token, register};
 
 /// 极简 HTTP/1.1 stub：单连接读请求行 + 头（收 body 长度）→ 按脚本回响应。
 /// 记录收到的请求行与 body（断言请求形态用）。
@@ -55,10 +55,7 @@ impl Stub {
                     if reader.read_line(&mut line).is_err() || line == "\r\n" || line == "\n" {
                         break;
                     }
-                    if let Some(v) = line
-                        .to_ascii_lowercase()
-                        .strip_prefix("content-length:")
-                    {
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
                         content_length = v.trim().parse().unwrap_or(0);
                     }
                 }
@@ -84,9 +81,7 @@ fn client() -> reqwest::Client {
 
 #[tokio::test]
 async fn register_posts_name_and_code_and_returns_token() {
-    let stub = Stub::spawn(|_body| {
-        response("200 OK", r#"{"token":"sisa_newtoken_abc123"}"#)
-    });
+    let stub = Stub::spawn(|_body| response("200 OK", r#"{"token":"sisa_newtoken_abc123"}"#));
     let token = register(
         &client(),
         &format!("http://{}", stub.addr),
@@ -146,14 +141,14 @@ async fn register_rejects_non_success_with_server_message() {
     )
     .await
     .expect_err("停用应拒绝");
-    assert!(matches!(
-        err,
-        RegisterError::Rejected { status: 403, .. }
-    ));
+    assert!(matches!(err, RegisterError::Rejected { status: 403, .. }));
 
     // 无效 404。
     let stub = Stub::spawn(|_| {
-        response("404 Not Found", r#"{"code":"NOT_FOUND","message":"注册码无效"}"#)
+        response(
+            "404 Not Found",
+            r#"{"code":"NOT_FOUND","message":"注册码无效"}"#,
+        )
     });
     let err = register(
         &client(),
@@ -163,10 +158,7 @@ async fn register_rejects_non_success_with_server_message() {
     )
     .await
     .expect_err("无效应拒绝");
-    assert!(matches!(
-        err,
-        RegisterError::Rejected { status: 404, .. }
-    ));
+    assert!(matches!(err, RegisterError::Rejected { status: 404, .. }));
 
     // 非 JSON 错误体：message 落状态码文本兜底。
     let stub = Stub::spawn(|_| response("500 Internal Server Error", "oops"));
@@ -178,10 +170,7 @@ async fn register_rejects_non_success_with_server_message() {
     )
     .await
     .expect_err("500 应拒绝");
-    assert!(matches!(
-        err,
-        RegisterError::Rejected { status: 500, .. }
-    ));
+    assert!(matches!(err, RegisterError::Rejected { status: 500, .. }));
 }
 
 #[tokio::test]

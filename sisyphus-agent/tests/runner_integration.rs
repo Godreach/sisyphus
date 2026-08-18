@@ -26,14 +26,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sisyphus_agent::Agent;
-use sisyphus_agent::channel::{Backoff, ChannelConfig, PlatformDiskSampler, PlatformLabels};
+use sisyphus_agent::channel::{Backoff, ChannelConfig, PlatformDiskSampler, StaticLabels};
 use sisyphus_agent::config::{self, Overrides};
 use sisyphus_agent::workspace::Workspace;
 use sisyphus_proto::agent::{
-    CancelBuild, ChannelMessage, CheckoutStep, Handshake, JobAck, JobPhase, JobSpec, JobStatus,
-    JobStep, LogBatch, ShellStep, Stream, VcsType, Version,
+    CancelBuild, ChannelMessage, CheckoutStep, ContainerEnv, ExecutionEnv, Handshake, JobAck,
+    JobPhase, JobSpec, JobStatus, JobStep, LogBatch, ShellStep, Stream, VcsType, Version,
     agent_channel_server::{AgentChannel, AgentChannelServer},
     channel_message::Kind,
+    execution_env::Kind as EnvKind,
     job_step::Kind as StepKind,
     log_event::Kind as EventKind,
 };
@@ -226,7 +227,7 @@ fn channel_cfg(server_url: String, token: Option<&str>, data_dir: &Path) -> Chan
         token: token.map(str::to_string),
         heartbeat_interval: Duration::from_secs(3600), // 测试不依赖心跳
         backoff: Backoff::with_params(Duration::from_millis(50), Duration::from_millis(300), 0.0),
-        labels: Arc::new(PlatformLabels),
+        labels: Arc::new(StaticLabels),
         disk: Arc::new(PlatformDiskSampler::new(data_dir.to_path_buf())),
         workspace_sample_interval: Duration::from_secs(3600),
     }
@@ -1196,6 +1197,263 @@ async fn checkout_step_incremental_resets_and_cleans_on_reused_workspace() {
     assert!(
         !ws_dir.join("untracked.txt").exists(),
         "clean -fd 删未跟踪文件"
+    );
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+// ============================================================
+// 容器后端端到端（票 B3-T7 / #53；#[ignore]：需 docker daemon + 网络）
+// ============================================================
+
+/// 构造一个容器 shell 步骤的 JobSpec（`exec_env = Container{image}`）。
+#[allow(clippy::too_many_arguments)]
+fn container_shell_spec(
+    job_id: &str,
+    pipeline: &str,
+    job: &str,
+    image: &str,
+    command: &str,
+    env: Vec<(&str, &str)>,
+    secrets: Vec<&str>,
+    log_limit: i64,
+) -> ChannelMessage {
+    let env: HashMap<String, String> = env.into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+    ChannelMessage {
+        kind: Some(Kind::JobSpec(Box::new(JobSpec {
+            job_id: job_id.to_string(),
+            pipeline_name: pipeline.into(),
+            job_name: job.into(),
+            build_number: 1,
+            attempt: 0,
+            log_limit_bytes: log_limit,
+            steps: vec![JobStep {
+                name: "step-0".into(),
+                seq: 0,
+                kind: Some(StepKind::Shell(ShellStep {
+                    command: command.into(),
+                })),
+            }],
+            env,
+            exec_env: Some(ExecutionEnv {
+                kind: Some(EnvKind::Container(ContainerEnv {
+                    image: image.into(),
+                })),
+            }),
+            timeout_minutes: 0,
+            uploads: vec![],
+            downloads: vec![],
+            caches: vec![],
+            secrets: secrets.into_iter().map(str::to_string).collect(),
+            scm_credential: None,
+            labels: vec![],
+            retry_count: 0,
+            allow_failure: false,
+        }))),
+    }
+}
+
+/// AC: 真实容器 shell 步骤执行 + 退出码 + 日志断言（`#[ignore]`：需 docker daemon
+/// + 网络拉 `alpine:3.20`）。无 daemon 时本测试被忽略、装配/单测仍绿。
+/// 覆盖：JobSpec(container) → ack → docker pull → docker run /bin/sh -c →
+/// stdout 流式回传 → 终态 succeeded + 退出码 0；`${SISY_WORKSPACE}` 在容器内
+/// 展开为 `/sisyphus/workspace`。
+#[tokio::test]
+#[ignore = "需 docker daemon + 网络（拉 alpine:3.20）；手动 `cargo test -- --ignored`"]
+async fn container_shell_step_runs_in_docker_and_reports_success() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, _ws, agent_task) =
+        spawn_agent(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
+
+    // echo hello + 回显 ${SISY_WORKSPACE}（runner 执行前展开为 /sisyphus/workspace）。
+    send_downlink(
+        &state,
+        container_shell_spec(
+            "job-c1",
+            "pipe",
+            "job",
+            "alpine:3.20",
+            r#"echo hello-container; echo "ws=${SISY_WORKSPACE}""#,
+            vec![],
+            vec![],
+            0,
+        ),
+    )
+    .await;
+    let ack = await_ack(&state, "job-c1", true).await;
+    assert!(ack.error.is_empty(), "接受不应带 error：{}", ack.error);
+
+    let terminal = await_terminal(&state, "job-c1").await;
+    assert_eq!(
+        terminal.phase(),
+        JobPhase::JobSucceeded,
+        "容器 shell 步骤应成功：{}",
+        terminal.detail
+    );
+    assert_eq!(terminal.exit_code, Some(0), "succeeded 退出码 0");
+
+    // stdout 含 hello-container + ${SISY_WORKSPACE} 展开为 /sisyphus/workspace。
+    wait_until(|| async {
+        output_bytes(&state, "job-c1")
+            .windows(b"hello-container".len())
+            .any(|w| w == b"hello-container")
+    })
+    .await;
+    let out = output_bytes(&state, "job-c1");
+    let out = String::from_utf8_lossy(&out);
+    assert!(
+        out.contains("hello-container"),
+        "stdout 含 hello-container：{out}"
+    );
+    assert!(
+        out.contains("/sisyphus/workspace"),
+        "${{SISY_WORKSPACE}} 应在容器内展开为 /sisyphus/workspace：{out}"
+    );
+
+    // step 事件：start（命令回显）+ end（exit 0）。
+    wait_until(|| async { step_events(&state, "job-c1").len() >= 2 }).await;
+    let steps = step_events(&state, "job-c1");
+    assert_eq!(steps[0].exit_code, None, "start 事件 exit_code=None");
+    assert!(steps[0].command.contains("echo"), "start 携带命令回显");
+    assert_eq!(steps[1].exit_code, Some(0), "end 事件 exit_code=Some(0)");
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// AC: 容器 shell 步骤非零退出 → 终态 failed + 退出码（`#[ignore]`：需 daemon）。
+/// `docker run` 透传容器内退出码。
+#[tokio::test]
+#[ignore = "需 docker daemon + 网络（拉 alpine:3.20）；手动 `cargo test -- --ignored`"]
+async fn container_shell_step_failure_reports_failed_with_exit_code() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, _ws, agent_task) =
+        spawn_agent(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
+
+    send_downlink(
+        &state,
+        container_shell_spec(
+            "job-c2",
+            "pipe",
+            "job",
+            "alpine:3.20",
+            "exit 7",
+            vec![],
+            vec![],
+            0,
+        ),
+    )
+    .await;
+    await_ack(&state, "job-c2", true).await;
+    let terminal = await_terminal(&state, "job-c2").await;
+    assert_eq!(terminal.phase(), JobPhase::JobFailed, "非零退出 → failed");
+    assert_eq!(terminal.exit_code, Some(7), "携带容器内退出码 7");
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// 构造一个容器 checkout 步骤的 JobSpec（`exec_env = Container{image}`，git 钉到
+/// 分支头）。
+fn container_checkout_spec(
+    job_id: &str,
+    pipeline: &str,
+    job: &str,
+    image: &str,
+    url: &str,
+    branch: &str,
+) -> ChannelMessage {
+    ChannelMessage {
+        kind: Some(Kind::JobSpec(Box::new(JobSpec {
+            job_id: job_id.to_string(),
+            pipeline_name: pipeline.into(),
+            job_name: job.into(),
+            build_number: 1,
+            attempt: 0,
+            log_limit_bytes: 0,
+            steps: vec![JobStep {
+                name: "step-0".into(),
+                seq: 0,
+                kind: Some(StepKind::Checkout(CheckoutStep {
+                    vcs: VcsType::VcsGit as i32,
+                    repo_url: url.into(),
+                    r#ref: branch.into(),
+                    commit: String::new(), // 分支头
+                    submodules: false,
+                })),
+            }],
+            env: HashMap::new(),
+            exec_env: Some(ExecutionEnv {
+                kind: Some(EnvKind::Container(ContainerEnv {
+                    image: image.into(),
+                })),
+            }),
+            timeout_minutes: 0,
+            uploads: vec![],
+            downloads: vec![],
+            caches: vec![],
+            secrets: vec![],
+            scm_credential: None,
+            labels: vec![],
+            retry_count: 0,
+            allow_failure: false,
+        }))),
+    }
+}
+
+/// AC: 容器内 checkout（git 在镜像内、克隆到挂载工作区、钉到分支头）——`#[ignore]`：
+/// 需 docker daemon + 网络（拉 `alpine/git` 镜像 + 克隆公网仓库）。覆盖 ADR-0018
+/// 「checkout 在容器内执行不特例」端到端：pull → docker run git clone → 文件落盘
+/// 到宿主工作区（经挂载）→ 终态 succeeded。
+#[tokio::test]
+#[ignore = "需 docker daemon + 网络（拉 alpine/git + 克隆公网仓库）；手动 `cargo test -- --ignored`"]
+async fn container_checkout_step_clones_into_mounted_workspace() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown_tx, ws, agent_task) =
+        spawn_agent(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
+
+    // octocat/Hello-World：GitHub 长期稳定的小型公开仓库（含 README + 多分支）。
+    // 分支头 checkout（commit 空 → Agent 检 origin/<branch>）。
+    send_downlink(
+        &state,
+        container_checkout_spec(
+            "job-co3",
+            "pipe",
+            "job",
+            "alpine/git",
+            "https://github.com/octocat/Hello-World.git",
+            "master",
+        ),
+    )
+    .await;
+    await_ack(&state, "job-co3", true).await;
+    let terminal = await_terminal(&state, "job-co3").await;
+    assert_eq!(
+        terminal.phase(),
+        JobPhase::JobSucceeded,
+        "容器内 git checkout 应成功：{}",
+        terminal.detail
+    );
+
+    // 克隆结果经挂载落盘到宿主工作区（容器写 /sisyphus/workspace = 宿主 ws_dir）。
+    let ws_dir = ws.resolve("pipe", "job").expect("resolve 工作区");
+    assert!(
+        ws_dir.join(".git").is_dir(),
+        ".git 应经挂载落盘到宿主工作区（容器内克隆 → 挂载目录）"
+    );
+    assert!(
+        ws_dir.join("README").is_file(),
+        "README 应检出（Hello-World 仓库根含 README）"
     );
 
     shutdown_tx.send(true).expect("关闭");

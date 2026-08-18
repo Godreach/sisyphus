@@ -12,6 +12,7 @@ pub mod cache;
 pub mod channel;
 pub mod checkout;
 pub mod config;
+pub mod container;
 pub mod exec;
 pub mod logbuf;
 pub mod redact;
@@ -80,7 +81,9 @@ impl Agent {
             token: config::read_token(&config.data_dir),
             heartbeat_interval: channel::HEARTBEAT_INTERVAL,
             backoff: channel::Backoff::new(),
-            labels: Arc::new(channel::PlatformLabels),
+            labels: Arc::new(channel::PlatformLabels::new(Arc::new(
+                channel::ContainerProbe::new(),
+            ))),
             disk: Arc::new(channel::PlatformDiskSampler::new(config.data_dir.clone())),
             workspace_sample_interval: workspace::DEFAULT_WORKSPACE_SAMPLE_INTERVAL,
         };
@@ -169,6 +172,18 @@ impl Agent {
             .clone()
             .spawn(self.channel_cfg.workspace_sample_interval);
 
+        // 容器探测周期循环（ADR-0018：周期 `docker version` →
+        // `sisyphus/container=docker` 标签随 metadata 上报）。经
+        // `channel_cfg.labels.probe_handle()` 取探测句柄——PlatformLabels 返回
+        // Some（spawn 周期探测）；StaticLabels 等测试静态源返回 None（不探测，
+        // 避免测试依赖宿主 docker）。首帧即探（首次连接前结果就绪）。
+        let probe_task = self.channel_cfg.labels.probe_handle().map(|p| {
+            p.spawn_refresh(
+                channel::CONTAINER_PROBE_INTERVAL,
+                container::DOCKER_BIN.to_string(),
+            )
+        });
+
         let mut backoff = self.channel_cfg.backoff.clone();
         loop {
             // 连接期间在途上报/心跳由 run_connection 内部驱动；连接结束
@@ -207,6 +222,9 @@ impl Agent {
         cache_task.abort();
         upgrader_task.abort();
         sampler_task.abort();
+        if let Some(t) = probe_task {
+            t.abort();
+        }
     }
 }
 

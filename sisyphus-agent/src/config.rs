@@ -156,11 +156,7 @@ pub struct Overrides {
 impl Overrides {
     /// 读 `SISYPHUS_` 前缀环境变量层（ADR-0010；薄适配，语义在 merge 缝上测试）。
     pub fn from_env() -> Overrides {
-        let get = |key: &str| {
-            std::env::var(key)
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        };
+        let get = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
         Overrides {
             server_url: get("SISYPHUS_SERVER_URL"),
             api_url: get("SISYPHUS_API_URL"),
@@ -203,7 +199,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::InvalidLogLevel(v) => {
                 write!(f, "日志级别非法：{v}（期望 trace/debug/info/warn/error）")
             }
-            ConfigError::NoHomeDir => write!(f, "找不到家目录（默认数据目录 ~/.sisyphus-agent 的基准）"),
+            ConfigError::NoHomeDir => {
+                write!(f, "找不到家目录（默认数据目录 ~/.sisyphus-agent 的基准）")
+            }
             ConfigError::WorkspaceRootOverlapsCache {
                 workspace_root,
                 cache_root,
@@ -355,7 +353,11 @@ mod tests {
         assert_eq!(read_token(dir.path()), None, "无 token 文件 = None");
 
         std::fs::write(dir.path().join(TOKEN_FILE_NAME), "  sisa_abc  \n").expect("写 token");
-        assert_eq!(read_token(dir.path()), Some("sisa_abc".into()), "trim 后取用");
+        assert_eq!(
+            read_token(dir.path()),
+            Some("sisa_abc".into()),
+            "trim 后取用"
+        );
 
         std::fs::write(dir.path().join(TOKEN_FILE_NAME), "   ").expect("写空白");
         assert_eq!(read_token(dir.path()), None, "空白 token 视为缺凭据");
@@ -409,7 +411,10 @@ mod tests {
             ..Overrides::default()
         };
         let err = Config::load(&base, &env).expect_err("工作区根=缓存根应拒收");
-        assert!(matches!(err, ConfigError::WorkspaceRootOverlapsCache { .. }));
+        assert!(matches!(
+            err,
+            ConfigError::WorkspaceRootOverlapsCache { .. }
+        ));
 
         // 把工作区根指到数据目录（缓存的祖先）→ 互相包含，拒收
         // （全清会删 <data>/cache）。
@@ -418,7 +423,10 @@ mod tests {
             ..Overrides::default()
         };
         let err = Config::load(&base, &env).expect_err("工作区根包含缓存根应拒收");
-        assert!(matches!(err, ConfigError::WorkspaceRootOverlapsCache { .. }));
+        assert!(matches!(
+            err,
+            ConfigError::WorkspaceRootOverlapsCache { .. }
+        ));
 
         // 工作区根嵌在缓存根之下 → 互相包含，拒收（缓存清理会删工作区）。
         let env = Overrides {
@@ -426,7 +434,10 @@ mod tests {
             ..Overrides::default()
         };
         let err = Config::load(&base, &env).expect_err("工作区根在缓存根下应拒收");
-        assert!(matches!(err, ConfigError::WorkspaceRootOverlapsCache { .. }));
+        assert!(matches!(
+            err,
+            ConfigError::WorkspaceRootOverlapsCache { .. }
+        ));
 
         // 独立外部目录 → 接受。
         let external = tempfile::tempdir().expect("外部工作区根");

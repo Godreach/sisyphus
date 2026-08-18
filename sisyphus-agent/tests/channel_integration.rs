@@ -22,13 +22,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use sisyphus_agent::channel::{Backoff, ChannelConfig, PlatformDiskSampler, PlatformLabels};
-use sisyphus_agent::config::{self, Overrides};
 use sisyphus_agent::Agent;
+use sisyphus_agent::channel::{Backoff, ChannelConfig, PlatformDiskSampler, StaticLabels};
+use sisyphus_agent::config::{self, Overrides};
 use sisyphus_proto::agent::{
-    CacheCommand, ChannelMessage, Handshake, JobReported, UpgradeCommand, Version, WorkspaceCommand,
-    WorkspaceList, agent_channel_server::{AgentChannel, AgentChannelServer},
-    channel_message::Kind, cache_command::Kind as CacheKind, workspace_command::Kind as WorkspaceKind,
+    CacheCommand, ChannelMessage, Handshake, JobReported, UpgradeCommand, Version,
+    WorkspaceCommand, WorkspaceList,
+    agent_channel_server::{AgentChannel, AgentChannelServer},
+    cache_command::Kind as CacheKind,
+    channel_message::Kind,
+    workspace_command::Kind as WorkspaceKind,
 };
 use tokio::sync::{RwLock, mpsc, watch};
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
@@ -128,7 +131,12 @@ impl FakeState {
         self.workspace_lists.lock().expect("锁").clone()
     }
     fn last_session_tx(&self) -> mpsc::Sender<Result<ChannelMessage, Status>> {
-        self.sessions.lock().expect("锁").last().cloned().expect("应有会话")
+        self.sessions
+            .lock()
+            .expect("锁")
+            .last()
+            .cloned()
+            .expect("应有会话")
     }
     /// 断开全部活动会话（模拟 Server 中途掉线）：置位 drop watch（各会话读取
     /// 任务回到循环即见并退出、drop 发送器）+ 清注册表（drop 注册表的发送器
@@ -167,7 +175,9 @@ impl AgentChannel for FakeServer {
         state.token_present.lock().expect("锁").push(auth.is_some());
         let expected_matches = auth.as_deref() == state.expect_token.as_deref();
         if !expected_matches || state.token_disabled.load(Ordering::SeqCst) {
-            return Err(Status::unauthenticated("fake: Agent token 无效、缺失或已停用"));
+            return Err(Status::unauthenticated(
+                "fake: Agent token 无效、缺失或已停用",
+            ));
         }
 
         // 系统标签随连接呈送（连接面事实）。
@@ -186,7 +196,10 @@ impl AgentChannel for FakeServer {
         // 首帧必须是握手（镜像 Server 侧语义）。
         let mut inbound = request.into_inner();
         let mut agent_version = None;
-        while let Some(msg) = inbound.message().await.map_err(|e| Status::internal(e.to_string()))?
+        while let Some(msg) = inbound
+            .message()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
         {
             if let Some(Kind::Handshake(h)) = msg.kind {
                 agent_version = h.agent_version;
@@ -263,7 +276,9 @@ impl AgentChannel for FakeServer {
 
 /// 起 fake Server（真实 tonic，loopback socket），返回地址与 JoinHandle。
 async fn spawn_fake(state: Arc<FakeState>) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let addr = listener.local_addr().expect("addr");
     let server = FakeServer { state };
     let handle = tokio::spawn(async move {
@@ -308,7 +323,7 @@ fn channel_config(server_url: String, token: Option<&str>, data_dir: &Path) -> C
         token: token.map(str::to_string),
         heartbeat_interval: Duration::from_millis(200),
         backoff: Backoff::with_params(Duration::from_millis(50), Duration::from_millis(300), 0.0),
-        labels: Arc::new(PlatformLabels),
+        labels: Arc::new(StaticLabels),
         disk: Arc::new(PlatformDiskSampler::new(data_dir.to_path_buf())),
         workspace_sample_interval: sisyphus_agent::workspace::DEFAULT_WORKSPACE_SAMPLE_INTERVAL,
     }
@@ -392,7 +407,9 @@ fn build_workspace(
     std::sync::Arc<sisyphus_agent::workspace::WorkspaceSampler>,
 ) {
     let root = cfg.workspaces_dir();
-    let sampler = std::sync::Arc::new(sisyphus_agent::workspace::WorkspaceSampler::new(root.clone()));
+    let sampler = std::sync::Arc::new(sisyphus_agent::workspace::WorkspaceSampler::new(
+        root.clone(),
+    ));
     let state = sisyphus_agent::workspace::Workspace::new(root).with_usage(sampler.clone());
     (state, sampler)
 }
@@ -465,7 +482,7 @@ async fn valid_token_establishes_session_with_heartbeat_labels_and_inflight() {
     );
     assert!(
         !labels.iter().any(|(k, _)| k == META_CONTAINER),
-        "容器探测占位不置标签"
+        "测试注入 StaticLabels（os/arch，无容器探测）——确定性，不依赖宿主 docker"
     );
 
     // 在途上报：连接建立即上报（本批为空集，机制在）。
@@ -475,7 +492,12 @@ async fn valid_token_establishes_session_with_heartbeat_labels_and_inflight() {
     // 心跳：15s 语义经注入短间隔验证，附带真实磁盘占用（卷级 + 占位 0）。
     wait_until(|| async { !state.heartbeats().is_empty() }).await;
     let heartbeats = state.heartbeats();
-    let disk = heartbeats.last().expect("心跳").disk.as_ref().expect("磁盘占用");
+    let disk = heartbeats
+        .last()
+        .expect("心跳")
+        .disk
+        .as_ref()
+        .expect("磁盘占用");
     assert_eq!(disk.cache_bytes, 0, "缓存记账占位（cache 批次）");
     assert_eq!(disk.workspace_bytes, 0, "工作区采样占位（workspace 批次）");
     assert!(
@@ -500,7 +522,10 @@ async fn rejects_missing_and_wrong_token_and_retries_forever() {
     // 无 authorization 头。
     let err = connect_once(format!("http://{addr}"), None, dir.path()).await;
     assert!(err.is_err(), "缺 token 应拒连");
-    assert!(!state.token_present().first().copied().unwrap_or(true), "缺 token 时不带凭据头");
+    assert!(
+        !state.token_present().first().copied().unwrap_or(true),
+        "缺 token 时不带凭据头"
+    );
 
     // 错 token：单次连接被拒。
     let err = connect_once(format!("http://{addr}"), Some("sisa_wrong"), dir.path()).await;
@@ -537,7 +562,10 @@ async fn rejects_disabled_token_and_retries() {
     let (shutdown_tx, _receipts, _logbuf, agent_task) =
         spawn_agent(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
     wait_until(|| async { state.attempts() >= before + 2 }).await;
-    assert!(!agent_task.is_finished(), "停用拒连不自杀：run 循环仍在重试");
+    assert!(
+        !agent_task.is_finished(),
+        "停用拒连不自杀：run 循环仍在重试"
+    );
 
     shutdown_tx.send(true).expect("关闭");
     agent_task.await.expect("agent 任务应正常退出");
@@ -727,16 +755,31 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
         .await
     });
     wait_until(|| async { !state.sessions.lock().expect("锁").is_empty() }).await;
-    logbuf.append("job-1", 0, log_event(b"alpha")).await.expect("落盘");
-    logbuf.append("job-1", 0, log_event(b"beta")).await.expect("落盘");
+    logbuf
+        .append("job-1", 0, log_event(b"alpha"))
+        .await
+        .expect("落盘");
+    logbuf
+        .append("job-1", 0, log_event(b"beta"))
+        .await
+        .expect("落盘");
     wait_until(|| async { state.log_batches().len() >= 2 }).await;
 
     // 断线：fake 断开全部会话 → 连接 A 结束；断线期间缓冲继续累计。
     state.drop_all_sessions();
     conn_a.await.expect("连接 A 结束").expect("连接 A 干净退出");
-    logbuf.append("job-1", 0, log_event(b"gamma")).await.expect("断线续写");
-    logbuf.append("job-1", 0, log_event(b"delta")).await.expect("断线续写");
-    logbuf.append("job-2", 0, log_event(b"orphan")).await.expect("孤儿落盘");
+    logbuf
+        .append("job-1", 0, log_event(b"gamma"))
+        .await
+        .expect("断线续写");
+    logbuf
+        .append("job-1", 0, log_event(b"delta"))
+        .await
+        .expect("断线续写");
+    logbuf
+        .append("job-2", 0, log_event(b"orphan"))
+        .await
+        .expect("孤儿落盘");
 
     // 连接 B（重连）：在途仍 = job-1。重放 job-1 全段（0..3）+ 孤儿 job-2
     // 补传后删除。连接期内新事件（epsilon）经活体转发。
@@ -804,10 +847,7 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
             .any(|b| b.job_id == "job-2" && b.start_seq == 0),
         "孤儿 job-2 的日志应补传（取证）"
     );
-    assert!(
-        !logbuf.path("job-2", 0).exists(),
-        "孤儿 job-2 缓冲删除"
-    );
+    assert!(!logbuf.path("job-2", 0).exists(), "孤儿 job-2 缓冲删除");
     assert!(
         logbuf.path("job-1", 0).exists(),
         "在途 job-1 的缓冲保留（不删）"
@@ -829,8 +869,12 @@ async fn workspace_list_command_reports_real_filesystem_entries() {
     let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
-    let (shutdown_tx, ws, _receipts, agent_task) =
-        spawn_agent_ws(dir.path(), format!("http://{addr}"), Some("sisa_abc"), Duration::from_secs(60));
+    let (shutdown_tx, ws, _receipts, agent_task) = spawn_agent_ws(
+        dir.path(),
+        format!("http://{addr}"),
+        Some("sisa_abc"),
+        Duration::from_secs(60),
+    );
 
     // 在 Agent 的工作区根上真实 resolve 两个工作区（含清洗冲突）。
     let a = ws.resolve("pipe-a", "job 1").expect("resolve");
@@ -863,7 +907,10 @@ async fn workspace_list_command_reports_real_filesystem_entries() {
     named.sort();
     assert_eq!(
         named,
-        vec![("pipe-a".to_string(), "job 1".into()), ("pipe-a".to_string(), "job_1".into())],
+        vec![
+            ("pipe-a".to_string(), "job 1".into()),
+            ("pipe-a".to_string(), "job_1".into())
+        ],
         "列表还原真名（含冲突后缀目录还原原始 job 名）"
     );
     for e in &list.entries {
@@ -885,8 +932,12 @@ async fn workspace_clean_command_removes_real_dirs_without_touching_cache() {
     let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
-    let (shutdown_tx, ws, _receipts, agent_task) =
-        spawn_agent_ws(dir.path(), format!("http://{addr}"), Some("sisa_abc"), Duration::from_secs(60));
+    let (shutdown_tx, ws, _receipts, agent_task) = spawn_agent_ws(
+        dir.path(),
+        format!("http://{addr}"),
+        Some("sisa_abc"),
+        Duration::from_secs(60),
+    );
 
     // 三个工作区：pipe-a/{job-1, job-2}、pipe-b/job-1。
     let a1 = ws.resolve("pipe-a", "job-1").expect("resolve");
@@ -896,7 +947,12 @@ async fn workspace_clean_command_removes_real_dirs_without_touching_cache() {
     std::fs::write(a2.join("out"), b"x").expect("写");
     std::fs::write(b1.join("out"), b"x").expect("写");
     // 缓存根（工作区根的兄弟）放一个产物，清理永不触碰。
-    let cache_file = dir.path().join("cache").join("pipe-a").join("key").join("artifact");
+    let cache_file = dir
+        .path()
+        .join("cache")
+        .join("pipe-a")
+        .join("key")
+        .join("artifact");
     std::fs::create_dir_all(cache_file.parent().unwrap()).expect("建缓存目录");
     std::fs::write(&cache_file, b"cached").expect("写缓存");
 
@@ -908,10 +964,12 @@ async fn workspace_clean_command_removes_real_dirs_without_touching_cache() {
     // 单 job：清 pipe-a/job-1。
     tx.send(Ok(ChannelMessage {
         kind: Some(Kind::WorkspaceCmd(WorkspaceCommand {
-            kind: Some(WorkspaceKind::Clean(sisyphus_proto::agent::WorkspaceCleanRequest {
-                pipeline: "pipe-a".into(),
-                job: "job-1".into(),
-            })),
+            kind: Some(WorkspaceKind::Clean(
+                sisyphus_proto::agent::WorkspaceCleanRequest {
+                    pipeline: "pipe-a".into(),
+                    job: "job-1".into(),
+                },
+            )),
         })),
     }))
     .await
@@ -924,10 +982,12 @@ async fn workspace_clean_command_removes_real_dirs_without_touching_cache() {
     // 单 pipeline：清 pipe-b。
     tx.send(Ok(ChannelMessage {
         kind: Some(Kind::WorkspaceCmd(WorkspaceCommand {
-            kind: Some(WorkspaceKind::Clean(sisyphus_proto::agent::WorkspaceCleanRequest {
-                pipeline: "pipe-b".into(),
-                job: String::new(),
-            })),
+            kind: Some(WorkspaceKind::Clean(
+                sisyphus_proto::agent::WorkspaceCleanRequest {
+                    pipeline: "pipe-b".into(),
+                    job: String::new(),
+                },
+            )),
         })),
     }))
     .await
@@ -939,10 +999,12 @@ async fn workspace_clean_command_removes_real_dirs_without_touching_cache() {
     // 全清：清剩余 pipe-a。
     tx.send(Ok(ChannelMessage {
         kind: Some(Kind::WorkspaceCmd(WorkspaceCommand {
-            kind: Some(WorkspaceKind::Clean(sisyphus_proto::agent::WorkspaceCleanRequest {
-                pipeline: String::new(),
-                job: String::new(),
-            })),
+            kind: Some(WorkspaceKind::Clean(
+                sisyphus_proto::agent::WorkspaceCleanRequest {
+                    pipeline: String::new(),
+                    job: String::new(),
+                },
+            )),
         })),
     }))
     .await
@@ -965,8 +1027,12 @@ async fn workspace_usage_sample_visible_in_heartbeat() {
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
     // 注入短采样间隔（50ms）避免真实 10 分钟 sleep。
-    let (shutdown_tx, ws, _receipts, agent_task) =
-        spawn_agent_ws(dir.path(), format!("http://{addr}"), Some("sisa_abc"), Duration::from_millis(50));
+    let (shutdown_tx, ws, _receipts, agent_task) = spawn_agent_ws(
+        dir.path(),
+        format!("http://{addr}"),
+        Some("sisa_abc"),
+        Duration::from_millis(50),
+    );
 
     // 真实 resolve 一个工作区并写入已知大小产出。
     let job_dir = ws.resolve("pipe", "job").expect("resolve");
@@ -999,4 +1065,3 @@ async fn workspace_usage_sample_visible_in_heartbeat() {
     agent_task.await.expect("agent 退出");
     server_task.abort();
 }
-

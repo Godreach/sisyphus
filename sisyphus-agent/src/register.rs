@@ -93,7 +93,11 @@ pub async fn register(
             .json::<serde_json::Value>()
             .await
             .ok()
-            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(ToOwned::to_owned))
+            .and_then(|v| {
+                v.get("message")
+                    .and_then(|m| m.as_str())
+                    .map(ToOwned::to_owned)
+            })
             .unwrap_or_else(|| format!("HTTP {status_text}"));
         return Err(RegisterError::Rejected { status, message });
     }
