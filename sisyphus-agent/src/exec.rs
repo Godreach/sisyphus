@@ -534,7 +534,10 @@ mod tests {
     async fn tree_kill_kills_backgrounded_child() {
         let dir = tempfile::tempdir().expect("临时工作区");
         let pidfile = dir.path().join("child.pid");
-        let command = format!("sleep 30 & echo $! > {}", pidfile.display());
+        // `; wait` 让 sh 阻塞在后台 sleep 上（而非命令一结束就退出），
+        // 否则 child.wait() 瞬间完成走自然退出分支、不进 cancel→kill_tree，
+        // cancel_tx.send 会因对端已 drop 而报 SendError，后台 sleep 成孤儿。
+        let command = format!("sleep 30 & echo $! > {}; wait", pidfile.display());
         let env = HashMap::new();
         let mut step = spawn_shell(&command, dir.path(), &env).expect("spawn");
         let _ = step.take_streams();
