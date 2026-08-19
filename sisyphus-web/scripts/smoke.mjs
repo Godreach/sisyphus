@@ -239,7 +239,14 @@ async function visit(page, path, h1Text, name) {
 }
 
 async function runAuthed(browser) {
+  // 钉中文界面：vue-i18n 的 initialLocale() 先读 localStorage 再读
+  // navigator.language（本地系统 Chrome 探出 zh-CN，CI chromium 默认 en-US 探出
+  // 英文）——断言文案写死中文，不预置则 CI 全红（页面渲染正常、仅语言不对）。
+  // addInitScript 在每页首次脚本执行前注入，先于 i18n 装配读 localStorage。
   const context = await browser.newContext()
+  await context.addInitScript(() => {
+    window.localStorage.setItem('sisyphus.locale', 'zh-CN')
+  })
   const page = await context.newPage()
   const errors = []
   page.on('pageerror', (e) => errors.push(String(e)))
@@ -283,6 +290,9 @@ async function runAuthed(browser) {
 
 async function runGuest(browser) {
   const context = await browser.newContext()
+  await context.addInitScript(() => {
+    window.localStorage.setItem('sisyphus.locale', 'zh-CN')
+  })
   const page = await context.newPage()
   const errors = []
   page.on('pageerror', (e) => errors.push(String(e)))
