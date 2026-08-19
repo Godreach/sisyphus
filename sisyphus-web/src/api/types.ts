@@ -70,6 +70,17 @@ export interface PipelineDefinitionResponse {
   updated_at: number
 }
 
+/** PUT 保存 pipeline 定义响应（后端 `SaveDefinitionResponse`：保存成功返回新修订版本）。
+ *  model 校验失败为 422 + `detail.errors` 错误清单整组透传（票 B4-T8 编辑器保存消费）。 */
+export interface SaveDefinitionResponse {
+  /** 本次保存后的修订版本号（首存 1、续存 +1）。 */
+  revision: number
+  /** 操作人（登录用户名）。 */
+  operator: string
+  /** 保存时间（Unix 毫秒）。 */
+  updated_at: number
+}
+
 /** Pipeline 定义载荷：model Pipeline JSON（本页只读消费，不校验）。 */
 export type PipelineDefinitionPayload = Record<string, unknown>
 

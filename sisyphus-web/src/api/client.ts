@@ -28,6 +28,7 @@ import type {
   PutSecretRequest,
   ResetPasswordRequest,
   RerunBuildRequest,
+  SaveDefinitionResponse,
   SecretNameResponse,
   TokenResponse,
   TriggerBuildRequest,
@@ -178,6 +179,16 @@ export const pipelinesApi = {
   getDefinition: (project: string, pipeline: string) =>
     http.get<PipelineDefinitionResponse>(
       `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}`,
+    ),
+
+  /** 保存 pipeline 定义（项目 admin 档，票 B4-T8 编辑器保存）：原样提交 model
+   *  JSON（定义本体是 sisyphus-model 的 JSON 形态，server 解析 + model 校验，
+   *  ADR-0009）；model 校验失败 422 + `detail.errors` 错误清单整组透传，成功
+   *  返回新修订版本（首存 1、续存 +1，操作人为认证用户实名）。 */
+  saveDefinition: (project: string, pipeline: string, definition: unknown) =>
+    http.put<SaveDefinitionResponse>(
+      `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}`,
+      { json: definition },
     ),
 }
 

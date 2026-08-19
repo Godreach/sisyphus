@@ -2,7 +2,7 @@
 //
 // 本票立骨架与守卫语义；页面按页面票落地：概览/项目列表/项目详情（B4-T3）、
 // 构建列表/构建详情（B4-T4）、Agent 列表/详情（B4-T5）、管理四页（B4-T6）
-// 均已实现；pipeline 编辑仍挂 PlaceholderView（B4-T7）。路由守卫保证「未认证
+// 均已实现；pipeline 混合式编辑器由 B4-T8 落地。路由守卫保证「未认证
 // 访问受保护页 → 登录 → 登录成功回跳」闭环 + 管理区全局 admin 门控
 // （`meta.admin`，守卫逻辑见 `src/router/guards.ts`）。
 
@@ -46,7 +46,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/projects/:name/pipelines/:pipeline',
     name: 'pipeline-edit',
-    component: () => import('@/views/PlaceholderView.vue'),
+    component: () => import('@/views/PipelineEditorView.vue'),
     meta: { title: 'routes.pipelineEdit' },
   },
   {
