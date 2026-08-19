@@ -151,10 +151,22 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   // 401 统一落登录态：单实例客户端挂一次（组件里挂会被热更新重复注册）。
+  //
+  // 仅当 401 前态为 authed（使用中会话过期）才回跳登录——这是 onUnauthorized
+  // 的真正语义：用户「以为还登录着」时被服务端拒绝，应落回登录页重试。对
+  // boot 探测（status=unknown，restore() 内 me() 401）与已 guest 态不回跳：
+  // me() 401 是「未登录」的正常态，路由由守卫按结果态裁决（含空库→/setup 引
+  // 导、guest→/login）。若 boot 探测也回跳，则 guest 直访 /login 会在
+  // redirectToLogin 的 window.location.assign（挂载前 useRouter 不可用）里
+  // 把 /login?redirect=/login 无限嵌套重载——jsdom 的 location.assign 是空
+  // 操作测不出，真实浏览器（headless 冒烟）才暴露（票 B4-T9）。
   if (http.onUnauthorized == null) {
     http.onUnauthorized = ({ redirect }) => {
+      const wasAuthed = status.value === 'authed'
       clear()
-      redirectToLogin(redirect)
+      if (wasAuthed) {
+        redirectToLogin(redirect)
+      }
     }
   }
 

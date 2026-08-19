@@ -98,3 +98,16 @@ jobs:
 
       - name: 构建产物进 dist/
         run: npm run build
+
+      # headless 冒烟（票 B4-T9 / #71）：构建产物 + 预览端口点击走通 12 页主
+      # 路径。playwright 在真实浏览器里驱动 SPA——测 jsdom/vitest 覆盖不到的
+      # 构建/路由/历史 API 面；后端经 page.route 拦截 /api/v1/** 注入 mock
+      # （不拉真后端——数据往返由 Rust web_handshake.rs 进程内 oneshot 兜底，
+      # 那条缝才守「不起 socket/进程」纪律；本冒烟为真实浏览器驱动，起预览端口
+      # 与浏览器进程是原型 scripts/smoke.mjs 同款「预览端口点击」形态）。chromium
+      # 浏览器二进制随 playwright npm 包单独下载（npm ci 只装 API）。
+      - name: 安装 playwright chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: headless 冒烟 12 页主路径
+        run: npm run smoke

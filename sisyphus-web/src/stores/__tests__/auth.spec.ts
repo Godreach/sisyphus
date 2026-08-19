@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 import { useAuthStore } from '@/stores/auth'
+import { http } from '@/api/http-singleton'
 
 /** 构造 mock JSON 响应（jsdom 无 fetch，需自造 Response 壳）。 */
 function jsonResponse(status: number, body: unknown): Response {
@@ -195,5 +196,60 @@ describe('auth store 空库判定（B4-T2，ADR-0010）', () => {
     expect(await auth.isSetupNeeded()).toBe(false) // 非空库
     // 调用序：探测(1) + login(2) + logout(3) + 再探测(4)。
     expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+})
+
+// 401 落登录态的回跳边界（票 B4-T9 修 boot 探测死循环）：onUnauthorized 仅在
+// 「使用中会话过期」（401 前态 authed）回跳登录；boot 探测（me() 401，前态
+// unknown）与已 guest 态不回跳——路由由守卫按结果态裁决（空库→/setup、
+// guest→/login）。否则 guest 直访 /login 会在挂载前的 window.location.assign
+// 里把 /login?redirect=/login 无限嵌套重载（jsdom 的 location.assign 是空
+// 操作测不出，真实浏览器才暴露——headless 冒烟抓到）。
+describe('auth store 401 回跳边界（B4-T9：仅使用中过期回跳）', () => {
+  let assignSpy: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    // http 单例的 onUnauthorized 引用首个注册 store 的状态（跨用例泄漏）；
+    // 置空令本用例的 store 重新注册，回调读到本用例 store 的 status。
+    http.onUnauthorized = null
+    // jsdom 的 window.location.assign 不可配置、无法 spyOn；以可配置桩替换
+    // 整个 location，使回跳经 `window.location.assign` 时命中桩（挂载前
+    // useRouter 不可用，redirectToLogin 走 location.assign 分支）。
+    assignSpy = vi.fn()
+    Object.defineProperty(window, 'location', {
+      value: { assign: assignSpy, pathname: '/', search: '' },
+      writable: true,
+      configurable: true,
+    })
+    globalThis.fetch = vi.fn()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    http.onUnauthorized = null
+  })
+
+  it('boot 探测 me 401（前态 unknown）不回跳登录——守卫按 guest 态裁决', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      jsonResponse(401, { code: 'UNAUTHORIZED', message: '未认证' }),
+    )
+    const auth = useAuthStore()
+    const status = await auth.restore()
+    expect(status).toBe('guest')
+    expect(assignSpy).not.toHaveBeenCalled()
+  })
+
+  it('使用中会话过期（前态 authed，数据端点 401）回跳登录', async () => {
+    const auth = useAuthStore()
+    auth.status = 'authed'
+    auth.user = { username: 'alice', isAdmin: false }
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      jsonResponse(401, { code: 'UNAUTHORIZED', message: '会话已过期' }),
+    )
+    // 任意受保护端点 401（非 auth/login、auth/setup）触发 onUnauthorized。
+    await http.get('projects').catch(() => {})
+    expect(assignSpy).toHaveBeenCalledOnce()
+    expect(auth.isAuthed).toBe(false)
   })
 })

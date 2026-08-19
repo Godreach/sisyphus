@@ -37,8 +37,15 @@ rust-embed 内嵌该目录产物对外提供静态服务与 SPA fallback（relea
 - `npm run preview`：预览构建产物。
 - `npm run typecheck` / `npm test` / `npm run i18n:check`：CI 三件套
   （vue-tsc 类型 + vitest 行为测试 + i18n 对账）。
+- `npm run smoke`：headless 冒烟（票 B4-T9）——`vite preview` 伺服 `dist/`，
+  playwright 在真实浏览器里走通 12 页主路径 + i18n 切换 + 登录/引导公开页。
+  后端经 playwright `page.route` 拦截 `/api/v1/**` 注入 mock（不拉真后端）；
+  数据往返由 Rust `web_handshake.rs` 进程内 oneshot 兜底。本地跳过 chromium
+  下载可用 `SMOKE_CHROMIUM_EXECUTABLE` 指向系统 Chrome/Edge。CI 在 `build`
+  后 `npx playwright install --with-deps chromium` 再跑（见 `.github/workflows/ci.yml`）。
 
 ## 测试纪律
 
 Vitest + Vue Test Utils，只测外部行为（用户可见状态、DOM 事件、网络请求/
 响应形态断言），不测组件内部结构；API 层 mock（fetch 替身）驱动（Spec B4）。
+headless 冒烟补 jsdom 测不到的构建/路由/历史 API 面（真实浏览器驱动）。
