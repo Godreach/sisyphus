@@ -1211,8 +1211,13 @@ mod tests {
         git(&["config", "user.email", "test@sisyphus.local"]);
         git(&["config", "user.name", "Test"]);
         git(&["config", "commit.gpgsign", "false"]);
+        // 钉死行尾策略：`.gitattributes` 随仓库走（clone 也带），`eol=lf` 按路径属性
+        // 压过宿主 `core.autocrlf`。GitHub Actions windows-latest 默认 autocrlf=true，
+        // 会让 `reset --hard` 把 v1\n 还原成 v1\r\n，破坏按字节比对跟踪文件内容的断言。
+        std::fs::write(repo.join(".gitattributes"), "* text=auto eol=lf\n")
+            .expect("写 .gitattributes");
         std::fs::write(repo.join("hello.txt"), "v1\n").expect("写文件");
-        git(&["add", "hello.txt"]);
+        git(&["add", ".gitattributes", "hello.txt"]);
         git(&["commit", "--quiet", "-m", "v1"]);
         let sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
             .expect("utf8")
