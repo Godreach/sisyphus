@@ -66,5 +66,13 @@ export const sessionGuard: GuardFn = async (to) => {
     }
   }
 
+  // 管理区全局 admin 门控（票 B4-T6）：`/admin/*` 仅全局 admin 可见——侧栏
+  // 已按 is_admin 隐藏入口，此处对直访 URL 兜底：非全局 admin 回首页（不弹
+  // 403 页，与「入口不可见」的语义一致）。仅 authed 到此（unreachable/guest
+  // 已在上块提前 return），auth.user 非空。
+  if (to.meta.admin === true && !auth.user?.isAdmin) {
+    return { name: 'overview' }
+  }
+
   return true
 }

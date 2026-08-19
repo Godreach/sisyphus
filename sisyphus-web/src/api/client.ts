@@ -6,21 +6,32 @@ import { http } from './http-singleton'
 import type { CredentialsRequest, MeResponse } from './http'
 import type {
   AgentResponse,
+  AuditEntryResponse,
+  AuditQuery,
   BuildAcceptedResponse,
   BuildDetailResponse,
   BuildListResponse,
   BuildStatusDto,
   CreateAgentRequest,
   CreateProjectRequest,
+  CreateTokenRequest,
   CreatedAgentResponse,
+  CreatedTokenResponse,
+  CreateUserRequest,
   DirectoryEntryResponse,
   MemberAssignment,
   MemberResponse,
   PatchAgentRequest,
+  PatchUserRequest,
   PipelineDefinitionResponse,
   ProjectResponse,
+  PutSecretRequest,
+  ResetPasswordRequest,
   RerunBuildRequest,
+  SecretNameResponse,
+  TokenResponse,
   TriggerBuildRequest,
+  UserResponse,
 } from './types'
 
 /** 认证端点（后端 `api/auth.rs`，ADR-0014）。 */
@@ -92,10 +103,72 @@ export const projectsApi = {
     ),
 }
 
-/** 用户目录端点（后端 `api/users.rs`；项目 admin 档，成员分配下拉）。 */
+/** 用户端点（后端 `api/users.rs`，ADR-0014）。
+ *  - 目录（项目 admin 档）：成员分配下拉。
+ *  - 管理（全局 admin 专属）：全量列表 / 建号 / 禁用启用 / 代办重置密码。 */
 export const usersApi = {
   /** 最小用户目录（仅 id + 用户名，排除已禁用；成员分配下拉源）。 */
   directory: () => http.get<DirectoryEntryResponse[]>('users/directory'),
+
+  /** 全量用户列表（全局 admin；按用户名排序，含已禁用，无密码哈希）。 */
+  list: () => http.get<UserResponse[]>('users'),
+
+  /** 建号（全局 admin；is_admin 默认 false——admin 是建号时的显式选择）。 */
+  create: (req: CreateUserRequest) =>
+    http.post<UserResponse>('users', { json: req }),
+
+  /** 禁用 / 启用（全局 admin；禁用同秒删其全部 session 与 PAT）。
+   *  后端 `PatchUserRequest` 仅 disabled——切换已有用户 admin 的端点尚未交付。 */
+  patch: (name: string, req: PatchUserRequest) =>
+    http.patch<UserResponse>(`users/${encodeURIComponent(name)}`, { json: req }),
+
+  /** 代办重置密码（全局 admin；覆写密码哈希，旧密码即刻失效）。 */
+  resetPassword: (name: string, req: ResetPasswordRequest) =>
+    http.put<void>(`users/${encodeURIComponent(name)}/password`, { json: req }),
+}
+
+/** 机密端点（后端 `api/secrets.rs`，ADR-0015）：值只写不读——列名 / 建覆写 / 删。
+ *  项目 admin 档（全局 admin 隐含项目 admin，ADR-0014），viewer/runner 连名 403。
+ *  机密名取自路径段（非请求体），env 键字符集；值永无读回端点。 */
+export const secretsApi = {
+  /** 列项目机密名（按名排序；值形态任何端点不回显）。 */
+  list: (project: string) =>
+    http.get<SecretNameResponse[]>(`projects/${encodeURIComponent(project)}/secrets`),
+
+  /** 建/覆写机密（同名即覆写，成功 204 无值形态）。 */
+  put: (project: string, secret: string, req: PutSecretRequest) =>
+    http.put<void>(
+      `projects/${encodeURIComponent(project)}/secrets/${encodeURIComponent(secret)}`,
+      { json: req },
+    ),
+
+  /** 删除机密（名消失即 DELETE 后的可观察语义，成功 204）。 */
+  delete: (project: string, secret: string) =>
+    http.del<void>(
+      `projects/${encodeURIComponent(project)}/secrets/${encodeURIComponent(secret)}`,
+    ),
+}
+
+/** 审计端点（后端 `api/audit.rs`，ADR-0015）：`GET /audit`，仅全局 admin。
+ *  按时间/用户/项目/事件类型过滤 + limit/offset 分页，时间倒序（后端保证）。
+ *  响应为审计条目数组（无 total——下一页可用性由调用侧按条数 == limit 判定）。 */
+export const auditApi = {
+  /** 审计回放：过滤 + 分页（时间倒序；detail 为 JSON 对象，机密事件只记名）。 */
+  list: (query: AuditQuery) => http.get<AuditEntryResponse[]>('audit', { query }),
+}
+
+/** PAT 端点（后端 `api/tokens.rs`，ADR-0014）：权限 = owner 本人（v1 无 scope 细分）。
+ *  创建响应一次性返回完整令牌（此后任何端点不再回显）；列表无值形态；吊销删行。 */
+export const tokensApi = {
+  /** 列当前用户全部 PAT（按创建时间升序；名/创建时间/过期，永不含令牌值）。 */
+  list: () => http.get<TokenResponse[]>('auth/tokens'),
+
+  /** 创建 PAT（响应一次性返回完整令牌——明文仅此一次，立即保存）。 */
+  create: (req: CreateTokenRequest) =>
+    http.post<CreatedTokenResponse>('auth/tokens', { json: req }),
+
+  /** 吊销 PAT（删行，下一请求即 401；他人 id 一律 404，不暴露存在性）。 */
+  revoke: (id: number) => http.del<void>(`auth/tokens/${id}`),
 }
 
 /** Pipeline 定义端点（后端 `api/pipelines.rs`）。 */

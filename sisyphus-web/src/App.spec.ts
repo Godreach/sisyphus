@@ -71,3 +71,62 @@ describe('App 壳（登出闭环）', () => {
     expect(auth.user).toBeNull()
   })
 })
+
+describe('App 壳（管理区侧栏 is_admin 门控）', () => {
+  let pinia: Pinia
+  let router: Router
+  let wrapper: VueWrapper
+
+  beforeEach(async () => {
+    setLocale('zh-CN')
+    pinia = createPinia()
+    setActivePinia(pinia)
+    router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', name: 'overview', component: { template: '<div />' } },
+        { path: '/admin/secrets', name: 'admin-secrets', component: { template: '<div />' } },
+        { path: '/admin/audit', name: 'admin-audit', component: { template: '<div />' } },
+        { path: '/admin/upgrade', name: 'admin-upgrade', component: { template: '<div />' } },
+        { path: '/admin/users', name: 'admin-users', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/')
+    await router.isReady()
+    globalThis.fetch = vi.fn()
+    wrapper = mount(App, { global: { plugins: [pinia, router, i18n] } })
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    vi.restoreAllMocks()
+  })
+
+  it('全局 admin 侧栏显示管理区四入口 + 分隔条', async () => {
+    const auth = useAuthStore()
+    auth.setAuthed({ username: 'admin', isAdmin: true })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.sidebar-sep').exists()).toBe(true)
+    const text = wrapper.find('.sidebar-nav').text()
+    expect(text).toContain('机密')
+    expect(text).toContain('审计日志')
+    expect(text).toContain('Agent 升级')
+    expect(text).toContain('用户')
+  })
+
+  it('非全局 admin 侧栏不显示管理区入口（无分隔条）', async () => {
+    const auth = useAuthStore()
+    auth.setAuthed({ username: 'alice', isAdmin: false })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.sidebar-sep').exists()).toBe(false)
+    const text = wrapper.find('.sidebar-nav').text()
+    // 主区仍在。
+    expect(text).toContain('概览')
+    expect(text).toContain('项目')
+    // 管理区不可见。
+    expect(text).not.toContain('机密')
+    expect(text).not.toContain('审计日志')
+  })
+})

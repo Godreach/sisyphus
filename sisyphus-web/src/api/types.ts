@@ -344,6 +344,160 @@ export interface DirectoryEntryResponse {
   username: string
 }
 
+// ---------------------------------------------------------------------------
+// 管理四页 DTO（后端 `api/secrets.rs`、`api/audit.rs`、`api/users.rs`、
+// `api/tokens.rs` 契约的前端镜像，ADR-0014/0015/0017）。票 B4-T6 管理四页消费。
+// ---------------------------------------------------------------------------
+
+/** 机密名清单项（后端 `SecretNameResponse`：值形态任何端点不回显，仅名）。 */
+export interface SecretNameResponse {
+  /** 机密名（env 键字符集：字母数字与下划线）。 */
+  name: string
+}
+
+/** 建/覆写机密请求体（后端 `PutSecretRequest`：值只写不读，写入即加密落库）。 */
+export interface PutSecretRequest {
+  /** 机密值（永不可读回——任何端点不再回显，请谨慎覆写）。 */
+  value: string
+}
+
+/** 全部审计事件类型（过滤下拉与值域对账的单点；与后端 `AuditEvent::ALL`
+ *  同序）。`AuditEventDto` 由本数组派生（`as const` + `typeof`），新增事件
+ *  只改这一处——避免「union 与数组并列、改一处漏另一处」的 Shotgun Surgery。 */
+export const AUDIT_EVENTS = [
+  'login_success',
+  'login_failure',
+  'logout',
+  'user_created',
+  'user_disabled',
+  'user_enabled',
+  'password_reset',
+  'pat_created',
+  'pat_revoked',
+  'project_created',
+  'member_roles_changed',
+  'secret_created',
+  'secret_overwritten',
+  'secret_deleted',
+  'agent_created',
+  'agent_disabled',
+  'agent_enabled',
+  'agent_registered',
+] as const
+
+/** 审计事件类型（由 `AUDIT_EVENTS` 派生；后端 `AuditEvent::as_str()` 契约值，
+ *  与 store 层同源，18 种）。 */
+export type AuditEventDto = (typeof AUDIT_EVENTS)[number]
+
+/** 审计查询参数（全部可选，AND 组合；分页 limit/offset，时间倒序由后端保证）。
+ *  type alias（非 interface）以获 TS 隐式索引签名，可直接作 `http.get` 的
+ *  `query` 传入（与 `buildsApi.list` 的内联 query 类型同纪律）。 */
+export type AuditQuery = {
+  /** 时间下限（含；Unix 毫秒）。 */
+  since?: number
+  /** 时间上限（含；Unix 毫秒）。 */
+  until?: number
+  /** 操作人（用户名，精确匹配）。 */
+  user?: string
+  /** 项目名（精确匹配）。 */
+  project?: string
+  /** 事件类型（取值域见 `AUDIT_EVENTS`）。 */
+  event?: AuditEventDto
+  /** 单页条数（1..=200，默认 50）。 */
+  limit?: number
+  /** 跳过条数（默认 0）。 */
+  offset?: number
+}
+
+/** 审计条目（后端 `AuditEntryResponse`：detail 为 JSON 对象，机密事件只记名）。 */
+export interface AuditEntryResponse {
+  /** 行 id。 */
+  id: number
+  /** 事件时间（Unix 毫秒）。 */
+  ts: number
+  /** 操作人（用户名）。 */
+  actor: string
+  /** 事件类型（`AuditEventDto` 契约值）。 */
+  event: AuditEventDto
+  /** 项目名（可空：非项目域事件）。 */
+  project: string | null
+  /** 结构化补充（可空：机密名 / 目标用户 / 成员角色清单等；机密只记名不泄值）。 */
+  detail: Record<string, unknown> | null
+}
+
+/** 用户管理视图（后端 `UserResponse`：密码哈希永不出现，含 disabled）。 */
+export interface UserResponse {
+  /** 用户 id。 */
+  id: number
+  /** 用户名（唯一）。 */
+  username: string
+  /** 全局管理员。 */
+  is_admin: boolean
+  /** 禁用标志（禁用即踢线：session 与 PAT 同秒全删）。 */
+  disabled: boolean
+  /** 创建时间（Unix 毫秒）。 */
+  created_at: number
+  /** 最后更新时间（Unix 毫秒）。 */
+  updated_at: number
+}
+
+/** 建号请求体（后端 `CreateUserRequest`：is_admin 默认 false，建号时显式设全局 admin）。 */
+export interface CreateUserRequest {
+  /** 用户名（1-64 位字母数字或 `_ . -`，trim 后生效）。 */
+  username: string
+  /** 密码（最小长度 8，无复杂度规则）。 */
+  password: string
+  /** 是否全局管理员（默认 false——admin 是建号时的显式选择；已有用户切换见退化标注）。 */
+  is_admin?: boolean
+}
+
+/** 禁用/启用请求体（后端 `PatchUserRequest`：仅 disabled——切换已有用户 admin 的
+ *  端点尚未交付，见 UsersView 退化标注）。 */
+export interface PatchUserRequest {
+  /** 目标状态：true = 禁用（同秒删其全部 session 与 PAT），false = 启用。 */
+  disabled: boolean
+}
+
+/** 代办重置密码请求体（后端 `ResetPasswordRequest`：无需当前密码）。 */
+export interface ResetPasswordRequest {
+  /** 新密码（最小长度 8，无复杂度规则）。 */
+  new_password: string
+}
+
+/** PAT 列表项（后端 `TokenResponse`：无值形态——名 / 创建时间 / 过期）。 */
+export interface TokenResponse {
+  /** 行 id（吊销端点的路径参数）。 */
+  id: number
+  /** 令牌名。 */
+  name: string
+  /** 过期时间（Unix 毫秒；`null` = 永不过期）。 */
+  expires_at: number | null
+  /** 创建时间（Unix 毫秒）。 */
+  created_at: number
+}
+
+/** 创建 PAT 请求体（后端 `CreateTokenRequest`）。 */
+export interface CreateTokenRequest {
+  /** 令牌名（非空，trim 后生效）。 */
+  name: string
+  /** 过期时间（Unix 毫秒；`null` = 永不过期，须晚于当前时间）。 */
+  expires_at?: number | null
+}
+
+/** 创建 PAT 响应（后端 `CreatedTokenResponse`：完整令牌仅此一次返回）。 */
+export interface CreatedTokenResponse {
+  /** 完整令牌（`sis_` 前缀 + 43 字符）。请立即保存：本响应是唯一一次出现。 */
+  token: string
+  /** 行 id。 */
+  id: number
+  /** 令牌名。 */
+  name: string
+  /** 过期时间（Unix 毫秒；`null` = 永不过期）。 */
+  expires_at: number | null
+  /** 创建时间（Unix 毫秒）。 */
+  created_at: number
+}
+
 /** 前端可分支消费的 API 错误（非 2xx 统一落此形态）。 */
 export class ApiError extends Error {
   /** HTTP 状态码（0 = 网络层失败，无响应）。 */

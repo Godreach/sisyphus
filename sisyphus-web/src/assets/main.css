@@ -78,6 +78,12 @@ h3 {
   color: #fff;
 }
 
+.sidebar-sep {
+  height: 1px;
+  margin: 8px 6px;
+  background: var(--sisy-color-border);
+}
+
 .app-body {
   flex: 1;
   display: flex;
@@ -1690,4 +1696,401 @@ h3 {
 
 .cleanup-unavailable {
   color: #8a4a0f;
+}
+
+/* ---------------------------------------------------------------------------
+ * 管理四页：机密 / 审计 / Agent 升级 / 用户与 PAT（票 B4-T6）。
+ * ------------------------------------------------------------------------- */
+
+.admin-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 机密页。 */
+.secret-toolbar {
+  margin: 4px 0 8px;
+  max-width: 360px;
+}
+
+.secret-project-field select {
+  padding: 6px 8px;
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  font-size: 14px;
+  background: var(--sisy-color-surface);
+}
+
+.secret-form {
+  background: var(--sisy-color-surface);
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 480px;
+}
+
+.secret-form-title,
+.secret-list-title {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.secret-form textarea {
+  padding: 6px 8px;
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  font-size: 13px;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  background: var(--sisy-color-surface);
+  resize: vertical;
+}
+
+.secret-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.secret-discipline {
+  max-width: 640px;
+  line-height: 1.6;
+}
+
+.secret-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 560px;
+}
+
+.secret-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--sisy-color-surface);
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  padding: 8px 12px;
+}
+
+.secret-name {
+  font-weight: 600;
+}
+
+/* 审计页。 */
+.audit-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+  background: var(--sisy-color-surface);
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  padding: 12px;
+  max-width: 760px;
+}
+
+.audit-filters .field {
+  flex: 1 1 140px;
+  min-width: 140px;
+}
+
+.audit-filters select,
+.audit-filters input {
+  padding: 6px 8px;
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  font-size: 13px;
+  background: var(--sisy-color-surface);
+}
+
+.audit-filter-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.audit-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--sisy-color-surface);
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  table-layout: auto;
+}
+
+.audit-table th,
+.audit-table td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--sisy-color-border);
+  font-size: 13px;
+  vertical-align: top;
+}
+
+.audit-table th {
+  background: #f6f8fa;
+  color: var(--sisy-color-text-secondary);
+  font-weight: 600;
+}
+
+.audit-table tr:last-child td {
+  border-bottom: none;
+}
+
+.audit-time {
+  white-space: nowrap;
+}
+
+.audit-event-badge {
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--sisy-color-border);
+  color: var(--sisy-color-text-secondary);
+  background: var(--sisy-color-surface);
+  white-space: nowrap;
+}
+
+.audit-detail {
+  margin: 0;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-width: 360px;
+}
+
+.audit-pagination {
+  display: flex;
+  gap: 8px;
+}
+
+/* Agent 升级页。 */
+.upgrade-degraded {
+  color: #8a4a0f;
+  background: #fdf1e3;
+  border: 1px solid #e2a56a;
+  border-radius: var(--sisy-radius);
+  padding: 8px 12px;
+  font-size: 13px;
+  margin: 4px 0;
+}
+
+.upgrade-section {
+  max-width: 760px;
+}
+
+.upgrade-upload {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.upgrade-command-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  margin: 8px 0;
+  flex-wrap: wrap;
+}
+
+.upgrade-target-field {
+  flex: 1 1 220px;
+  max-width: 320px;
+}
+
+.upgrade-target-field select {
+  padding: 6px 8px;
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  font-size: 14px;
+  background: var(--sisy-color-surface);
+}
+
+.upgrade-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--sisy-color-surface);
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  max-width: 640px;
+}
+
+.upgrade-table th,
+.upgrade-table td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--sisy-color-border);
+  font-size: 13px;
+}
+
+.upgrade-table th {
+  background: #f6f8fa;
+  color: var(--sisy-color-text-secondary);
+  font-weight: 600;
+}
+
+.upgrade-table tr:last-child td {
+  border-bottom: none;
+}
+
+.upgrade-na {
+  color: var(--sisy-color-text-secondary);
+}
+
+/* 用户 / PAT 页。 */
+.users-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.users-section-head h2 {
+  margin: 0;
+}
+
+.user-form,
+.token-form {
+  background: var(--sisy-color-surface);
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 480px;
+  margin: 8px 0;
+}
+
+.user-admin-field {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.user-form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.user-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--sisy-color-surface);
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  margin: 8px 0;
+}
+
+.user-table th,
+.user-table td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--sisy-color-border);
+  font-size: 13px;
+  vertical-align: top;
+}
+
+.user-table th {
+  background: #f6f8fa;
+  color: var(--sisy-color-text-secondary);
+  font-weight: 600;
+}
+
+.user-table tr:last-child td {
+  border-bottom: none;
+}
+
+.user-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.user-reset-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  max-width: 320px;
+}
+
+.user-admin-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #b7dfc2;
+  background: #e6f4ea;
+  color: #1b6b34;
+}
+
+.user-disabled-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #c4c9cf;
+  background: #f0f2f4;
+  color: #59636e;
+}
+
+.user-active-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #66c08a;
+  background: #e7f6ec;
+  color: #1a7f37;
+}
+
+.token-creds {
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  padding: 12px 14px;
+  background: #f6f8fa;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0;
+  max-width: 560px;
+}
+
+.token-creds-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.token-creds dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+}
+
+.token-creds dt {
+  color: var(--sisy-color-text-secondary);
+}
+
+.token-creds dd {
+  margin: 0;
+}
+
+.token-creds-warn {
+  margin: 0;
+  color: var(--sisy-color-danger);
+  font-size: 12px;
+}
+
+.token-creds-actions {
+  display: flex;
+  gap: 8px;
 }

@@ -1,9 +1,10 @@
 // 路由表（ADR-0020 12 页 IA，票 B4-T1 骨架）。
 //
-// 本票立骨架与守卫语义；页面按页面票落地：概览/项目列表/项目详情已随
-// B4-T3 实现，其余（pipeline 编辑、构建详情、Agent、管理四页）仍挂
-// PlaceholderView 占位，路由守卫保证「未认证访问受保护页 → 登录 →
-// 登录成功回跳」闭环（守卫逻辑见 `src/router/guards.ts`）。
+// 本票立骨架与守卫语义；页面按页面票落地：概览/项目列表/项目详情（B4-T3）、
+// 构建列表/构建详情（B4-T4）、Agent 列表/详情（B4-T5）、管理四页（B4-T6）
+// 均已实现；pipeline 编辑仍挂 PlaceholderView（B4-T7）。路由守卫保证「未认证
+// 访问受保护页 → 登录 → 登录成功回跳」闭环 + 管理区全局 admin 门控
+// （`meta.admin`，守卫逻辑见 `src/router/guards.ts`）。
 
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
@@ -75,26 +76,26 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/admin/secrets',
     name: 'admin-secrets',
-    component: () => import('@/views/PlaceholderView.vue'),
-    meta: { title: 'routes.adminSecrets' },
+    component: () => import('@/views/SecretsView.vue'),
+    meta: { title: 'routes.adminSecrets', admin: true },
   },
   {
     path: '/admin/audit',
     name: 'admin-audit',
-    component: () => import('@/views/PlaceholderView.vue'),
-    meta: { title: 'routes.adminAudit' },
+    component: () => import('@/views/AuditView.vue'),
+    meta: { title: 'routes.adminAudit', admin: true },
   },
   {
     path: '/admin/upgrade',
     name: 'admin-upgrade',
-    component: () => import('@/views/PlaceholderView.vue'),
-    meta: { title: 'routes.adminUpgrade' },
+    component: () => import('@/views/AgentUpgradeView.vue'),
+    meta: { title: 'routes.adminUpgrade', admin: true },
   },
   {
     path: '/admin/users',
     name: 'admin-users',
-    component: () => import('@/views/PlaceholderView.vue'),
-    meta: { title: 'routes.adminUsers' },
+    component: () => import('@/views/UsersView.vue'),
+    meta: { title: 'routes.adminUsers', admin: true },
   },
   {
     path: '/:pathMatch(.*)*',

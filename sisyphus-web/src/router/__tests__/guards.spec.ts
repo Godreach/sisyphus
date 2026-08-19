@@ -145,6 +145,26 @@ describe('sessionGuard', () => {
     expect(setupResult).toEqual({ name: 'overview' })
   })
 
+  it('非全局 admin 直访管理区 /admin/* → 回首页（is_admin 门控兜底）', async () => {
+    const auth = useAuthStore()
+    auth.status = 'authed'
+    auth.user = { username: 'bob', isAdmin: false }
+
+    const to = route({ name: 'admin-secrets', fullPath: '/admin/secrets', meta: { admin: true } })
+    const result = await sessionGuard(to)
+    expect(result).toEqual({ name: 'overview' })
+  })
+
+  it('全局 admin 访问管理区 /admin/* → 放行', async () => {
+    const auth = useAuthStore()
+    auth.status = 'authed'
+    auth.user = { username: 'alice', isAdmin: true }
+
+    const to = route({ name: 'admin-audit', fullPath: '/admin/audit', meta: { admin: true } })
+    const result = await sessionGuard(to)
+    expect(result).toBe(true)
+  })
+
   it('公开路由（login/setup/404）未登录时放行', async () => {
     const auth = useAuthStore()
     auth.status = 'guest'
