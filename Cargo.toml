@@ -5,6 +5,16 @@ members = [
     "sisyphus-model",
     "sisyphus-server",
     "sisyphus-agent",
+    "sisyphus-codegen",
+]
+# sisyphus-codegen 是开发工具（TS 生成/对账），非发布产物：不交叉编译、不进 4 产品默认集。
+# `cargo build`/`cargo run`（无 -p）只动 4 产品 crate；`--workspace` 仍含 sisyphus-codegen
+# （CI build-and-test 跑 `--workspace` 与 `cargo run -p sisyphus-codegen -- check`）。
+default-members = [
+    "sisyphus-proto",
+    "sisyphus-model",
+    "sisyphus-server",
+    "sisyphus-agent",
 ]
 
 [workspace.package]

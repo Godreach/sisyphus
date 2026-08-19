@@ -1,7 +1,7 @@
 //! OpenAPI snapshot 守护（ADR-0005）：生成 OpenAPI JSON 与入库快照比对，
 //! 防 utoipa 注解悄悄漂移——端点/形态变更必须显式重写快照并随代码评审。
 //! 重写方式：`UPDATE_SNAPSHOTS=1 cargo test -p sisyphus-server`（ADR-0009：
-//! 不立 xtask，环境变量控制）。
+//! OpenAPI snapshot 就近落 server 集成测试，不经 sisyphus-codegen，环境变量控制）。
 
 use sisyphus_server::api::ApiDoc;
 use utoipa::OpenApi;

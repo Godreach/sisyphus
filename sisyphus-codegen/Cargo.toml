@@ -1,0 +1,17 @@
+[package]
+name = "sisyphus-codegen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "开发工具：sisyphus-model → TS 类型/校验生成 + 前端对账（ADR-0009，票 B4-T7）"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+sisyphus-model = { path = "../sisyphus-model" }
+serde_json.workspace = true

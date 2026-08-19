@@ -21,5 +21,5 @@ ADR-0009 的 workspace 拓扑：4 个 crate 置于 `crates/` 下、`.proto` 源�
 
 ## 后果
 
-- 未来 crate 增多（如 scm 升 crate、xtask）时，根目录平铺随之拥挤，届时可再引入 `crates/` 或 `xtask/` 顶层目录（本 ADR 允许后续修订）。
+- 未来 crate 增多（如 scm 升 crate、`sisyphus-codegen` 类 dev 工具）时，根目录平铺随之拥挤，届时可再引入 `crates/` 或 `tools/` 顶层目录（本 ADR 允许后续修订）。
 - README workspace 表格、ADR-0009 相应段落以本 ADR 为准；`CONTEXT.md` 无布局引用不需改动。

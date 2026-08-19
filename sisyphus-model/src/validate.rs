@@ -9,6 +9,46 @@ use crate::pipeline::{CacheSpec, ExecutionEnv, Job, ParameterType, Pipeline};
 use crate::variables;
 use crate::when;
 
+/// 校验规则码：`validate.rs` 全部规则的稳定身份（单一事实源，ADR-0009）。
+///
+/// 14 条规则各一码。缓存 key 三条（空 / 过长 / 禁 `SISY_WORKSPACE`）共用字段路径
+/// `caches[N].key`，按 `path` 无法区分——码是唯一稳定身份，前端实时校验与对账测试据此对账。
+/// 序列化为 `snake_case` 字符串（前端生成镜像同形）。server 把 `ValidationError`
+/// 重投影成自己的 `ValidationIssue{path,message}`（只拷贝两者，api/error.rs），故此码
+/// **不进 wire/OpenAPI**——是 model 内部身份，专为前端实时反馈与对账。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationCode {
+    /// 必填参数必须带默认值（ADR-0006）。
+    RequiredParameterDefault,
+    /// enum 类型参数必须提供候选项。
+    EnumChoices,
+    /// when 表达式禁用 `${SISY_WORKSPACE}`（ADR-0009/0011）。
+    WhenWorkspace,
+    /// when 表达式语法不合法（ADR-0006 受限语法）。
+    WhenSyntax,
+    /// shell 步骤命令不能为空。
+    ShellCommandEmpty,
+    /// 容器执行环境必须指定 image（ADR-0018）。
+    ContainerImageEmpty,
+    /// 任务 env 键与机密名冲突（ADR-0015）。
+    EnvSecretCollision,
+    /// 产物上传需指定非空 name 与路径。
+    ArtifactUploadEmpty,
+    /// 产物上传路径必须是 workspace 相对路径。
+    ArtifactUploadAbsolute,
+    /// 缓存 key 不能为空（ADR-0012）。
+    CacheKeyEmpty,
+    /// 缓存 key 长度超过上限 255。
+    CacheKeyTooLong,
+    /// 缓存 key 禁用 `${SISY_WORKSPACE}`（ADR-0012）。
+    CacheKeyWorkspace,
+    /// 缓存 paths 仅允许 workspace 相对路径。
+    CachePathNotRelative,
+    /// 缓存 files 仅支持精确路径，不支持 glob。
+    CacheFilesGlob,
+}
+
 /// 校验错误：`path` 为定位用的字段路径（如 `stages[0].jobs[1].caches[0].key`）。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{path}: {message}")]
@@ -17,13 +57,20 @@ pub struct ValidationError {
     pub path: String,
     /// 人类可读的错误描述。
     pub message: String,
+    /// 规则码（稳定身份，前端对账据此，ADR-0009）。
+    pub code: ValidationCode,
 }
 
 impl ValidationError {
-    fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
+    fn new(
+        path: impl Into<String>,
+        message: impl Into<String>,
+        code: ValidationCode,
+    ) -> Self {
         Self {
             path: path.into(),
             message: message.into(),
+            code,
         }
     }
 }
@@ -39,12 +86,14 @@ pub fn validate(pipeline: &Pipeline) -> Result<(), Vec<ValidationError>> {
             errors.push(ValidationError::new(
                 format!("{path}.{}.required", p.name),
                 "必填参数必须带默认值（ADR-0006：所有触发方式统一「默认值，手动触发可覆盖」）",
+                ValidationCode::RequiredParameterDefault,
             ));
         }
         if p.r#type == ParameterType::Enum && p.choices.is_empty() {
             errors.push(ValidationError::new(
                 format!("{path}.{}.choices", p.name),
                 "enum 类型参数必须提供候选项",
+                ValidationCode::EnumChoices,
             ));
         }
     }
@@ -73,11 +122,16 @@ fn validate_when(errors: &mut Vec<ValidationError>, path: String, source: Option
         errors.push(ValidationError::new(
             &path,
             "when 表达式禁用 ${SISY_WORKSPACE}（Agent 侧才可知其值，Server 端无法求值）",
+            ValidationCode::WhenWorkspace,
         ));
     }
     // when 受限语法（解析失败即拒绝，ADR-0006）
     if let Err(e) = when::parse(source) {
-        errors.push(ValidationError::new(&path, e.to_string()));
+        errors.push(ValidationError::new(
+            &path,
+            e.to_string(),
+            ValidationCode::WhenSyntax,
+        ));
     }
 }
 
@@ -92,6 +146,7 @@ fn validate_job(errors: &mut Vec<ValidationError>, path: &str, job: &Job) {
             errors.push(ValidationError::new(
                 format!("{path}.steps[{si}].command"),
                 "shell 步骤命令不能为空",
+                ValidationCode::ShellCommandEmpty,
             ));
         }
     }
@@ -103,6 +158,7 @@ fn validate_job(errors: &mut Vec<ValidationError>, path: &str, job: &Job) {
         errors.push(ValidationError::new(
             format!("{path}.exec_env.image"),
             "容器执行环境必须指定 image",
+            ValidationCode::ContainerImageEmpty,
         ));
     }
 
@@ -113,6 +169,7 @@ fn validate_job(errors: &mut Vec<ValidationError>, path: &str, job: &Job) {
             errors.push(ValidationError::new(
                 format!("{path}.env.{}", e.name),
                 "任务 env 键与机密名冲突（ADR-0015：机密经 env 注入，键名冲突）",
+                ValidationCode::EnvSecretCollision,
             ));
         }
     }
@@ -123,12 +180,14 @@ fn validate_job(errors: &mut Vec<ValidationError>, path: &str, job: &Job) {
             errors.push(ValidationError::new(
                 format!("{path}.artifact_uploads[{ui}]"),
                 "产物上传需指定非空的 name 与 workspace 相对路径",
+                ValidationCode::ArtifactUploadEmpty,
             ));
         }
         if is_absolute(&u.path) {
             errors.push(ValidationError::new(
                 format!("{path}.artifact_uploads[{ui}].path"),
                 "产物上传路径必须是 workspace 相对路径，不支持绝对路径",
+                ValidationCode::ArtifactUploadAbsolute,
             ));
         }
     }
@@ -145,12 +204,14 @@ fn validate_cache(errors: &mut Vec<ValidationError>, path: &str, cache: &CacheSp
         errors.push(ValidationError::new(
             format!("{path}.key"),
             "缓存 key 不能为空",
+            ValidationCode::CacheKeyEmpty,
         ));
     }
     if cache.key.len() > 255 {
         errors.push(ValidationError::new(
             format!("{path}.key"),
             "缓存 key 长度超过上限 255",
+            ValidationCode::CacheKeyTooLong,
         ));
     }
     // key 禁 SISY_WORKSPACE（ADR-0012）
@@ -158,6 +219,7 @@ fn validate_cache(errors: &mut Vec<ValidationError>, path: &str, cache: &CacheSp
         errors.push(ValidationError::new(
             format!("{path}.key"),
             "缓存 key 禁用 ${SISY_WORKSPACE}（per-Agent 值会让 key 永不命中）",
+            ValidationCode::CacheKeyWorkspace,
         ));
     }
     // paths 仅 workspace 相对路径（ADR-0012）
@@ -166,6 +228,7 @@ fn validate_cache(errors: &mut Vec<ValidationError>, path: &str, cache: &CacheSp
             errors.push(ValidationError::new(
                 format!("{path}.paths[{pi}]"),
                 "缓存 paths 仅允许 workspace 相对路径",
+                ValidationCode::CachePathNotRelative,
             ));
         }
     }
@@ -175,6 +238,7 @@ fn validate_cache(errors: &mut Vec<ValidationError>, path: &str, cache: &CacheSp
             errors.push(ValidationError::new(
                 format!("{path}.files[{fi}]"),
                 "缓存 files 仅支持精确路径，不支持 glob",
+                ValidationCode::CacheFilesGlob,
             ));
         }
     }
@@ -279,6 +343,7 @@ mod tests {
             errs.iter()
                 .any(|e| e.message.contains("必填参数必须带默认值"))
         );
+        assert!(errs.iter().any(|e| e.code == ValidationCode::RequiredParameterDefault));
     }
 
     #[test]
@@ -308,6 +373,7 @@ mod tests {
         });
         let errs = validate(&p).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("必须提供候选项")));
+        assert!(errs.iter().any(|e| e.code == ValidationCode::EnumChoices));
     }
 
     #[test]
@@ -319,6 +385,7 @@ mod tests {
             errs.iter()
                 .any(|e| e.message.contains("禁用 ${SISY_WORKSPACE}"))
         );
+        assert!(errs.iter().any(|e| e.code == ValidationCode::WhenWorkspace));
     }
 
     #[test]
@@ -327,6 +394,17 @@ mod tests {
         p.stages[0].when = Some("(a == \"b\"".into());
         let errs = validate(&p).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("when 表达式")));
+        assert!(errs.iter().any(|e| e.code == ValidationCode::WhenSyntax));
+    }
+
+    #[test]
+    fn rejects_empty_when() {
+        // 空 when 串 tokenize 无 token → parse_primary 缺操作数 → 拒绝（与「无 when」不同）。
+        let mut p = base_pipeline();
+        p.stages[0].when = Some("".into());
+        let errs = validate(&p).unwrap_err();
+        assert!(errs.iter().any(|e| e.message.contains("when 表达式")));
+        assert!(errs.iter().any(|e| e.code == ValidationCode::WhenSyntax));
     }
 
     #[test]
@@ -342,6 +420,29 @@ mod tests {
             errs.iter()
                 .any(|e| e.message.contains("禁用 ${SISY_WORKSPACE}"))
         );
+        assert!(errs.iter().any(|e| e.code == ValidationCode::WhenWorkspace));
+    }
+
+    #[test]
+    fn rejects_empty_shell_command() {
+        let mut p = base_pipeline();
+        p.stages[0].jobs[0].steps.push(Step::Shell {
+            command: "   ".into(),
+            shell: None,
+            when: None,
+        });
+        let errs = validate(&p).unwrap_err();
+        assert!(errs.iter().any(|e| e.message.contains("命令不能为空")));
+        assert!(errs.iter().any(|e| e.code == ValidationCode::ShellCommandEmpty));
+    }
+
+    #[test]
+    fn rejects_empty_container_image() {
+        let mut p = base_pipeline();
+        p.stages[0].jobs[0].exec_env = Some(ExecutionEnv::Container { image: "  ".into() });
+        let errs = validate(&p).unwrap_err();
+        assert!(errs.iter().any(|e| e.message.contains("必须指定 image")));
+        assert!(errs.iter().any(|e| e.code == ValidationCode::ContainerImageEmpty));
     }
 
     #[test]
@@ -354,6 +455,34 @@ mod tests {
         });
         let errs = validate(&p).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("缓存 key 禁用")));
+        assert!(errs.iter().any(|e| e.code == ValidationCode::CacheKeyWorkspace));
+    }
+
+    #[test]
+    fn rejects_empty_cache_key() {
+        let mut p = base_pipeline();
+        p.stages[0].jobs[0].caches.push(CacheSpec {
+            key: "  ".into(),
+            paths: vec![],
+            files: vec![],
+        });
+        let errs = validate(&p).unwrap_err();
+        assert!(errs.iter().any(|e| e.message.contains("缓存 key 不能为空")));
+        assert!(errs.iter().any(|e| e.code == ValidationCode::CacheKeyEmpty));
+    }
+
+    #[test]
+    fn rejects_too_long_cache_key() {
+        // >255 UTF-8 字节即拒；多字节字符（128「中」= 384 字节）显式覆盖字节口径。
+        let mut p = base_pipeline();
+        p.stages[0].jobs[0].caches.push(CacheSpec {
+            key: "中".repeat(128),
+            paths: vec![],
+            files: vec![],
+        });
+        let errs = validate(&p).unwrap_err();
+        assert!(errs.iter().any(|e| e.message.contains("长度超过上限 255")));
+        assert!(errs.iter().any(|e| e.code == ValidationCode::CacheKeyTooLong));
     }
 
     #[test]
@@ -369,6 +498,20 @@ mod tests {
             errs.iter()
                 .any(|e| e.message.contains("仅允许 workspace 相对路径"))
         );
+        assert!(errs.iter().any(|e| e.code == ValidationCode::CachePathNotRelative));
+    }
+
+    #[test]
+    fn rejects_parent_relative_cache_path() {
+        // `..` 起首亦非 workspace 相对路径（同条规则，覆盖另一分支）。
+        let mut p = base_pipeline();
+        p.stages[0].jobs[0].caches.push(CacheSpec {
+            key: "k".into(),
+            paths: vec!["../escape".into()],
+            files: vec![],
+        });
+        let errs = validate(&p).unwrap_err();
+        assert!(errs.iter().any(|e| e.code == ValidationCode::CachePathNotRelative));
     }
 
     #[test]
@@ -381,6 +524,7 @@ mod tests {
         });
         let errs = validate(&p).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("不支持 glob")));
+        assert!(errs.iter().any(|e| e.code == ValidationCode::CacheFilesGlob));
     }
 
     #[test]
@@ -393,6 +537,20 @@ mod tests {
         }];
         let errs = validate(&p).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("机密名冲突")));
+        assert!(errs.iter().any(|e| e.code == ValidationCode::EnvSecretCollision));
+    }
+
+    #[test]
+    fn rejects_empty_artifact_upload_name() {
+        // 仅 name 空、path 合法相对路径 → 触 R8（ArtifactUploadEmpty）不触 R9（绝对路径）。
+        let mut p = base_pipeline();
+        p.stages[0].jobs[0].artifact_uploads.push(ArtifactUpload {
+            name: "  ".into(),
+            path: "rel/path".into(),
+        });
+        let errs = validate(&p).unwrap_err();
+        assert!(errs.iter().any(|e| e.code == ValidationCode::ArtifactUploadEmpty));
+        assert!(!errs.iter().any(|e| e.code == ValidationCode::ArtifactUploadAbsolute));
     }
 
     #[test]
@@ -407,6 +565,7 @@ mod tests {
             errs.iter()
                 .any(|e| e.message.contains("workspace 相对路径"))
         );
+        assert!(errs.iter().any(|e| e.code == ValidationCode::ArtifactUploadAbsolute));
     }
 
     #[test]

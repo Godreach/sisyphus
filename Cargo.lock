@@ -2413,6 +2413,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sisyphus-codegen"
+version = "1.0.0"
+dependencies = [
+ "serde_json",
+ "sisyphus-model",
+]
+
+[[package]]
 name = "sisyphus-model"
 version = "1.0.0"
 dependencies = [

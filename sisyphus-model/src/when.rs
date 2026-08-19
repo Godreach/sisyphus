@@ -195,10 +195,13 @@ fn tokenize(src: &str) -> Result<Vec<(Token, usize)>, WhenParseError> {
                 tokens.push((Token::Str(s), start));
             }
             // `${name}` 变量引用（when 语言统一用 `${}` 语法，ADR-0006）。
+            //
+            // `starts_with("${")` 先守卫、`src.get(i + 2..)` 取切片——避免尾随裸 `$`
+            // （无 `{` 跟随）时 `src[i + 2..]` 越界 panic。落 `Unexpected` 而非崩溃。
             '$' => {
                 let start = i;
-                if let Some(end_rel) = src[i + 2..].find('}')
-                    && src[i..].starts_with("${")
+                if src[i..].starts_with("${")
+                    && let Some(end_rel) = src.get(i + 2..).and_then(|s| s.find('}'))
                 {
                     let end = i + 2 + end_rel;
                     let name = &src[i + 2..end];
@@ -484,6 +487,34 @@ mod tests {
     fn rejects_unknown_tokens() {
         assert!(parse("a => b").is_err());
         assert!(parse("x == \"a\" junk").is_err());
+    }
+
+    #[test]
+    fn rejects_trailing_dollar_without_panic() {
+        // 尾随裸 `$`（无 `{` 跟随）曾因 let-chain 求值顺序在 `src[i + 2..]` 越界 panic；
+        // 现以 `starts_with("${")` 先守卫、`src.get(i + 2..)` 取切片，落 `Unexpected` 而非 panic。
+        assert!(parse("$").is_err());
+        assert!(parse("a$").is_err());
+    }
+
+    #[test]
+    fn rejects_negative_number_literal() {
+        // 数字消费循环只吃 `[0-9.]`，前导 `-` 吃不掉 → text 为空 → 解析失败
+        // （`when.rs` 数字 arm 的 `-` 守卫实为死代码：负数字面量不支持）。
+        assert!(parse("-5").is_err());
+        assert!(parse("-").is_err());
+        assert!(parse("--").is_err());
+        assert!(parse("${X} > -5").is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_number_literal() {
+        // `1.2.3` 非 f64；`.5`/`5.`/`1.2`/`1` 均合法。
+        assert!(parse("1.2.3").is_err());
+        assert!(parse(".5").is_ok());
+        assert!(parse("5.").is_ok());
+        assert!(parse("1.2").is_ok());
+        assert!(parse("1").is_ok());
     }
 
     #[test]

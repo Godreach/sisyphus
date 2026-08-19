@@ -18,7 +18,7 @@
   - `sisyphus-server` -- 单进程承载全部 Server 职责。2026-08-16 起 **lib+bin**（票 #33）：bin 只留启动路径，模块实现在 lib 面——`tests/` 集成测试与二进制共用同一 Router/组合根装配（Spec B2a 测试缝：进程内 oneshot，不起 socket）。模块边界不变：pub 面即 crate 本身，模块间仍走 crate 内可见性。
   - `sisyphus-agent` -- bin，只依赖 `sisyphus-proto`，不依赖 `sisyphus-model`。
 - **proto 生成物不进 git**：`sisyphus-proto` build.rs 用 tonic-build/prost-build（vendored protoc，无系统依赖）现场生成。
-- **不立 `xtask`**：OpenAPI snapshot、i18n 对账、TS 生成等工具需求真实出现时再建。
+- **首个工具需求落 `sisyphus-codegen`**（2026-08-19，票 #69）：OpenAPI snapshot、i18n 对账、TS 生成等工具需求真实出现时再建——首个是 model→TS 类型/校验生成与对账，crate 名 `sisyphus-codegen`（dev 工具、`publish = false`、不交叉编译、不进 `default-members`，但入 `members` 供 `cargo test --workspace` 与 `cargo run -p sisyphus-codegen -- check`）。OpenAPI snapshot 与 i18n 对账各自就近落了更贴切的载体（server 集成测试、`sisyphus-web/scripts/i18n-check.mjs`），未进此 crate。
 
 ### Server 模块（crate 内模块，不上 pub 边界）
 
@@ -49,6 +49,6 @@
 ## 后果
 
 - 模块升 crate 的触发器明确：**第二个消费者出现**。届时升 crate 裁量权归对应细化票（#11 scm 等）。
-- `sisyphus-model` 承载编辑器保存校验（参数默认值、when 受限语法、`${SISY_WORKSPACE}` 禁入 when 等），前端 TS 校验逻辑以其为唯一事实源，漂移靠生成/对账工具兜底（首个工具需求出现时立 xtask）。
+- `sisyphus-model` 承载编辑器保存校验（参数默认值、when 受限语法、`${SISY_WORKSPACE}` 禁入 when 等），前端 TS 校验逻辑以其为唯一事实源，漂移靠生成/对账工具兜底——首个工具需求（model→TS 生成+对账）2026-08-19 落 `sisyphus-codegen` crate（票 #69）。
 - SSE/事件语义定了"通知可丢、DB 重放兜底"，api 模块读路径与 store 写路径解耦。
 - 解锁 #5（调度票：sched 模块细化）、#7（日志票：events+store 读路径已留位）、#10/#11（auth/scm 模块内部设计）；发布工程票（#16）拿到 crate 清单与 agent 依赖树边界。

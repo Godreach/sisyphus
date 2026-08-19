@@ -30,6 +30,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
 
+      # sisyphus-codegen 对账校验（票 B4-T7，ADR-0009）：sisyphus-model → TS 生成产物
+      # （src/model/pipeline.ts 等）与 model 当前形态一致——model 改后未 gen 或
+      # 生成产物被手改即红。自检（样本码 multiset）已由 `cargo test --workspace` 覆盖。
+      - name: 对账（生成产物未漂移）
+        run: cargo run -p sisyphus-codegen -- check
+
   # Agent 全平台矩阵（票 B3-T10 / #55，ADR-0010 发布矩阵 Linux/Windows）：
   # agent 只依赖 sisyphus-proto（vendored protoc 跨平台），不拉 server，故可在
   # Windows 上独立构建/测试。docker 门控用例 `#[ignore]` 由 `cargo test` 默认跳过

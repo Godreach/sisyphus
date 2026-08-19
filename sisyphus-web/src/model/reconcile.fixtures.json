@@ -1,0 +1,689 @@
+{
+  "rules": [
+    "required_parameter_default",
+    "enum_choices",
+    "when_workspace",
+    "when_syntax",
+    "shell_command_empty",
+    "container_image_empty",
+    "env_secret_collision",
+    "artifact_upload_empty",
+    "artifact_upload_absolute",
+    "cache_key_empty",
+    "cache_key_too_long",
+    "cache_key_workspace",
+    "cache_path_not_relative",
+    "cache_files_glob"
+  ],
+  "samples": [
+    {
+      "expectedCodes": [],
+      "id": "valid_minimal",
+      "json": {
+        "env": [],
+        "name": "min",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "name": "j",
+                "steps": []
+              }
+            ],
+            "name": "s"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "expectedCodes": [],
+      "id": "valid_full",
+      "json": {
+        "env": [
+          {
+            "name": "CARGO_HOME",
+            "value": "${SISY_WORKSPACE}/.cargo"
+          }
+        ],
+        "name": "demo",
+        "notification": {
+          "on_success": true
+        },
+        "parameters": [
+          {
+            "default": "x",
+            "description": "字符串参数",
+            "name": "p_str",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "default": 2.5,
+            "name": "p_num",
+            "required": true,
+            "type": "number"
+          },
+          {
+            "default": true,
+            "name": "p_bool",
+            "required": false,
+            "type": "bool"
+          },
+          {
+            "choices": [
+              "a",
+              "b"
+            ],
+            "default": "a",
+            "name": "p_enum",
+            "required": false,
+            "type": "enum"
+          },
+          {
+            "name": "p_nodefault",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "revision": {
+          "at_ms": 1700000000000,
+          "number": 3,
+          "operator": "alice"
+        },
+        "stages": [
+          {
+            "jobs": [
+              {
+                "allow_failure": true,
+                "artifact_downloads": [
+                  {
+                    "job": "prep",
+                    "name": "vendor",
+                    "path": "vendor"
+                  }
+                ],
+                "artifact_uploads": [
+                  {
+                    "name": "bin",
+                    "path": "target/release/sisyphus"
+                  }
+                ],
+                "caches": [
+                  {
+                    "files": [
+                      "Cargo.lock"
+                    ],
+                    "key": "cargo-${SISY_BRANCH}",
+                    "paths": [
+                      ".cargo"
+                    ]
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "RUSTFLAGS",
+                    "value": "-D warnings"
+                  }
+                ],
+                "exec_env": {
+                  "config": {
+                    "image": "rust:1.97"
+                  },
+                  "type": "container"
+                },
+                "labels": [
+                  "sisyphus/os=linux"
+                ],
+                "name": "compile",
+                "retry_count": 2,
+                "secrets": [
+                  "DOCKER_TOKEN"
+                ],
+                "steps": [
+                  {
+                    "config": {
+                      "command": "cargo build --release",
+                      "shell": "bash"
+                    },
+                    "type": "shell"
+                  },
+                  {
+                    "config": {
+                      "command": "cargo test",
+                      "shell": null,
+                      "when": "${SISY_BRANCH} == \"main\""
+                    },
+                    "type": "shell"
+                  },
+                  {
+                    "config": {
+                      "submodules": true
+                    },
+                    "type": "checkout"
+                  },
+                  {
+                    "config": {},
+                    "type": "checkout"
+                  }
+                ],
+                "timeout_minutes": 30,
+                "when": "exists SISY_COMMIT_ID"
+              },
+              {
+                "exec_env": {
+                  "type": "host"
+                },
+                "name": "prep",
+                "steps": []
+              },
+              {
+                "name": "lint",
+                "steps": [
+                  {
+                    "config": {
+                      "command": "sh -c 'echo sh'",
+                      "shell": "sh"
+                    },
+                    "type": "shell"
+                  },
+                  {
+                    "config": {
+                      "command": "pwsh -c 'echo pwsh'",
+                      "shell": "pwsh"
+                    },
+                    "type": "shell"
+                  },
+                  {
+                    "config": {
+                      "command": "cmd /c echo cmd",
+                      "shell": "cmd"
+                    },
+                    "type": "shell"
+                  }
+                ]
+              }
+            ],
+            "name": "build",
+            "when": "${SISY_BRANCH} == \"main\""
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "expectedCodes": [
+        "required_parameter_default"
+      ],
+      "id": "r1_required_no_default",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [
+          {
+            "name": "target",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "enum_choices"
+      ],
+      "id": "r2_enum_no_choices",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [
+          {
+            "default": "linux",
+            "name": "os",
+            "required": false,
+            "type": "enum"
+          }
+        ],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "when_workspace"
+      ],
+      "id": "r3_when_workspace",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build",
+            "when": "${SISY_WORKSPACE} == \"/x\""
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "when_syntax"
+      ],
+      "id": "r4_when_syntax",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build",
+            "when": "(a == \"b\""
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "shell_command_empty"
+      ],
+      "id": "r5_shell_empty",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "name": "compile",
+                "steps": [
+                  {
+                    "config": {
+                      "command": "   ",
+                      "shell": null
+                    },
+                    "type": "shell"
+                  }
+                ]
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "container_image_empty"
+      ],
+      "id": "r6_container_no_image",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "exec_env": {
+                  "config": {
+                    "image": "  "
+                  },
+                  "type": "container"
+                },
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "env_secret_collision"
+      ],
+      "id": "r7_env_secret_collision",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "env": [
+                  {
+                    "name": "DOCKER_TOKEN",
+                    "value": "x"
+                  }
+                ],
+                "name": "compile",
+                "secrets": [
+                  "DOCKER_TOKEN"
+                ],
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "artifact_upload_empty"
+      ],
+      "id": "r8_artifact_empty",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "artifact_uploads": [
+                  {
+                    "name": "  ",
+                    "path": "rel/path"
+                  }
+                ],
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "artifact_upload_absolute"
+      ],
+      "id": "r9_artifact_absolute",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "artifact_uploads": [
+                  {
+                    "name": "bin",
+                    "path": "/absolute/path"
+                  }
+                ],
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "cache_key_empty"
+      ],
+      "id": "r10_cache_key_empty",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "caches": [
+                  {
+                    "files": [],
+                    "key": "  ",
+                    "paths": []
+                  }
+                ],
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "cache_key_too_long"
+      ],
+      "id": "r11_cache_key_too_long",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "caches": [
+                  {
+                    "files": [],
+                    "key": "中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中",
+                    "paths": []
+                  }
+                ],
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "cache_key_workspace"
+      ],
+      "id": "r12_cache_key_workspace",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "caches": [
+                  {
+                    "files": [],
+                    "key": "${SISY_WORKSPACE}/cache",
+                    "paths": []
+                  }
+                ],
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "cache_path_not_relative"
+      ],
+      "id": "r13_cache_path_absolute",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "caches": [
+                  {
+                    "files": [],
+                    "key": "k",
+                    "paths": [
+                      "/home/me/.cargo"
+                    ]
+                  }
+                ],
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "cache_path_not_relative"
+      ],
+      "id": "r13_cache_path_parent_relative",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "caches": [
+                  {
+                    "files": [],
+                    "key": "k",
+                    "paths": [
+                      "../escape"
+                    ]
+                  }
+                ],
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "cache_files_glob"
+      ],
+      "id": "r14_cache_files_glob",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "caches": [
+                  {
+                    "files": [
+                      "target/*"
+                    ],
+                    "key": "k",
+                    "paths": []
+                  }
+                ],
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "artifact_upload_empty",
+        "artifact_upload_absolute"
+      ],
+      "id": "co_r8_r9",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "artifact_uploads": [
+                  {
+                    "name": "  ",
+                    "path": "/absolute/path"
+                  }
+                ],
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+import{d as t,u as s,c as a,b as o,t as r,e as u,o as l}from"./index-DhlCkLQ4.js";const p={class:"not-found-page"},_=t({__name:"NotFoundView",setup(c){const{t:n}=s();return(d,e)=>(l(),a("div",p,[e[0]||(e[0]=o("h1",null,"404",-1)),o("p",null,r(u(n)("errors.notFound")),1)]))}});export{_ as default};
