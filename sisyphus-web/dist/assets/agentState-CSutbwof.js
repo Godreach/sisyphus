@@ -1,0 +1,1 @@
+function t(e){return e.online?"online":"offline"}function a(e){return e.disabled?"disabled":t(e)}function r(e){return`agents.state${e.charAt(0).toUpperCase()+e.slice(1)}`}function i(e){return`agent-state-${e}`}export{i as a,a as b,r as c};

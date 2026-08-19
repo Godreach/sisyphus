@@ -155,6 +155,14 @@ export interface CreateAgentRequest {
   max_concurrency?: number
 }
 
+/** 启停 / 编辑 Agent 请求体（后端 `PatchAgentRequest`，PATCH 语义：字段均可选，
+ *  只更新出现者）。停用（`disabled: true`）即踢线；`custom_labels` 为整组替换。 */
+export interface PatchAgentRequest {
+  disabled?: boolean
+  max_concurrency?: number
+  custom_labels?: string[]
+}
+
 // ---------------------------------------------------------------------------
 // 构建（builds）DTO（后端 `api/builds.rs` 契约的前端镜像，ADR-0005）。
 // 票 B4-T4 构建详情/列表页消费；枚举值取 `BuildStatus::as_str()` 落库文本

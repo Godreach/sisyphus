@@ -16,6 +16,7 @@ import type {
   DirectoryEntryResponse,
   MemberAssignment,
   MemberResponse,
+  PatchAgentRequest,
   PipelineDefinitionResponse,
   ProjectResponse,
   RerunBuildRequest,
@@ -50,6 +51,14 @@ export const agentsApi = {
   /** Agent 清单（全局 admin；按名排序，含已停用）。概览页在线/总数与
    *  离线/不兼容警示态据此派生（ADR-0019）。 */
   list: () => http.get<AgentResponse[]>('agents'),
+
+  /** Agent 详情（全局 admin）：在线/标签/槽位占用/磁盘占用（ADR-0019）。 */
+  get: (name: string) => http.get<AgentResponse>(`agents/${encodeURIComponent(name)}`),
+
+  /** 启停 / 编辑（全局 admin，PATCH 语义：字段可选）：停用即踢线；改槽位与
+   *  自定义标签（整组替换）。返回落定后的 Agent。 */
+  patch: (name: string, req: PatchAgentRequest) =>
+    http.patch<AgentResponse>(`agents/${encodeURIComponent(name)}`, { json: req }),
 }
 
 /** 项目端点（后端 `api/projects.rs`；建项目为全局 admin 专属）。 */

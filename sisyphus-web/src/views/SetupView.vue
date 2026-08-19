@@ -25,6 +25,7 @@ import { agentsApi, projectsApi, setupApi } from '@/api/client'
 import { describeSubmitError } from '@/api/errors'
 import { ApiError } from '@/api/http'
 import { useAuthStore } from '@/stores/auth'
+import { buildAgentRegisterCommand, type AgentTargetOs } from '@/utils/agentCommand'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -45,7 +46,7 @@ const adminPassword = ref('')
 const agentCreds = ref<{ token: string; registerCode: string; agentName: string } | null>(null)
 const agentName = ref('')
 /** 已选目标 OS（复制命令按 OS 分档）。 */
-const targetOs = ref<'linux' | 'macos' | 'windows'>('linux')
+const targetOs = ref<AgentTargetOs>('linux')
 
 /** 项目步表单。 */
 const projectName = ref('')
@@ -155,21 +156,12 @@ const cliProjectCommand =
   `-d '{"name":"my-project","scm_type":"git","scm_url":"https://…"}'`
 
 /**
- * 按目标 OS 生成复制即用注册命令（ADR-0010/0007，README「首次接入」节）：
- * `sisyphus-agent --server-url <grpc> --api-url <rest> --reg-key <code>`。
- * - `--reg-key` 是注册引导的实际 CLI flag（票 #57；ADR-0010 里旧示例写的
- *   `--registration-code` 是 #57 落地前的示意名，实际二进制以 clap 定义为准）。
- * - `--api-url`（REST 注册面）与 `--server-url`（gRPC 通道）是两个不同
- *   端口：默认 50051 / 8080（`config.rs`）。本页无法可靠获知部署者实际
- *   地址，占位 `<server>` 随部署替换（与 README 同约定）。
- * - Windows 构建机二进制带 `.exe` 后缀（ADR-0010 发布矩阵命名）。
+ * 按目标 OS 生成复制即用注册命令（ADR-0010/0007）。命令形态抽到
+ * `@/utils/agentCommand` 与 Agent 列表页建条目共用（不复制漂移）；本处仅
+ * 注入建条目响应的一次性注册码。详见 `buildAgentRegisterCommand` 注释。
  */
-function agentCommand(os: 'linux' | 'macos' | 'windows'): string {
-  const code = agentCreds.value?.registerCode ?? ''
-  const serverUrl = 'http://<server>:50051'
-  const apiUrl = 'http://<server>:8080'
-  const bin = os === 'windows' ? 'sisyphus-agent.exe' : 'sisyphus-agent'
-  return `${bin} --server-url ${serverUrl} --api-url ${apiUrl} --reg-key ${code}`
+function agentCommand(os: AgentTargetOs): string {
+  return buildAgentRegisterCommand(os, agentCreds.value?.registerCode ?? '')
 }
 
 /** 复制当前目标 OS 的注册命令到剪贴板（不可用时回落选中态提示）。 */

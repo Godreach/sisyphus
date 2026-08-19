@@ -1349,3 +1349,345 @@ h3 {
 .required-mark {
   color: var(--sisy-color-danger);
 }
+
+/* ---------------------------------------------------------------------------
+ * Agent 列表 / 详情（票 B4-T5）。
+ * ------------------------------------------------------------------------- */
+
+.agents-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.agent-form {
+  background: var(--sisy-color-surface);
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0 16px;
+  max-width: 480px;
+}
+
+.agent-form select,
+.agent-creds select,
+.agent-edit-form select,
+.agent-form input,
+.agent-edit-form input {
+  padding: 6px 8px;
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  font-size: 14px;
+  background: var(--sisy-color-surface);
+}
+
+.agent-form textarea,
+.agent-edit-form textarea {
+  padding: 6px 8px;
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  font-size: 13px;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  background: var(--sisy-color-surface);
+  resize: vertical;
+}
+
+.agent-form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* 一次性凭据面板（建条目响应：token + 注册码明文仅此一次 + 复制命令）。 */
+.agent-creds {
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  padding: 12px 14px;
+  background: #f6f8fa;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0 16px;
+  max-width: 560px;
+}
+
+.agent-creds-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.agent-creds dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+}
+
+.agent-creds dt {
+  color: var(--sisy-color-text-secondary);
+}
+
+.agent-creds dd {
+  margin: 0;
+}
+
+.agent-creds-warn {
+  margin: 0;
+  color: var(--sisy-color-danger);
+  font-size: 12px;
+}
+
+.agent-creds-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.agent-cmd {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.agent-cmd code {
+  flex: 1;
+  background: #0f172a;
+  color: #d7e0ee;
+  border-radius: var(--sisy-radius);
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.agent-cmd button {
+  border: 1px solid var(--sisy-color-border);
+  background: var(--sisy-color-surface);
+  border-radius: var(--sisy-radius);
+  padding: 4px 12px;
+  cursor: pointer;
+  color: var(--sisy-color-text);
+}
+
+/* 列表。 */
+.agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-item {
+  background: var(--sisy-color-surface);
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.agent-row-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.agent-name-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.agent-name-btn:hover .agent-name {
+  color: var(--sisy-color-primary);
+  text-decoration: underline;
+}
+
+.agent-name {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.agent-slots,
+.agent-seen {
+  color: var(--sisy-color-text-secondary);
+  font-size: 12px;
+}
+
+.agent-row-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.agent-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--sisy-color-border);
+  padding-top: 10px;
+  max-width: 480px;
+}
+
+/* 状态徽标（四态 + 停用，ADR-0017）。 */
+.agent-state-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--sisy-color-border);
+  color: var(--sisy-color-text-secondary);
+  background: var(--sisy-color-surface);
+}
+
+.agent-state-online {
+  color: #1a7f37;
+  border-color: #66c08a;
+  background: #e7f6ec;
+}
+
+.agent-state-offline,
+.agent-state-disabled {
+  color: #59636e;
+  border-color: #c4c9cf;
+  background: #f0f2f4;
+}
+
+.agent-state-draining {
+  color: #8a4a0f;
+  border-color: #e2a56a;
+  background: #fdf1e3;
+}
+
+.agent-state-incompatible {
+  color: #c62828;
+  border-color: #e89090;
+  background: #fdeaea;
+}
+
+/* 详情页。 */
+.agent-detail-page {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-back {
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+
+.agent-back a {
+  color: var(--sisy-color-primary);
+  text-decoration: none;
+}
+
+.agent-back a:hover {
+  text-decoration: underline;
+}
+
+.agent-meta-dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 4px 0 0;
+}
+
+.agent-meta-dl dt {
+  color: var(--sisy-color-text-secondary);
+}
+
+.agent-meta-dl dd {
+  margin: 0;
+}
+
+.label-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.label-chip {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--sisy-color-border);
+  background: #f6f8fa;
+  color: var(--sisy-color-text);
+}
+
+.agent-slots-detail {
+  margin: 4px 0 0;
+  font-size: 14px;
+}
+
+.disk-sub {
+  font-size: 14px;
+  margin: 8px 0 4px;
+}
+
+.disk-table {
+  border-collapse: collapse;
+  width: 100%;
+  max-width: 560px;
+  margin: 4px 0;
+}
+
+.disk-table th,
+.disk-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--sisy-color-border);
+  font-size: 13px;
+}
+
+.disk-table th {
+  background: #f6f8fa;
+  color: var(--sisy-color-text-secondary);
+  font-weight: 600;
+}
+
+.disk-dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 8px 0 0;
+}
+
+.disk-dl dt {
+  color: var(--sisy-color-text-secondary);
+  font-size: 13px;
+}
+
+.disk-dl dd {
+  margin: 0;
+  font-size: 13px;
+}
+
+.cleanup-block {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 6px 0;
+  max-width: 560px;
+}
+
+.cleanup-block p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.cleanup-unavailable {
+  color: #8a4a0f;
+}

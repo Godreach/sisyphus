@@ -63,13 +63,13 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/agents',
     name: 'agents',
-    component: () => import('@/views/PlaceholderView.vue'),
+    component: () => import('@/views/AgentListView.vue'),
     meta: { title: 'routes.agents' },
   },
   {
     path: '/agents/:name',
     name: 'agent-detail',
-    component: () => import('@/views/PlaceholderView.vue'),
+    component: () => import('@/views/AgentDetailView.vue'),
     meta: { title: 'routes.agentDetail' },
   },
   {
