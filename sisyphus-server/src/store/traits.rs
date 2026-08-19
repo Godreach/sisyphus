@@ -59,7 +59,9 @@ pub trait LogStore {
     /// 批量追加日志 chunk（断线补传时按 start_seq 去重的责任在实现）。
     async fn append(&self, loc: LogLocation, chunks: Vec<LogChunk>) -> Result<(), StoreError>;
 
-    /// 自 `from_seq` 起读取 chunk（SSE `from=<seq>` 回放/续传与整份下载共用，ADR-0013）。
+    /// 自 `from_seq` 起读取 chunk（SSE `from=<seq>` 回放/续传与整份下载共用，
+    /// ADR-0013）。返回「覆盖或晚于 `from_seq`」的 chunk：多事件 chunk 跨
+    /// 游标时整块返回，事件级过滤归调用侧。
     async fn read_from(&self, loc: LogLocation, from_seq: u64)
     -> Result<Vec<LogChunk>, StoreError>;
 }

@@ -92,13 +92,22 @@ async fn main() {
         }
     };
     // REST 组合根（B2a-T4）：池注入 repo，端点面见 api::router；注册开关
-    // 随配置注入（票 B2b-T4）、主密钥随配置注入（票 B2b-T6）。
-    let state = api::AppState::new(
+    // 随配置注入（票 B2b-T4）、主密钥随配置注入（票 B2b-T6）。日志存储
+    // 随组合根装配（票 #73：读路径独立连接，ADR-0004）。
+    let state = match api::AppState::new(
         pool.clone(),
         config.registration_enabled,
         master_key,
         config.poll_interval_minutes,
-    );
+    )
+    .await
+    {
+        Ok(state) => state,
+        Err(e) => {
+            tracing::error!(error = %e, "组合根装配失败（日志读池）");
+            std::process::exit(2);
+        }
+    };
     // 静态资源本地覆盖目录（B2a-T5）：数据目录 web/ 子目录，不存在即纯内嵌。
     let web_override_dir = config.data_dir.join(sisyphus_server::config::WEB_DIR);
 

@@ -13,6 +13,7 @@ pub mod config;
 pub mod engine;
 pub mod events;
 pub mod grpc;
+pub mod logs;
 pub mod notify;
 pub mod sched;
 pub mod scm;

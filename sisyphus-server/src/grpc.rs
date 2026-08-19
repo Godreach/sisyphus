@@ -20,6 +20,9 @@
 //!   调度侧落库 + engine 推进。
 //! - **在线判定事件**：上线/离线发布 [`Event::AgentOnline`]/[`Event::AgentOffline`]
 //!   （sched 据此转 unknown/匹配重算；UI 在线态）。
+//! - **日志面**（票 #73，ADR-0013）：`Kind::LogBatch` 落库
+//!   （[`handle_log_batch`]——按 start_seq 幂等，断线补传不重不乱序）+
+//!   事件总线广播（SSE 尾随热通知）。
 //! - **会话注册表**（[`SessionRegistry`]）：agent_id → 会话发送器，随连接
 //!   建立/断开维护——JobSpec/CancelBuild 的下发目的地。trait 缝隔离：
 //!   sched 只依赖 `JobDispatcher`，不依赖 tonic。
@@ -43,6 +46,7 @@ use crate::auth::token_hash;
 use crate::engine::{ResolvedJobSpec, ResolvedStep, Vcs};
 use crate::events::Event;
 use crate::sched::{JobDispatcher, SchedError, SchedulerHandle};
+use crate::store::LogStore;
 use crate::store::agents::{AgentDiskUsage, VolumeUsage};
 use crate::store::jobs::JobRow;
 use crate::store::now_ms;
@@ -472,6 +476,13 @@ async fn session_loop(
                     tracing::warn!(agent = %agent, error = %e, "JobReported 处理失败");
                 }
             }
+            Some(Kind::LogBatch(batch)) => {
+                // 日志流（票 #73，ADR-0013）：落库 + 事件总线广播（SSE 尾随
+                // 热通知；可丢，重放兑底走 DB）。
+                if let Err(e) = handle_log_batch(&state, agent_id, batch).await {
+                    tracing::warn!(agent = %agent, error = %e, "LogBatch 落库失败");
+                }
+            }
             _ => {
                 // 非任务面帧（升级/工作区/缓存/未知）：只做「下一请求即拒」
                 // 的踢线复核。查库失败（瞬态 IO）不断健康会话——只有「明确
@@ -597,6 +608,97 @@ fn system_labels_from_metadata(metadata: &MetadataMap) -> String {
     serde_json::to_string(&labels).expect("系统标签 JSON 序列化恒可成功（纯字符串）")
 }
 
+/// proto LogBatch 落库：任务行校验（存在 + 归属本 Agent——与 on_job_status
+/// 同纪律，不越权写他人任务日志）→ proto 事件映射为 server 日志事件模型 →
+/// 编码 gzip chunk → [`LogStore::append`]（按 start_seq 幂等，断线补传不重
+/// 不乱序）→ 广播 [`Event::LogAppended`]（SSE 尾随热通知）。
+async fn handle_log_batch(
+    state: &AppState,
+    agent_id: i64,
+    batch: sisyphus_proto::agent::LogBatch,
+) -> Result<(), crate::store::StoreError> {
+    let Ok(job_id) = batch.job_id.parse::<i64>() else {
+        // 契约外 job_id（非数字）：丢弃记日志，不断会话（日志面非致命）。
+        tracing::warn!(agent_id, job = %batch.job_id, "LogBatch job_id 非数字，丢弃");
+        return Ok(());
+    };
+    let Some(job) = crate::store::jobs::JobRepo::new(state.pool.clone())
+        .get(job_id)
+        .await?
+    else {
+        tracing::warn!(agent_id, job_id, "LogBatch 任务行不存在，丢弃");
+        return Ok(());
+    };
+    if job.agent_id != Some(agent_id) {
+        // 与 on_job_status 同纪律：非本 Agent 的任务，静默忽略（不越权写）。
+        return Ok(());
+    }
+    let events = log_events_from_proto(&batch);
+    if events.is_empty() {
+        return Ok(());
+    }
+    let loc = crate::logs::location(job.build_id, job_id, batch.attempt);
+    let chunk = crate::logs::encode_chunk(&events);
+    state.logs.append(loc, vec![chunk]).await?;
+    state.bus.publish(Event::LogAppended {
+        build_id: job.build_id,
+        job_id,
+        attempt: batch.attempt,
+    });
+    Ok(())
+}
+
+/// proto `LogEvent` 序列 → server 日志事件模型（ADR-0013）：
+/// - `OutputChunk` → 输出块（stream 标记；字节 UTF-8 有损解码——SSE/JSON
+///   传输面是文本，ANSI 色码原样保留）；
+/// - `StepEvent`（exit_code 空）→ step start（命令回显）；Some → step end
+///   （退出码 + 耗时）；步骤名 proto 不携带（v1 恒空，前端回落「步骤 N」）；
+/// - `Truncated` → 截断标记（limit_bytes 取全局默认上限；dropped_bytes
+///   随行携带作信息面）；
+/// - 契约未知 kind（None）跳过——演进只加字段，旧事件形态不炸。
+fn log_events_from_proto(
+    batch: &sisyphus_proto::agent::LogBatch,
+) -> Vec<crate::logs::LogStreamEvent> {
+    use sisyphus_proto::agent::Stream;
+    use sisyphus_proto::agent::log_event::Kind as EventKind;
+
+    batch
+        .events
+        .iter()
+        .filter_map(|e| match e.kind.as_ref()? {
+            EventKind::Output(o) => Some(crate::logs::LogStreamEvent::Output {
+                seq: e.seq,
+                stream: if o.stream == Stream::Stderr as i32 {
+                    crate::logs::LogStream::Stderr
+                } else {
+                    crate::logs::LogStream::Stdout
+                },
+                text: String::from_utf8_lossy(&o.data).into_owned(),
+            }),
+            EventKind::Step(s) => match s.exit_code {
+                None => Some(crate::logs::LogStreamEvent::StepStart {
+                    seq: e.seq,
+                    step: s.seq,
+                    name: String::new(),
+                    command: s.command.clone(),
+                    started_at: s.step_started_at_ms,
+                }),
+                Some(exit_code) => Some(crate::logs::LogStreamEvent::StepEnd {
+                    seq: e.seq,
+                    step: s.seq,
+                    exit_code: Some(exit_code),
+                    duration_ms: s.step_ended_at_ms - s.step_started_at_ms,
+                }),
+            },
+            EventKind::Truncated(t) => Some(crate::logs::LogStreamEvent::Truncated {
+                seq: e.seq,
+                limit_bytes: crate::logs::DEFAULT_LOG_LIMIT_BYTES,
+                dropped_bytes: t.dropped_bytes,
+            }),
+        })
+        .collect()
+}
+
 /// proto `DiskUsage` → 落库形态 JSON（store 不依赖 proto，转换收在调用侧）。
 fn disk_usage_json(disk: DiskUsage) -> String {
     let usage = AgentDiskUsage {
@@ -694,6 +796,94 @@ mod tests {
             disk_usage_json(disk),
             r#"{"volumes":[{"mount_point":"/","total_bytes":100,"free_bytes":40}],"cache_bytes":5,"workspace_bytes":10}"#,
             "与落库形态（AgentDiskUsage）同构"
+        );
+    }
+
+    #[test]
+    fn log_events_map_output_step_and_truncated() {
+        use sisyphus_proto::agent::log_event::Kind as EventKind;
+        use sisyphus_proto::agent::{LogEvent, OutputChunk, StepEvent, Stream, Truncated};
+
+        let batch = sisyphus_proto::agent::LogBatch {
+            job_id: "7".into(),
+            attempt: 1,
+            start_seq: 0,
+            events: vec![
+                LogEvent {
+                    seq: 0,
+                    kind: Some(EventKind::Output(OutputChunk {
+                        stream: Stream::Stdout as i32,
+                        data: b"hello \x1b[32mworld\x1b[0m\n".to_vec(),
+                    })),
+                },
+                LogEvent {
+                    seq: 1,
+                    kind: Some(EventKind::Output(OutputChunk {
+                        stream: Stream::Stderr as i32,
+                        data: b"boom".to_vec(),
+                    })),
+                },
+                LogEvent {
+                    seq: 2,
+                    kind: Some(EventKind::Step(StepEvent {
+                        seq: 3,
+                        step_started_at_ms: 1000,
+                        step_ended_at_ms: 0,
+                        exit_code: None,
+                        command: "cargo build".into(),
+                    })),
+                },
+                LogEvent {
+                    seq: 3,
+                    kind: Some(EventKind::Step(StepEvent {
+                        seq: 3,
+                        step_started_at_ms: 1000,
+                        step_ended_at_ms: 1250,
+                        exit_code: Some(0),
+                        command: String::new(),
+                    })),
+                },
+                LogEvent {
+                    seq: 4,
+                    kind: Some(EventKind::Truncated(Truncated {
+                        dropped_bytes: 4096,
+                    })),
+                },
+                LogEvent { seq: 5, kind: None }, // 契约未知 kind：跳过
+            ],
+        };
+        assert_eq!(
+            log_events_from_proto(&batch),
+            vec![
+                crate::logs::LogStreamEvent::Output {
+                    seq: 0,
+                    stream: crate::logs::LogStream::Stdout,
+                    text: "hello \x1b[32mworld\x1b[0m\n".into(),
+                },
+                crate::logs::LogStreamEvent::Output {
+                    seq: 1,
+                    stream: crate::logs::LogStream::Stderr,
+                    text: "boom".into(),
+                },
+                crate::logs::LogStreamEvent::StepStart {
+                    seq: 2,
+                    step: 3,
+                    name: String::new(),
+                    command: "cargo build".into(),
+                    started_at: 1000,
+                },
+                crate::logs::LogStreamEvent::StepEnd {
+                    seq: 3,
+                    step: 3,
+                    exit_code: Some(0),
+                    duration_ms: 250,
+                },
+                crate::logs::LogStreamEvent::Truncated {
+                    seq: 4,
+                    limit_bytes: crate::logs::DEFAULT_LOG_LIMIT_BYTES,
+                    dropped_bytes: 4096,
+                },
+            ]
         );
     }
 }

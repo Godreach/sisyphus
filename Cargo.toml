@@ -45,6 +45,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # server 存储：SQLite WAL + sqlx（bundled 静态链接，ADR-0004）
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate"] }
 # server REST 面（ADR-0005：axum + utoipa + Swagger UI）。
+# 镜像源约束注记见下 axum 条目。
+# 日志 chunk gzip：纯 Rust miniz_oxide 后端（不引 zstd，ADR-0013 单二进制零依赖）。
+flate2 = "1"
 # utoipa 注解钉 5（spec 决策）；utoipa-swagger-ui 走 9 线——
 # 本仓镜像源缺 5.1–5.3（axum 0.8 支持起始版），9.x 与 utoipa 5 + axum 0.8 成对。
 # vendored：Swagger UI 资产随 crate 预置，构建期零网络下载（CI 可重现）。

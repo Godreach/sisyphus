@@ -82,7 +82,9 @@ pub async fn test_app_at_with(data_dir: &Path, registration_enabled: bool) -> Te
         registration_enabled,
         master_key,
         sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES,
-    );
+    )
+    .await
+    .expect("装配 AppState");
     TestApp {
         router: router(state.clone(), web.clone()),
         state,

@@ -9,6 +9,7 @@ use super::auth;
 use super::builds;
 use super::error::{ErrorBody, ValidationIssue};
 use super::health;
+use super::logs;
 use super::members;
 use super::pipelines;
 use super::projects;
@@ -56,6 +57,8 @@ use super::users;
         builds::rerun,
         builds::list,
         builds::detail,
+        logs::stream,
+        logs::download,
         triggers::list,
         triggers::create,
         triggers::get_one,

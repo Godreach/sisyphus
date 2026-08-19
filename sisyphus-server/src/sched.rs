@@ -331,6 +331,10 @@ impl Scheduler {
                     tracing::warn!(error = %e, "匹配扫描失败");
                 }
             }
+            Event::LogAppended { .. } => {
+                // 日志落库热通知（SSE 尾随消费）：调度面无动作——日志不触发
+                // 匹配扫描（高频日志面不做无谓 DB 扫）。
+            }
             Event::AgentOnline { .. } => {
                 // 新 Agent 上线：等待中的任务可能可匹配。
                 if let Err(e) = self.match_pass(now_ms()).await {

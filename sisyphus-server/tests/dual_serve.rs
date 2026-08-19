@@ -28,7 +28,9 @@ async fn rest_and_grpc_serve_side_by_side() {
         false,
         master_key,
         sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES,
-    );
+    )
+    .await
+    .expect("装配 AppState");
     let web_override_dir = dir.path().join(sisyphus_server::config::WEB_DIR);
 
     // 建一个 Agent 条目（票 #47 起通道认证 Bearer sisa_ token）：握手

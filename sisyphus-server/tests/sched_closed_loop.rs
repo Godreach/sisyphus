@@ -64,7 +64,9 @@ async fn harness() -> Harness {
         false,
         master_key,
         sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES,
-    );
+    )
+    .await
+    .expect("装配 AppState");
 
     let sessions = Arc::new(grpc::SessionRegistry::new());
     let dispatcher = Arc::new(grpc::GrpcDispatcher::new(sessions.clone()));

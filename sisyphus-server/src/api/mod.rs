@@ -29,6 +29,7 @@ pub mod csrf;
 pub mod docs;
 pub mod error;
 pub mod health;
+pub mod logs;
 pub mod members;
 pub mod pipelines;
 pub mod policy;
@@ -57,6 +58,7 @@ use crate::auth::LoginRateLimiter;
 use crate::engine::Engine;
 use crate::events::EventBus;
 use crate::secrets::MasterKey;
+use crate::store::SqliteLogStore;
 use crate::store::agents::AgentRepo;
 use crate::store::audit::AuditRepo;
 use crate::store::members::MemberRepo;
@@ -98,6 +100,9 @@ pub struct AppState {
     /// 审计日志 repo（票 B2b-T7，ADR-0015：只增 + 过滤回放，全局 admin
     /// 查询端点消费；各端点安全事件接线处写入）。
     pub audit: AuditRepo,
+    /// 构建日志存储（票 #73，ADR-0013）：grpc 落库（写）与 SSE 回放/下载
+    /// （读，独立连接）两消费面。
+    pub logs: SqliteLogStore,
     /// 编排引擎（票 B2c-T2，ADR-0006：统一触发入口 + 构建推进 + 任务终态
     /// 接线点；sched/grpc/REST 共享同一引擎与事件总线）。
     pub engine: Engine,
@@ -124,15 +129,16 @@ impl AppState {
     /// `registration_enabled` 来自合并后的启动配置（CLI > env > toml >
     /// 默认，ADR-0010）；`master_key` 为机密加密主密钥（ADR-0015，票
     /// B2b-T6：启动路径已生成/读回密钥文件）；`poll_interval_minutes` 为
-    /// poll 触发器节奏默认（ADR-0016，票 B2c-T6）。
-    pub fn new(
+    /// poll 触发器节奏默认（ADR-0016，票 B2c-T6）。日志存储另开独立读
+    /// 连接（ADR-0004：读独立于 gRPC 写路径），开池失败折组合根装配失败。
+    pub async fn new(
         pool: SqlitePool,
         registration_enabled: bool,
         master_key: MasterKey,
         poll_interval_minutes: i64,
-    ) -> Self {
+    ) -> Result<Self, crate::store::StoreError> {
         let bus = EventBus::new();
-        Self {
+        Ok(Self {
             pool: pool.clone(),
             projects: ProjectRepo::new(pool.clone()),
             pipelines: PipelineRepo::new(pool.clone()),
@@ -144,13 +150,14 @@ impl AppState {
             agents: AgentRepo::new(pool.clone()),
             triggers: TriggerRepo::new(pool.clone()),
             audit: AuditRepo::new(pool.clone()),
+            logs: SqliteLogStore::open(&pool).await?,
             engine: Engine::new(pool.clone(), master_key, bus.clone()),
             bus,
             master_key,
             login_limiter: LoginRateLimiter::new(),
             registration_enabled,
             poll_interval_minutes,
-        }
+        })
     }
 }
 
@@ -213,6 +220,14 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route(
             "/projects/{name}/pipelines/{pipeline}/builds/{number}/rerun",
             post(builds::rerun),
+        )
+        .route(
+            "/projects/{name}/pipelines/{pipeline}/builds/{number}/jobs/{job}/attempts/{attempt}/logs",
+            get(logs::download),
+        )
+        .route(
+            "/projects/{name}/pipelines/{pipeline}/builds/{number}/jobs/{job}/attempts/{attempt}/logs/stream",
+            get(logs::stream),
         )
         .route(
             "/projects/{name}/pipelines/{pipeline}/triggers",

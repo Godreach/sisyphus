@@ -57,7 +57,9 @@ async fn harness() -> Harness {
         false,
         master_key,
         sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES,
-    );
+    )
+    .await
+    .expect("装配 AppState");
     Harness { _dir: dir, state }
 }
 

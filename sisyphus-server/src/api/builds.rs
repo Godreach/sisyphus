@@ -573,7 +573,7 @@ pub async fn detail(
 /// 按 (project, pipeline, number) 取构建；不存在 404（runner/viewer 已由
 /// extractor 裁决项目可见性，构建号不存在是第二层 404）。构建号 per-pipeline，
 /// 须带 pipeline_name 唯一定位（同号跨 pipeline 不串）。
-async fn load_build(
+pub(crate) async fn load_build(
     state: &AppState,
     project_id: &i64,
     pipeline: &str,

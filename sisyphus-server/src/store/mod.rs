@@ -12,6 +12,7 @@ pub mod agents;
 pub mod audit;
 pub mod builds;
 pub mod jobs;
+pub mod logs;
 pub mod members;
 pub mod pipelines;
 pub mod projects;
@@ -21,11 +22,12 @@ pub mod tokens;
 pub mod triggers;
 pub mod users;
 
-// 缝定形、无消费者（票 #32：只定契约不交付实现，日志/产物批次落同一缝后移除）。
+// 缝定形：LogStore 已随日志批次（票 #73）落 SqliteLogStore 实现；
+// ArtifactStore/ArtifactMetaRepo 仍无消费者（随产物批次落实现后清理）。
 #[allow(dead_code, unused_imports)]
 mod traits;
 
-#[allow(unused_imports)]
+pub use logs::SqliteLogStore;
 pub use traits::{
     ArtifactMeta, ArtifactMetaRepo, ArtifactStore, ByteStream, LogChunk, LogLocation, LogStore,
 };
@@ -259,6 +261,7 @@ mod tests {
             "builds",
             "jobs",
             "triggers",
+            "logs",
         ] {
             assert!(
                 tables.iter().any(|t| t == expected),
@@ -310,6 +313,7 @@ mod tests {
             "DROP TABLE builds",
             "DROP TABLE jobs",
             "DROP TABLE triggers",
+            "DROP TABLE logs",
         ] {
             sqlx::raw_sql(stmt)
                 .execute(&pool)

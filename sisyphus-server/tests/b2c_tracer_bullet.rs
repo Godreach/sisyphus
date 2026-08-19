@@ -58,7 +58,9 @@ async fn harness() -> Harness {
         false,
         master_key,
         sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES,
-    );
+    )
+    .await
+    .expect("装配 AppState");
     // REST router 与 scheduler/gRPC 共享同一 state（事件总线串起触发→下发）。
     let app = test_app_from_state(state.clone(), dir.path());
 

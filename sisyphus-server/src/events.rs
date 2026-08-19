@@ -74,6 +74,16 @@ pub enum Event {
         /// 构建机名。
         name: String,
     },
+    /// 日志 chunk 落库（票 #73，ADR-0013）：SSE 尾随的热通知。可丢——
+    /// 消费方收到后从 DB 重放（游标即 seq），Lagged 自愈；丢消息无害。
+    LogAppended {
+        /// 属主构建 id。
+        build_id: i64,
+        /// 任务行 id。
+        job_id: i64,
+        /// 第几次执行。
+        attempt: i32,
+    },
 }
 
 /// 进程内事件总线：`publish` 广播给全部订阅者，无订阅者/满队即丢。
