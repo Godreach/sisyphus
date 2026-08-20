@@ -318,7 +318,7 @@ fn git_cred_env_for(
 #[cfg(unix)]
 fn write_cred_artifact(
     path: &std::path::Path,
-    cred: &PlainScmCred,
+    _cred: &PlainScmCred,
     _repo_url: &str,
 ) -> std::io::Result<()> {
     std::fs::write(path, askpass_helper_script())?;
