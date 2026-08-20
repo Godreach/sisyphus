@@ -12,7 +12,10 @@ use sqlx::SqlitePool;
 use super::{StoreError, is_busy, is_unique_violation, now_ms};
 
 /// 条件更新冲突的最大重试次数（超出视为持续写竞争，向上报错）。
-const MAX_SAVE_ATTEMPTS: usize = 16;
+///
+/// 与 builds 起号同形，一并从 16 抬到 64：乐观重试遇 CI 调度抖动 +
+/// BUSY 折算需 N× 余量缓冲，重试仅在竞争时发生，零稳态成本。
+const MAX_SAVE_ATTEMPTS: usize = 64;
 
 /// 读回的 pipeline 定义：定义原文 + 修订版本语义字段。
 #[derive(Debug, Clone, PartialEq, Eq)]

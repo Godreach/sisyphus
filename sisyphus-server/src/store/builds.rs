@@ -17,7 +17,11 @@ use sqlx::SqlitePool;
 use super::{StoreError, is_busy, is_unique_violation, now_ms};
 
 /// 构建号竞争/条件更新冲突的最大重试次数（与 pipelines 保存同形）。
-const MAX_START_ATTEMPTS: usize = 16;
+///
+/// 16 对 ~12 并发偏紧——乐观重试遇 CI 调度抖动 + BUSY 折算曾致
+/// `concurrent_starts_keep_numbers_monotonic` flake（重试耗尽 panic）；
+/// 抬到 64 给 N 级并发留 ~N× 余量。重试仅在竞争时发生，零稳态成本。
+const MAX_START_ATTEMPTS: usize = 64;
 
 /// 构建状态（ADR-0006 生命周期；落库文本 `as_str()` 为契约值）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
