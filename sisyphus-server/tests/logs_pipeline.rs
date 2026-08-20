@@ -70,6 +70,7 @@ async fn harness() -> Harness {
         master_key,
         sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES,
         sisyphus_server::config::DEFAULT_RETENTION_DAYS,
+        sisyphus_server::config::DEFAULT_METRICS_AUTH,
     )
     .await
     .expect("装配 AppState");

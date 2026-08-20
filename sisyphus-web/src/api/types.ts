@@ -240,6 +240,87 @@ export interface PatchAgentRequest {
 }
 
 // ---------------------------------------------------------------------------
+// 概览快照 DTO（后端 `api/overview.rs`，票 B5-T7，ADR-0019）：概览页单一
+// 数据源——stat 卡全量真值 + 三类事实警示态 + 最近构建。任意登录角色可读。
+// 后端 `OverviewResponse` 的前端镜像（双消费：同一份数也灌 `/metrics`）。
+// ---------------------------------------------------------------------------
+
+/** 队列深度原因分类条目（`reason` 值域：missing_labels / no_online_agent /
+ *  no_slot / uncategorized——与后端 `snapshot::classify` 固定标签全集一一对应）。 */
+export interface QueueReasonDto {
+  /** 原因标签。 */
+  reason: string
+  /** 该原因下的等待任务数。 */
+  depth: number
+}
+
+/** 构建终态计数（四态）。 */
+export interface BuildsTerminalCountsDto {
+  /** 成功。 */
+  succeeded: number
+  /** 失败。 */
+  failed: number
+  /** 取消。 */
+  cancelled: number
+  /** 超时。 */
+  timeout: number
+}
+
+/** 事实型警示态（true 即有、false 即无；零阈值，ADR-0019）。 */
+export interface OverviewAlertsDto {
+  /** 存在无匹配 Agent 的任务。 */
+  has_no_match: boolean
+  /** 存在启用但离线的 Agent。 */
+  has_offline_agent: boolean
+  /** 存在排空或版本不兼容的 Agent。 */
+  has_draining_incompatible: boolean
+}
+
+/** 最近构建条目（概览页列表）。 */
+export interface RecentBuildDto {
+  /** 项目名。 */
+  project: string
+  /** pipeline 名。 */
+  pipeline: string
+  /** per-pipeline 构建号。 */
+  number: number
+  /** 构建状态（queued/running/succeeded/failed/cancelled/timeout）。 */
+  status: BuildStatusDto
+  /** 触发源（manual/cron/poll）。 */
+  trigger: TriggerSourceDto
+  /** 开始时刻（Unix 毫秒；未运行 null）。 */
+  started_at: number | null
+  /** 终态时刻（Unix 毫秒）。 */
+  finished_at: number | null
+}
+
+/** 概览快照响应（后端 `OverviewResponse`：stat 卡 + 警示态 + 最近构建）。 */
+export interface OverviewSnapshotResponse {
+  /** 队列深度（全部 queued 任务）。 */
+  queue_depth: number
+  /** 队列深度原因分类（保序）。 */
+  queue_reasons: QueueReasonDto[]
+  /** Agent 在线数。 */
+  agents_online: number
+  /** Agent 总数（含停用）。 */
+  agents_total: number
+  /** 槽位占用（在途任务）。 */
+  slots_used: number
+  /** 槽位总量（在线 Agent max_concurrency 之和）。 */
+  slots_total: number
+  /** 构建终态计数。 */
+  builds_terminal: BuildsTerminalCountsDto
+  /** 产物字节占用。 */
+  artifact_bytes: number
+  /** 日志字节占用。 */
+  log_bytes: number
+  /** 事实型警示态。 */
+  alerts: OverviewAlertsDto
+  /** 最近构建（跨可见项目，按最近活动倒序）。 */
+  recent_builds: RecentBuildDto[]
+}
+
+// ---------------------------------------------------------------------------
 // 构建（builds）DTO（后端 `api/builds.rs` 契约的前端镜像，ADR-0005）。
 // 票 B4-T4 构建详情/列表页消费；枚举值取 `BuildStatus::as_str()` 落库文本
 // （API 层 `BuildStatusDto`/`JobStatusDto` 的 `serde(rename_all="lowercase")`

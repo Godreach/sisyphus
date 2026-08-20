@@ -259,11 +259,16 @@ impl BuildRepo {
         let finished = to.is_terminal().then_some(now);
         let cancelled = (to == BuildStatus::Cancelled).then_some(now);
         let started = (to == BuildStatus::Running).then_some(now);
-        let result = sqlx::query(
+        // RETURNING started_at（COALESCE 后的实际值）：进终态时算时长
+        // 直方图（ADR-0019，票 B5-T7）。终态计数/时长在「条件更新真正命中」
+        // 时记——同一行只有一次迁移能命中（终态吸收），天然单次，事件广播
+        // 面（engine publish_build_status）的重复发布不会重复计数。
+        let row: Option<(i64, Option<i64>)> = sqlx::query_as(
             "UPDATE builds
              SET status = ?, started_at = COALESCE(started_at, ?),
                  finished_at = ?, cancelled_at = ?, updated_at = ?
-             WHERE id = ? AND status IN ('queued', 'running')",
+             WHERE id = ? AND status IN ('queued', 'running')
+             RETURNING id, started_at",
         )
         .bind(to.as_str())
         .bind(started)
@@ -271,9 +276,20 @@ impl BuildRepo {
         .bind(cancelled)
         .bind(now)
         .bind(id)
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await?;
-        Ok(result.rows_affected() > 0)
+        match row {
+            Some((_, started_at)) => {
+                if to.is_terminal() {
+                    // 无 started_at（排队中直接取消）不记时长——record 侧
+                    // 已判 duration_ms > 0。
+                    let duration_ms = started_at.map(|s| now - s).unwrap_or(0);
+                    crate::metrics::record_build_terminal(to.as_str(), duration_ms);
+                }
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// FIFO 放行（ADR-0006：同 pipeline 同时只跑一条，后来者排队）：
@@ -412,15 +428,23 @@ impl BuildRepo {
         .bind(failed_stage_index)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
+        // 构建 → failed：条件更新唯一命中一次（终态吸收），在此记终态
+        // 指标（ADR-0019，票 B5-T7）。与 [`Self::transition`] 一致，避免
+        // engine 事件广播面对已终态行的重复发布造成重复计数。
+        let row: Option<(i64, Option<i64>)> = sqlx::query_as(
             "UPDATE builds SET status = 'failed', finished_at = ?, updated_at = ?
-             WHERE id = ? AND status IN ('queued', 'running')",
+             WHERE id = ? AND status IN ('queued', 'running')
+             RETURNING id, started_at",
         )
         .bind(now)
         .bind(now)
         .bind(build_id)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
+        if let Some((_, started_at)) = row {
+            let duration_ms = started_at.map(|s| now - s).unwrap_or(0);
+            crate::metrics::record_build_terminal("failed", duration_ms);
+        }
         tx.commit().await?;
         Ok(())
     }

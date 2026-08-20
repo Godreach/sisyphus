@@ -1,21 +1,21 @@
 <script setup lang="ts">
-// 概览页（ADR-0019/0020，票 B4-T3）：stat 卡 + 事实型警示态 + 最近构建。
+// 概览页（ADR-0019，票 B5-T7）：stat 卡 + 事实型警示态 + 最近构建。
 //
-// 数据源（Spec B4 决策 2 + 票 B4-T3）：概览快照端点（内部快照 / /metrics）
-// 尚未交付，本页以现有端点组合派生当前值，并对不可派生的统计显式标注退化：
-// - Agent 在线/总数：`/agents`（全局 admin 专属；普通用户 403 → 卡片以
-//   「仅全局管理员可见」退化展示）。
-// - 项目数：`/projects`（可见性过滤）。
-// - 队列深度 / 构建终态计数 / 全局最近构建 / 无匹配任务 / 排空 / 不兼容
-//   Agent：依赖概览快照端点或 pipeline 枚举端点，未交付 → 显式标注退化
-//   （`overview.degraded`），后端补票后在原卡片接上，不静默给假值。
-// - 警示态只展示「事实」：有 Agent 离线（ADR-0019 事实型警示，零阈值）；
-//   无匹配任务 / 排空 / 不兼容 需快照端点，随退化面标注。
+// 数据源（票 B5-T7 交付后单一来源）：概览快照端点 `GET /api/v1/overview`——
+// 队列深度（原因分类）/ Agent 在线与总数 / 槽位占用 / 构建终态计数 / 产物与
+// 日志占用 / 三类事实警示态 / 最近构建，任意登录角色可读。B4-T3 的退化标注
+// （依赖快照端点未交付）随本票移除。
+//
+// - 单来源整页语义：快照失败 → loadError 报错 + 重试，不静默部分值。
+// - 警示态只展示「事实」（ADR-0019：零阈值）：无匹配任务 / 有离线 Agent /
+//   排空或不兼容 Agent——全部来自快照响应的 alerts 字段。
+// - 时间 / 字节数人读形态复用 `@/utils/format`（与构建列表/详情同纪律）。
 
 import { onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { useOverviewStore } from '@/stores/overview'
+import { formatBytes, formatDateTime } from '@/utils/format'
 
 const { t } = useI18n()
 const overview = useOverviewStore()
@@ -23,6 +23,21 @@ const overview = useOverviewStore()
 onMounted(() => {
   void overview.load()
 })
+
+/** 队列原因 → 人读标签键（与后端 snapshot::classify 固定标签全集对应）。 */
+function queueReasonKey(reason: string): string {
+  return `overview.queueReason.${reason}`
+}
+
+/** 构建状态 → 人读标签键（复用 buildStatus.*，与构建列表/详情同纪律）。 */
+function buildStatusKey(status: string): string {
+  return `buildStatus.${status}`
+}
+
+/** 触发源 → 人读标签键（复用 triggerSource.*）。 */
+function triggerKey(trigger: string): string {
+  return `triggerSource.${trigger}`
+}
 </script>
 
 <template>
@@ -31,66 +46,110 @@ onMounted(() => {
 
     <p v-if="overview.loadError" class="overview-error" role="alert">
       {{ overview.loadError }}
+      <button type="button" @click="overview.load()">{{ t('overview.retry') }}</button>
     </p>
 
-    <!-- stat 卡（ADR-0019：只展示当前值，无历史曲线）。 -->
-    <section class="stat-grid" aria-label="stat cards">
-      <!-- Agent 在线/总数：/agents（全局 admin 专属）。 -->
-      <div class="stat-card">
-        <span class="stat-label">{{ t('overview.agentsOnline') }}</span>
-        <span class="stat-value">
-          <template v-if="overview.agents?.visible">
-            {{ overview.agents.online }} / {{ overview.agents.total }}
-          </template>
-          <template v-else-if="overview.agents == null">
-            {{ t('overview.na') }}
-          </template>
-          <template v-else>
-            {{ t('overview.adminOnly') }}
-          </template>
-        </span>
-      </div>
+    <template v-if="overview.state != null">
+      <!-- stat 卡（ADR-0019：只展示当前值，无历史曲线）。 -->
+      <section class="stat-grid" aria-label="stat cards">
+        <div class="stat-card">
+          <span class="stat-label">{{ t('overview.agentsOnline') }}</span>
+          <span class="stat-value">
+            {{ overview.state.agentsOnline }} / {{ overview.state.agentsTotal }}
+          </span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">{{ t('overview.slots') }}</span>
+          <span class="stat-value">
+            {{ overview.state.slotsUsed }} / {{ overview.state.slotsTotal }}
+          </span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">{{ t('overview.queueDepth') }}</span>
+          <span class="stat-value">{{ overview.state.queueDepth }}</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">{{ t('overview.buildOutcomes') }}</span>
+          <span class="stat-value">
+            <span class="build-outcome build-outcome-ok">
+              {{ t('overview.outcomeSucceeded') }} {{ overview.state.buildsTerminal.succeeded }}
+            </span>
+            <span class="build-outcome build-outcome-fail">
+              {{ t('overview.outcomeFailed') }} {{ overview.state.buildsTerminal.failed }}
+            </span>
+            <span class="build-outcome">
+              {{ t('overview.outcomeCancelled') }} {{ overview.state.buildsTerminal.cancelled }}
+            </span>
+            <span class="build-outcome">
+              {{ t('overview.outcomeTimeout') }} {{ overview.state.buildsTerminal.timeout }}
+            </span>
+          </span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">{{ t('overview.storage') }}</span>
+          <span class="stat-value">
+            {{ formatBytes(overview.state.artifactBytes) }} +
+            {{ formatBytes(overview.state.logBytes) }}
+          </span>
+        </div>
+      </section>
 
-      <!-- 项目数：/projects（可见性过滤）。 -->
-      <div class="stat-card">
-        <span class="stat-label">{{ t('overview.projects') }}</span>
-        <span class="stat-value">
-          <template v-if="overview.projectCount != null">{{ overview.projectCount }}</template>
-          <template v-else>{{ t('overview.na') }}</template>
-        </span>
-      </div>
+      <!-- 队列原因分类（有任务等待时给出「卡在哪」的事实）。 -->
+      <section v-if="overview.state.queueReasons.length > 0" class="queue-reasons">
+        <h2>{{ t('overview.queueReasons') }}</h2>
+        <ul class="queue-reason-list">
+          <li v-for="r in overview.state.queueReasons" :key="r.reason">
+            <span class="queue-reason-label">{{ t(queueReasonKey(r.reason)) }}</span>
+            <span class="queue-reason-depth">{{ r.depth }}</span>
+          </li>
+        </ul>
+      </section>
 
-      <!-- 队列深度 / 构建终态计数：依赖概览快照端点，未交付 → 退化。 -->
-      <div class="stat-card stat-degraded">
-        <span class="stat-label">{{ t('overview.queueDepth') }}</span>
-        <span class="stat-value">{{ t('overview.degradedPending') }}</span>
-        <span class="stat-degraded-note">{{ t('overview.degradedNote') }}</span>
-      </div>
-      <div class="stat-card stat-degraded">
-        <span class="stat-label">{{ t('overview.buildOutcomes') }}</span>
-        <span class="stat-value">{{ t('overview.degradedPending') }}</span>
-        <span class="stat-degraded-note">{{ t('overview.degradedNote') }}</span>
-      </div>
-    </section>
+      <!-- 事实型警示态（ADR-0019：事实判断、零阈值配置）。 -->
+      <section class="alerts" aria-label="alerts">
+        <p v-if="overview.offlineAlert" class="alert alert-warn" role="alert">
+          {{ t('overview.alertAgentsOffline') }}
+        </p>
+        <p v-if="overview.noMatchAlert" class="alert alert-warn" role="alert">
+          {{ t('overview.alertNoMatch') }}
+        </p>
+        <p v-if="overview.drainingIncompatibleAlert" class="alert alert-warn" role="alert">
+          {{ t('overview.alertDrainingIncompatible') }}
+        </p>
+        <p v-if="overview.state.agentsTotal === 0" class="alert alert-info">
+          {{ t('overview.alertNoAgents') }}
+        </p>
+      </section>
 
-    <!-- 事实型警示态（ADR-0019：事实判断、零阈值配置）。 -->
-    <section class="alerts" aria-label="alerts">
-      <p v-if="overview.offlineAlert" class="alert alert-warn" role="alert">
-        {{ t('overview.alertAgentsOffline') }}
-      </p>
-      <p v-if="overview.agents?.visible && overview.agents.total === 0" class="alert alert-info">
-        {{ t('overview.alertNoAgents') }}
-      </p>
-      <p class="alert alert-degraded">
-        {{ t('overview.alertsDegradedPrefix') }}：{{ t('overview.alertNoMatch') }}、
-        {{ t('overview.alertDraining') }}、{{ t('overview.alertIncompatible') }}
-      </p>
-    </section>
-
-    <!-- 最近构建：依赖全局构建列表端点，未交付 → 显式退化。 -->
-    <section class="recent-builds">
-      <h2>{{ t('overview.recentBuilds') }}</h2>
-      <p class="recent-builds-degraded">{{ t('overview.recentBuildsDegraded') }}</p>
-    </section>
+      <!-- 最近构建（快照响应，跨可见项目按最近活动倒序）。 -->
+      <section class="recent-builds">
+        <h2>{{ t('overview.recentBuilds') }}</h2>
+        <div v-if="overview.state.recentBuilds.length === 0" class="recent-builds-empty">
+          {{ t('overview.recentBuildsEmpty') }}
+        </div>
+        <table v-else class="recent-builds-table">
+          <thead>
+            <tr>
+              <th>{{ t('overview.colProject') }}</th>
+              <th>{{ t('overview.colPipeline') }}</th>
+              <th>{{ t('overview.colBuild') }}</th>
+              <th>{{ t('overview.colStatus') }}</th>
+              <th>{{ t('overview.colTrigger') }}</th>
+              <th>{{ t('overview.colFinished') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="b in overview.state.recentBuilds" :key="`${b.project}-${b.pipeline}-${b.number}`">
+              <td>{{ b.project }}</td>
+              <td>{{ b.pipeline }}</td>
+              <td>#{{ b.number }}</td>
+              <td>{{ t(buildStatusKey(b.status)) }}</td>
+              <td>{{ t(triggerKey(b.trigger)) }}</td>
+              <td>{{ formatDateTime(b.finishedAt ?? b.startedAt) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+    </template>
   </div>
 </template>

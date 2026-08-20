@@ -12,6 +12,7 @@ use super::error::{ErrorBody, ValidationIssue};
 use super::health;
 use super::logs;
 use super::members;
+use super::overview;
 use super::pipelines;
 use super::projects;
 use super::scm;
@@ -37,6 +38,7 @@ use super::users;
     ),
     paths(
         health::healthz,
+        overview::get,
         auth::setup,
         auth::login,
         auth::register,
@@ -104,6 +106,11 @@ use super::users;
         health::Healthz,
         ErrorBody,
         ValidationIssue,
+        overview::OverviewResponse,
+        overview::QueueReason,
+        overview::BuildsTerminalCounts,
+        overview::Alerts,
+        overview::RecentBuild,
         auth::CredentialsRequest,
         auth::MeResponse,
         auth::ChangePasswordRequest,
@@ -179,6 +186,7 @@ use super::users;
     )),
     tags(
         (name = "infra", description = "探针与基础设施端点"),
+        (name = "overview", description = "概览快照（票 B5-T7，ADR-0019：stat 卡全量真值 + 三类事实警示态 + 最近构建，喂 web 概览页；任意登录角色）"),
         (name = "auth", description = "认证与会话（setup wizard / register / login / logout / me / 自助改密）与 PAT（Bearer 通道，票 B2b-T3）"),
         (name = "projects", description = "项目管理（v1：list / create / get；成员三档角色分配，票 B2b-T5）"),
         (name = "scm", description = "SCM 探测 / 测试连接 / 分支枚举 / 凭据管理（票 B5-T3，ADR-0016：git ls-remote / svn info + ASKPASS 凭据递送，凭据不回显）"),

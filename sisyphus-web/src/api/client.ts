@@ -29,6 +29,7 @@ import type {
   PipelineDefinitionResponse,
   ProjectResponse,
   PutSecretRequest,
+  OverviewSnapshotResponse,
   ResetPasswordRequest,
   RerunBuildRequest,
   SaveDefinitionResponse,
@@ -112,6 +113,13 @@ export const agentsApi = {
   /** 缓存删除（全局 admin，fire-and-forget；ADR-0012）。key 空 = 全清。 */
   deleteCache: (name: string, req: CacheDeleteRequest) =>
     http.post<void>(`agents/${encodeURIComponent(name)}/cache/delete`, { json: req }),
+}
+
+/** 概览快照端点（后端 `api/overview.rs`，票 B5-T7，ADR-0019：概览页单一
+ *  数据源——stat 卡全量真值 + 三类事实警示态 + 最近构建；任意登录角色）。 */
+export const overviewApi = {
+  /** 概览快照：同一份数后端也灌 /metrics（双消费）。 */
+  snapshot: () => http.get<OverviewSnapshotResponse>('overview'),
 }
 
 /** 项目端点（后端 `api/projects.rs`；建项目为全局 admin 专属）。 */

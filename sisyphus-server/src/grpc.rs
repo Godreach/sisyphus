@@ -530,14 +530,23 @@ async fn session_loop(
 ) {
     if tx.send(Ok(handshake_reply)).await.is_err() {
         sessions.unregister(agent_id).await;
+        crate::metrics::record_grpc_disconnect("handshake_fail");
         return; // 对端已断开，会话无意义
     }
 
     loop {
         let msg = match read_inbound(&mut inbound).await {
             Ok(Some(msg)) => msg,
-            Ok(None) => break, // 对端关流
-            Err(_) => break,   // 读帧失败（连接被重置等）：下线归 45s 扫描
+            Ok(None) => {
+                // 对端关流（正常下线路径）。
+                crate::metrics::record_grpc_disconnect("disconnect");
+                break;
+            }
+            Err(_) => {
+                // 读帧失败（连接被重置等）：下线归 45s 扫描。
+                crate::metrics::record_grpc_disconnect("read_error");
+                break;
+            }
         };
 
         match msg.kind {
@@ -558,6 +567,7 @@ async fn session_loop(
                 };
                 if !ok {
                     tracing::info!(agent = %agent, "agent 已停用/吊销：断开会话");
+                    crate::metrics::record_grpc_disconnect("disabled");
                     break;
                 }
             }
@@ -657,6 +667,7 @@ async fn session_loop(
                 match state.agents.find_active_by_hash(&token_hash).await {
                     Ok(None) => {
                         tracing::info!(agent = %agent, "agent 已停用/吊销：断开会话");
+                        crate::metrics::record_grpc_disconnect("disabled");
                         break;
                     }
                     Ok(Some(_)) => {}

@@ -678,6 +678,11 @@ impl Engine {
     // -----------------------------------------------------------------------
 
     fn publish_build_status(&self, build: &BuildRow, project_name: &str) {
+        // 终态计数/时长指标不在事件面记（ADR-0019，票 B5-T7）：事件广播
+        // 对已终态构建可能重复发布（如 fail-fast 同阶段双任务并发失败各自
+        // 级联重发），会重复计数。改为在 store 层条件更新唯一命中时记
+        // （[`crate::store::builds::BuildRepo::transition`] /
+        // [`crate::store::builds::BuildRepo::fail_fast_cascade`]）。
         self.bus.publish(Event::BuildStatus {
             build_id: build.id,
             project_name: project_name.to_string(),

@@ -215,6 +215,8 @@ pub struct Scheduler {
     jobs: JobRepo,
     agents: AgentRepo,
     projects: ProjectRepo,
+    /// 共享池（指标快照的真相源；repo 共池，句柄克隆零成本）。
+    pool: SqlitePool,
     dispatcher: Arc<dyn JobDispatcher>,
     /// orphan 宽限时长（毫秒）。
     orphan_grace_ms: i64,
@@ -238,6 +240,7 @@ impl Scheduler {
             jobs: JobRepo::new(pool.clone()),
             agents: AgentRepo::new(pool.clone()),
             projects: ProjectRepo::new(pool.clone()),
+            pool,
             dispatcher,
             orphan_grace_ms: orphan_grace_minutes.max(0) * 60_000,
             tx,
@@ -386,6 +389,16 @@ impl Scheduler {
         if let Err(e) = self.orphan_pass(now).await {
             tracing::warn!(error = %e, "orphan 宽限扫描失败");
         }
+        // 指标当前值灌入（ADR-0019，票 B5-T7）：调度循环是「有东西在动」的
+        // 周期脉搏——每 tick 把 DB 真值灌进 recorder（队列深度/Agent/槽位/
+        // 磁盘占用 gauge），保 /metrics 无 UI 轮询时也新鲜；同时记「最后调度
+        // 活动时间」（只进 /metrics，不进 healthz，ADR-0019）。灌入失败不
+        // 影响调度（指标是旁路）。
+        match crate::snapshot::compute(&self.pool).await {
+            Ok(snap) => crate::metrics::report_snapshot(&snap),
+            Err(e) => tracing::warn!(error = %e, "指标快照灌入失败"),
+        }
+        crate::metrics::touch_scheduler(now);
     }
 
     /// 周期 drive 兜底：推进全部非终态构建（queued/running）。事件驱动的

@@ -26,6 +26,10 @@ pub const DEFAULT_POLL_INTERVAL_MINUTES: i64 = 5;
 /// 天，Server 全局配置，config `[retention]` 可覆盖；每日低频扫描清理
 /// 过期构建的日志 chunk 与产物，构建记录永久保留，B5-T6）。
 pub const DEFAULT_RETENTION_DAYS: i64 = 30;
+/// `/metrics` 端点鉴权默认值（ADR-0019：默认开——Bearer PAT 任意登录角色，
+/// 运维可为 Prometheus 专建 viewer 用户；config `[metrics] auth = false` 可
+/// 关，文档注明仅限可信内网。与业务路由同端口，不单开）。
+pub const DEFAULT_METRICS_AUTH: bool = true;
 
 /// 数据目录内的配置文件名。
 pub const CONFIG_FILE_NAME: &str = "config.toml";
@@ -81,6 +85,9 @@ pub struct Config {
     /// 日志与产物共享的 per-build 保留期天数（ADR-0013/0004：默认 30 天，
     /// 每日低频扫描清理过期构建的日志 chunk 与产物，构建记录永久保留）。
     pub retention_days: i64,
+    /// `/metrics` 端点鉴权开关（ADR-0019：默认开；config `[metrics] auth =
+    /// false` 可关——仅限可信内网，文档注明）。
+    pub metrics_auth: bool,
 }
 
 /// 同一形态的覆盖层：CLI flag 与 `SISYPHUS_` 环境变量都归约为它。
@@ -100,6 +107,9 @@ pub struct Overrides {
     pub master_key_path: Option<String>,
     /// 保留期天数覆盖（文本形态；整数语义在 merge 缝收口，ADR-0013）。
     pub retention_days: Option<String>,
+    /// `/metrics` 鉴权开关覆盖（文本形态；布尔语义在 merge 缝收口，
+    /// ADR-0019——开关类配置拼错必须启动失败）。
+    pub metrics_auth: Option<String>,
 }
 
 /// 覆盖层与文件层的保留期天数统一合并：CLI > env > 文件 > 默认（票 #78，
@@ -164,6 +174,9 @@ pub struct FileConfig {
     /// `[retention]` 段（ADR-0013：日志与产物共享 per-build 保留期）。
     #[serde(default)]
     pub retention: RetentionFile,
+    /// `[metrics]` 段（ADR-0019：/metrics 鉴权开关）。
+    #[serde(default)]
+    pub metrics: MetricsFile,
 }
 
 /// `[server]` 段。
@@ -225,6 +238,15 @@ pub struct RetentionFile {
     /// per-build 保留期天数（默认 30 天；每日低频扫描清理过期构建的日志
     /// chunk 与产物文件 + 元数据，构建记录永久保留）。
     pub retention_days: Option<i64>,
+}
+
+/// `[metrics]` 段（ADR-0019，票 B5-T7：/metrics 端点鉴权开关）。
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsFile {
+    /// `/metrics` 是否要求鉴权（默认 true：Bearer PAT 任意登录角色；
+    /// false = 公开——仅限可信内网，文档注明）。
+    pub auth: Option<bool>,
 }
 
 /// 配置加载/合并错误。
@@ -305,6 +327,12 @@ poll_interval_minutes = 5
 # 清理过期构建的日志 chunk 与产物文件 + 元数据（含空目录回收）；构建记录
 # （状态/号/时长）永久保留。删产物不碰 backups/ 迁移备份目录。
 retention_days = 30
+
+[metrics]
+# /metrics 端点鉴权开关（默认 true，ADR-0019）：true = 需认证（Bearer PAT 任意
+# 登录角色，运维可为 Prometheus 专建 viewer 用户）；false = 公开。仅限可信
+# 内网关闭——该端点暴露调度队列深度等运行态，公网裸奔等同泄露运营信息。
+auth = true
 "#
 }
 
@@ -348,6 +376,7 @@ impl Overrides {
             registration_enabled: get("SISYPHUS_REGISTRATION_ENABLED"),
             master_key_path: get("SISYPHUS_MASTER_KEY_PATH"),
             retention_days: get("SISYPHUS_RETENTION_DAYS"),
+            metrics_auth: get("SISYPHUS_METRICS_AUTH"),
         }
     }
 }
@@ -445,6 +474,14 @@ pub fn merge(
         file.retention.retention_days,
     )?;
 
+    // /metrics 鉴权开关：CLI > env > 文件 > 默认（ADR-0019 默认开）。
+    // CLI/env 层是文本（布尔语义在 merge 收口——复用 parse_bool，开关类
+    // 配置拼错必须启动失败）；文件层是原生 toml 布尔。
+    let metrics_auth = match pick(&cli.metrics_auth, &env.metrics_auth, None) {
+        Some(value) => parse_bool(&value)?,
+        None => file.metrics.auth.unwrap_or(DEFAULT_METRICS_AUTH),
+    };
+
     Ok(Config {
         data_dir,
         rest_addr,
@@ -456,6 +493,7 @@ pub fn merge(
         orphan_grace_minutes,
         poll_interval_minutes,
         retention_days,
+        metrics_auth,
     })
 }
 
@@ -517,6 +555,10 @@ mod tests {
         assert_eq!(
             cfg.retention_days, DEFAULT_RETENTION_DAYS,
             "日志/产物保留期默认 30 天（ADR-0013）"
+        );
+        assert_eq!(
+            cfg.metrics_auth, DEFAULT_METRICS_AUTH,
+            "/metrics 鉴权默认开（ADR-0019）"
         );
     }
 
@@ -636,6 +678,7 @@ mod tests {
             scheduler: SchedulerFile::default(),
             triggers: TriggersFile::default(),
             retention: RetentionFile::default(),
+            metrics: MetricsFile::default(),
         };
 
         let cfg =
@@ -813,6 +856,10 @@ mod tests {
             cfg.retention_days, DEFAULT_RETENTION_DAYS,
             "样例值与内置默认一致（保留期）"
         );
+        assert_eq!(
+            cfg.metrics_auth, DEFAULT_METRICS_AUTH,
+            "样例值与内置默认一致（/metrics 鉴权）"
+        );
 
         // 带注释：样例要能当作文档读。
         assert!(
@@ -917,6 +964,93 @@ mod tests {
         // 未知字段拒绝（deny_unknown_fields）。
         assert!(matches!(
             parse_toml("[triggers]\npoll_cadence = 5\n"),
+            Err(ConfigError::InvalidToml(_))
+        ));
+    }
+
+    /// 票 B5-T7：`[metrics] auth` 文件层可配；CLI > env > 文件 > 默认全链
+    /// （ADR-0019 默认开）；开关类拼错启动失败；未知字段拒绝。
+    #[test]
+    fn metrics_auth_merges_priority_chain_and_validates() {
+        // 文件层关闭（/metrics 公开——仅限可信内网）。
+        let file = FileConfig {
+            metrics: MetricsFile { auth: Some(false) },
+            ..FileConfig::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file,
+        )
+        .expect("文件层关闭");
+        assert!(!cfg.metrics_auth, "文件层 auth=false 生效");
+
+        // CLI > env > 文件：CLI true 压过文件 false。
+        let cli = Overrides {
+            metrics_auth: Some("true".into()),
+            ..Overrides::default()
+        };
+        let env = Overrides {
+            metrics_auth: Some("false".into()),
+            ..Overrides::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &cli,
+            &env,
+            &file,
+        )
+        .expect("CLI 层");
+        assert!(cfg.metrics_auth, "CLI true 压过 env 与文件");
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &env,
+            &file,
+        )
+        .expect("env 层");
+        assert!(!cfg.metrics_auth, "env false 压过文件");
+
+        // env 层常见布尔拼写全收（复用 parse_bool 语义）。
+        for (text, expected) in [
+            ("true", true),
+            ("1", true),
+            ("yes", true),
+            ("off", false),
+        ] {
+            let env = Overrides {
+                metrics_auth: Some(text.into()),
+                ..Overrides::default()
+            };
+            let cfg = merge(
+                PathBuf::from("/tmp/data"),
+                &Overrides::default(),
+                &env,
+                &FileConfig::default(),
+            )
+            .unwrap_or_else(|e| panic!("{text} 应解析成功：{e}"));
+            assert_eq!(cfg.metrics_auth, expected, "env 层 {text}");
+        }
+
+        // 拼错的值：启动失败（不静默）。
+        let bad = Overrides {
+            metrics_auth: Some("onx".into()),
+            ..Overrides::default()
+        };
+        assert!(matches!(
+            merge(
+                PathBuf::from("/tmp/data"),
+                &bad,
+                &Overrides::default(),
+                &FileConfig::default()
+            ),
+            Err(ConfigError::InvalidBool(_))
+        ));
+
+        // 未知字段拒绝（deny_unknown_fields）。
+        assert!(matches!(
+            parse_toml("[metrics]\nauth_off = true\n"),
             Err(ConfigError::InvalidToml(_))
         ));
     }

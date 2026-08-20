@@ -485,7 +485,7 @@ mod tests {
         let pool = crate::store::bootstrap(dir.path())
             .await
             .expect("bootstrap");
-        let state = AppState::new(pool, dir.path().to_path_buf(), false, MasterKey::generate(), default, crate::config::DEFAULT_RETENTION_DAYS)
+        let state = AppState::new(pool, dir.path().to_path_buf(), false, MasterKey::generate(), default, crate::config::DEFAULT_RETENTION_DAYS, crate::config::DEFAULT_METRICS_AUTH)
             .await
             .expect("装配 AppState");
         // AppState 不持有 dir；存进静态槽防过早清理（目录活到进程退出）。

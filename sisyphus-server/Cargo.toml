@@ -51,6 +51,9 @@ flate2.workspace = true
 # 原生构建归 B5-T10/CI；本地 Windows→Linux 交叉编译被既有 libsqlite3-sys + ring 的
 # C 工具链需求阻断（非 lettre 特有），不在此验。
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport"] }
+# 指标（ADR-0019，票 B5-T7）：facade 埋点双消费（概览快照 + /metrics）。
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

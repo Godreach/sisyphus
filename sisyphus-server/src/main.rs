@@ -42,6 +42,10 @@ struct Args {
     /// 扫描清理过期构建数据，构建记录永久保留）
     #[arg(long)]
     retention_days: Option<i64>,
+    /// /metrics 端点鉴权开关（CLI 覆盖层，默认开，ADR-0019：Prometheus
+    /// 抓取可关，仅限可信内网）
+    #[arg(long)]
+    metrics_auth: Option<bool>,
 }
 
 impl From<&Args> for Overrides {
@@ -54,6 +58,7 @@ impl From<&Args> for Overrides {
             registration_enabled: args.registration_enabled.map(|b| b.to_string()),
             master_key_path: args.master_key_path.clone(),
             retention_days: args.retention_days.map(|n| n.to_string()),
+            metrics_auth: args.metrics_auth.map(|b| b.to_string()),
         }
     }
 }
@@ -106,6 +111,7 @@ async fn main() {
         master_key,
         config.poll_interval_minutes,
         config.retention_days,
+        config.metrics_auth,
     )
     .await
     {

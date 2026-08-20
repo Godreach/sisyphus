@@ -1695,6 +1695,47 @@
         }
       }
     },
+    "/api/v1/overview": {
+      "get": {
+        "tags": [
+          "overview"
+        ],
+        "summary": "概览快照：stat 卡全量真值 + 三类警示态 + 最近构建。任意登录角色。",
+        "operationId": "get",
+        "responses": {
+          "200": {
+            "description": "概览快照（stat 卡 + 警示态 + 最近构建）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OverviewResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "聚合失败（DB 故障）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects": {
       "get": {
         "tags": [
@@ -4563,6 +4604,29 @@
           }
         }
       },
+      "Alerts": {
+        "type": "object",
+        "description": "事实型警示态（true 即有、false 即无；零阈值配置，ADR-0019）。",
+        "required": [
+          "has_no_match",
+          "has_offline_agent",
+          "has_draining_incompatible"
+        ],
+        "properties": {
+          "has_draining_incompatible": {
+            "type": "boolean",
+            "description": "存在排空或版本不兼容的 Agent。"
+          },
+          "has_no_match": {
+            "type": "boolean",
+            "description": "存在无匹配 Agent 的任务。"
+          },
+          "has_offline_agent": {
+            "type": "boolean",
+            "description": "存在启用但离线的 Agent。"
+          }
+        }
+      },
       "ArtifactDto": {
         "type": "object",
         "description": "产物条目（构建产物列表）。",
@@ -4893,6 +4957,42 @@
           "trigger_by": {
             "type": "string",
             "description": "触发人（业务表实名）。"
+          }
+        }
+      },
+      "BuildsTerminalCounts": {
+        "type": "object",
+        "description": "构建终态计数（四态）。",
+        "required": [
+          "succeeded",
+          "failed",
+          "cancelled",
+          "timeout"
+        ],
+        "properties": {
+          "cancelled": {
+            "type": "integer",
+            "format": "int64",
+            "description": "取消。",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "失败。",
+            "minimum": 0
+          },
+          "succeeded": {
+            "type": "integer",
+            "format": "int64",
+            "description": "成功。",
+            "minimum": 0
+          },
+          "timeout": {
+            "type": "integer",
+            "format": "int64",
+            "description": "超时。",
+            "minimum": 0
           }
         }
       },
@@ -5452,6 +5552,89 @@
           }
         }
       },
+      "OverviewResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/overview` 响应体（stat 卡 + 警示态 + 最近构建；ADR-0019）。",
+        "required": [
+          "queue_depth",
+          "queue_reasons",
+          "agents_online",
+          "agents_total",
+          "slots_used",
+          "slots_total",
+          "builds_terminal",
+          "artifact_bytes",
+          "log_bytes",
+          "alerts",
+          "recent_builds"
+        ],
+        "properties": {
+          "agents_online": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Agent 在线数。",
+            "minimum": 0
+          },
+          "agents_total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Agent 总数（含停用）。",
+            "minimum": 0
+          },
+          "alerts": {
+            "$ref": "#/components/schemas/Alerts",
+            "description": "事实型警示态（零阈值）。"
+          },
+          "artifact_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "产物字节占用。",
+            "minimum": 0
+          },
+          "builds_terminal": {
+            "$ref": "#/components/schemas/BuildsTerminalCounts",
+            "description": "构建终态计数。"
+          },
+          "log_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "日志字节占用（压缩体）。",
+            "minimum": 0
+          },
+          "queue_depth": {
+            "type": "integer",
+            "format": "int64",
+            "description": "队列深度（全部 queued 任务）。",
+            "minimum": 0
+          },
+          "queue_reasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueueReason"
+            },
+            "description": "队列深度原因分类（保序；`uncategorized` 为未标注者）。"
+          },
+          "recent_builds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecentBuild"
+            },
+            "description": "最近构建（跨可见项目，按最近活动倒序）。"
+          },
+          "slots_total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "槽位总量（在线 Agent max_concurrency 之和）。",
+            "minimum": 0
+          },
+          "slots_used": {
+            "type": "integer",
+            "format": "int64",
+            "description": "槽位占用（running/unknown 在途任务）。",
+            "minimum": 0
+          }
+        }
+      },
       "PatchAgentRequest": {
         "type": "object",
         "description": "启停 / 编辑请求体（全局 admin）：字段均可选，只更新出现者。",
@@ -5638,6 +5821,76 @@
           "value": {
             "type": "string",
             "description": "机密值（写入即加密落库；永不可读回，请谨慎覆写）。"
+          }
+        }
+      },
+      "QueueReason": {
+        "type": "object",
+        "description": "队列深度原因分类条目。",
+        "required": [
+          "reason",
+          "depth"
+        ],
+        "properties": {
+          "depth": {
+            "type": "integer",
+            "format": "int64",
+            "description": "该原因下的等待任务数。",
+            "minimum": 0
+          },
+          "reason": {
+            "type": "string",
+            "description": "原因标签（missing_labels / no_online_agent / no_slot / uncategorized）。"
+          }
+        }
+      },
+      "RecentBuild": {
+        "type": "object",
+        "description": "最近构建条目（概览页列表）。",
+        "required": [
+          "project",
+          "pipeline",
+          "number",
+          "status",
+          "trigger"
+        ],
+        "properties": {
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "终态时刻（Unix 毫秒）。"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "per-pipeline 构建号。"
+          },
+          "pipeline": {
+            "type": "string",
+            "description": "pipeline 名。"
+          },
+          "project": {
+            "type": "string",
+            "description": "项目名。"
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "开始时刻（Unix 毫秒；未运行 null）。"
+          },
+          "status": {
+            "type": "string",
+            "description": "构建状态（queued/running/succeeded/failed/cancelled/timeout）。"
+          },
+          "trigger": {
+            "type": "string",
+            "description": "触发源（manual/cron/poll）。"
           }
         }
       },
@@ -6469,6 +6722,10 @@
     {
       "name": "infra",
       "description": "探针与基础设施端点"
+    },
+    {
+      "name": "overview",
+      "description": "概览快照（票 B5-T7，ADR-0019：stat 卡全量真值 + 三类事实警示态 + 最近构建，喂 web 概览页；任意登录角色）"
     },
     {
       "name": "auth",

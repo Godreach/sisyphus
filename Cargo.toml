@@ -84,6 +84,16 @@ cron = "0.17"
 # 转换、cron 命中点迭代）。default-features=false + clock 与 cron 同线
 # （共享同一 chrono），避免引入第二份。
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# 指标 facade（ADR-0019，票 B5-T7）：metrics 埋点 + Prometheus 文本渲染。
+# 双消费——同一份计数喂概览快照（REST）与 /metrics 端点。exporter 选
+# metrics-exporter-prometheus 的 `build_recorder()`（进程内 recorder + 按需
+# render），default-features=false 排除 http-listener/push-gateway（后者引
+# hyper/rustls/aws-lc-rs——与仓库避 C 加密、6 目标交叉编译立场相悖；
+# 端点面由 axum 统一承载，鉴权与业务路由同缝）。render 是纯文本组装，
+# 无额外依赖；`_total`/单位后缀靠 recorder 的 recommended_naming 由
+# render 侧配置，命名与 Prometheus 最佳实践对齐。
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 
 [workspace.lints.rust]
 # unsafe 降为 warn：vendored protoc 的 build.rs 需 set_var（1.97 起为 unsafe），

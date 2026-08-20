@@ -32,6 +32,8 @@ pub mod error;
 pub mod health;
 pub mod logs;
 pub mod members;
+pub mod metrics;
+pub mod overview;
 pub mod pipelines;
 pub mod policy;
 pub mod projects;
@@ -156,6 +158,10 @@ pub struct AppState {
     /// retention_days`，默认 30，ADR-0013）：产物元数据 record 的
     /// `retention_until` 与每日清理扫描共用此值（票 #78）。
     pub retention_days: i64,
+    /// `/metrics` 端点鉴权开关（config `[metrics] auth`，默认开，ADR-0019）：
+    /// true = 需认证（Bearer PAT 任意登录角色）；false = 公开（仅限可信
+    /// 内网，config 文档注明）。
+    pub metrics_auth: bool,
 }
 
 impl AppState {
@@ -174,8 +180,13 @@ impl AppState {
         master_key: MasterKey,
         poll_interval_minutes: i64,
         retention_days: i64,
+        metrics_auth: bool,
     ) -> Result<Self, crate::store::StoreError> {
         let bus = EventBus::new();
+        // 指标 recorder 装配（ADR-0019，票 B5-T7）：组合根装配点安装全局
+        // recorder（进程内只装一次）。装配后事件埋点与快照灌入即被记录，
+        // `/metrics` 端点渲染同一 recorder。
+        crate::metrics::install();
         Ok(Self {
             pool: pool.clone(),
             projects: ProjectRepo::new(pool.clone()),
@@ -205,6 +216,7 @@ impl AppState {
             registration_enabled,
             poll_interval_minutes,
             retention_days,
+            metrics_auth,
         })
     }
 }
@@ -346,6 +358,10 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route("/agents/{name}/workspace/clean", post(agents::workspace_clean))
         .route("/agents/{name}/cache/list", post(agents::cache_list))
         .route("/agents/{name}/cache/delete", post(agents::cache_delete))
+        // 概览快照（票 B5-T7，ADR-0019）：任意登录角色（挂在受保护段——认证
+        // 中间件把关「谁在说话」；概览是全局运行态，无项目权限细分）。静态段
+        // 置于业务端点之后，与 /audit 同级（非项目域全局资源）。
+        .route("/overview", get(overview::get))
         // 层序（route_layer 后加者在外、先跑）：认证（401）在外层把关
         // 「谁在说话」（cookie 会话 / Bearer PAT 双通道，票 B2b-T3）；
         // CSRF（403）在其内层，只拦「已过认证且以 cookie 认证」的非安全
@@ -353,14 +369,32 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route_layer(from_fn(csrf::csrf_protect))
         .route_layer(from_fn_with_state(state.clone(), auth::require_auth));
 
+    // metrics 鉴权开关在 with_state 移走 state 前取值（构造 /metrics 路由
+    // 仍要读）。
+    let metrics_auth = state.metrics_auth;
+    let metrics_state = state.clone();
     let v1 = v1_public
         .merge(v1_agent_artifacts)
         .merge(v1_protected)
         .fallback(api_not_found)
         .with_state(state);
 
+    // /metrics（票 B5-T7，ADR-0019）：Prometheus 文本端点，挂根路由（非
+    // /api/v1 下——Prometheus 抓取惯例路径）。鉴权按 config `[metrics]
+    // auth`：默认开（Bearer PAT 任意登录角色，复用业务认证中间件）；关闭
+    // 则公开（仅限可信内网，config 文档注明）。不单开端口——与业务同端口
+    // 8080，路由层合并进同一 app。
+    let metrics_router = if metrics_auth {
+        Router::new()
+            .route("/metrics", get(metrics::get))
+            .route_layer(from_fn_with_state(metrics_state, auth::require_auth))
+    } else {
+        Router::new().route("/metrics", get(metrics::get))
+    };
+
     let app = Router::new()
         .route("/healthz", get(health::healthz))
+        .merge(metrics_router)
         .nest("/api/v1", v1)
         .fallback(fallback)
         .with_state(web_override_dir);
