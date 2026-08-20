@@ -170,7 +170,14 @@ export interface DiskUsageDto {
   workspace_bytes: number
 }
 
-/** Agent 管理视图（后端 `AgentResponse`，ADR-0019 字段镜像）。 */
+/** 语义版本号（后端 `VersionDto`，与 proto `Version` 同构）。 */
+export interface VersionDto {
+  major: number
+  minor: number
+  patch: number
+}
+
+/** Agent 管理视图（后端 `AgentResponse`，ADR-0017/0019 字段镜像）。 */
 export interface AgentResponse {
   name: string
   online: boolean
@@ -181,6 +188,16 @@ export interface AgentResponse {
   active_jobs: number
   last_seen_at: number | null
   disk_usage?: DiskUsageDto | null
+  /** 握手上报的 Agent 版本（从未握手为空）。 */
+  agent_version?: VersionDto | null
+  /** 版本是否兼容（落在 N-1 窗口内；ADR-0017 四态派生面）。 */
+  version_compatible: boolean
+  /** 排空/升级中（在线但不可派发；pending 或 draining/.../restarting 阶段）。 */
+  draining: boolean
+  /** 升级阶段（draining/downloading/swapping/restarting/fallback；无升级为空）。 */
+  upgrade_phase?: string | null
+  /** 升级失败原因（fallback 时记）。 */
+  upgrade_error?: string | null
   created_at: number
   updated_at: number
 }
@@ -398,6 +415,96 @@ export interface BuildArtifactsResponse {
   items: ArtifactResponse[]
 }
 
+// ---------------------------------------------------------------------------
+// 升级包 / 升级指令 / 工作区 / 缓存（后端 `api/upgrade_packages.rs`、
+// `api/agents.rs`，票 #76 / B5-T4，ADR-0017/0011/0012）。升级包管理面全局
+// admin；下载走 Agent token 鉴权。工作区/缓存 per-Agent 经通道往返。
+// ---------------------------------------------------------------------------
+
+/** 升级包视图（后端 `UpgradePackageResponse`）。 */
+export interface UpgradePackageResponse {
+  /** 包名（`sisyphus-agent-<ver>-<os>-<arch>`）。 */
+  package_name: string
+  /** 解析自文件名的版本。 */
+  version: VersionDto
+  /** 目标 OS（linux/macos/windows）。 */
+  target_os: string
+  /** 目标架构（x86_64/aarch64）。 */
+  target_arch: string
+  /** 字节数。 */
+  size: number
+  /** SHA-256 校验和（十六进制小写）。 */
+  sha256: string
+  /** 上传时刻（Unix 毫秒）。 */
+  created_at: number
+}
+
+/** 升级指令请求体（全量 / 单台共用）：`{ package_name }`。 */
+export interface UpgradeCommandRequest {
+  /** 目标升级包名（已上传）。 */
+  package_name: string
+}
+
+/** 全量升级受理摘要（202）。 */
+export interface UpgradeIssuedSummary {
+  /** 目标升级包名。 */
+  package_name: string
+  /** 已下发（在线即送 + 离线挂起）的 Agent 数。 */
+  issued: number
+  /** 跳过数（已在目标版本）。 */
+  skipped: number
+}
+
+/** 工作区条目（per-Agent 列表，经通道往返；ADR-0011）。 */
+export interface WorkspaceEntry {
+  /** pipeline 名。 */
+  pipeline: string
+  /** 任务名。 */
+  job: string
+  /** 工作区绝对路径（Agent 侧）。 */
+  path: string
+  /** 最近使用时刻（Unix 毫秒）。 */
+  last_used_at_ms: number
+}
+
+/** 工作区列表响应。 */
+export interface WorkspaceListResponse {
+  /** 工作区条目。 */
+  entries: WorkspaceEntry[]
+}
+
+/** 工作区清理请求体（pipeline/job 皆空 = 全清）。 */
+export interface WorkspaceCleanRequest {
+  /** pipeline 名（空 = 全清）。 */
+  pipeline?: string | null
+  /** 任务名（空 = 该 pipeline 全部）。 */
+  job?: string | null
+}
+
+/** 缓存条目（per-Agent 列表，经通道往返；ADR-0012）。 */
+export interface CacheEntry {
+  /** 缓存 key（含 files 哈希后缀）。 */
+  key: string
+  /** 所属 pipeline。 */
+  pipeline: string
+  /** 字节数。 */
+  size_bytes: number
+  /** 最近使用时刻（Unix 毫秒）。 */
+  last_used_at_ms: number
+}
+
+/** 缓存列表响应。 */
+export interface CacheListResponse {
+  /** 缓存条目。 */
+  entries: CacheEntry[]
+}
+
+/** 缓存删除请求体（key 空 = 全清）。 */
+export interface CacheDeleteRequest {
+  /** 缓存 key（空 = 全清；非空 = 跨 pipeline 匹配完整 key）。 */
+  key?: string | null
+}
+
 // 成员 / 用户目录 DTO（后端 `api/members.rs`、`api/users.rs`，ADR-0014）。
 // 本批（B4-T3）供项目详情成员管理与概览/项目页消费。
 // ---------------------------------------------------------------------------
@@ -464,6 +571,9 @@ export const AUDIT_EVENTS = [
   'agent_enabled',
   'agent_registered',
   'scm_credential_set',
+  'upgrade_package_uploaded',
+  'upgrade_package_deleted',
+  'upgrade_command_issued',
 ] as const
 
 /** 审计事件类型（由 `AUDIT_EVENTS` 派生；后端 `AuditEvent::as_str()` 契约值，

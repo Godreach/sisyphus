@@ -31,6 +31,11 @@ function agent(name: string, overrides: Partial<AgentResponse> = {}): AgentRespo
     max_concurrency: 1,
     active_jobs: 0,
     last_seen_at: null,
+    agent_version: null,
+    version_compatible: true,
+    draining: false,
+    upgrade_phase: null,
+    upgrade_error: null,
     created_at: 0,
     updated_at: 0,
     ...overrides,
@@ -90,7 +95,7 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
     vi.restoreAllMocks()
   })
 
-  it('加载后列出 Agent + 四态徽标（在线/离线/停用）+ 排空不兼容退化标注', async () => {
+  it('加载后列出 Agent + 四态徽标（在线/离线/停用/排空/不兼容，B5-T4 起全派生）', async () => {
     setRoute(
       'GET',
       '/api/v1/agents',
@@ -98,10 +103,12 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
         agent('linux-1', { online: true }),
         agent('linux-2', { online: false }),
         agent('win-1', { online: true, disabled: true }),
+        agent('mac-1', { online: true, draining: true }),
+        agent('old-1', { online: true, version_compatible: false }),
       ]),
     )
     const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.findAll('.agent-item').length).toBe(3))
+    await vi.waitFor(() => expect(wrapper.findAll('.agent-item').length).toBe(5))
 
     const badges = wrapper.findAll('.agent-state-badge')
     expect(badges[0]!.text()).toBe('在线')
@@ -111,8 +118,12 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
     // 停用优先（停用即踢线，online=true 仍展示「停用」不展示「在线」）。
     expect(badges[2]!.text()).toBe('停用')
     expect(badges[2]!.classes()).toContain('agent-state-disabled')
-
-    expect(wrapper.text()).toContain('排空 / 版本不兼容') // 退化标注
+    // 排空（在线 + draining）→ 排空徽标。
+    expect(badges[3]!.text()).toBe('排空')
+    expect(badges[3]!.classes()).toContain('agent-state-draining')
+    // 版本不兼容（version_compatible=false，即便在线）→ 不兼容徽标。
+    expect(badges[4]!.text()).toBe('版本不兼容')
+    expect(badges[4]!.classes()).toContain('agent-state-incompatible')
     wrapper.unmount()
   })
 

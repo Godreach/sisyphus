@@ -240,6 +240,51 @@
         }
       }
     },
+    "/api/v1/agent/upgrade-packages/{package_name}": {
+      "get": {
+        "tags": [
+          "upgrade-packages"
+        ],
+        "summary": "下载升级包（Agent token 鉴权；Agent 侧拉取后校验 sha256、原子换入）。",
+        "operationId": "download",
+        "parameters": [
+          {
+            "name": "package_name",
+            "in": "path",
+            "description": "包名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "包字节流（响应头带 size/sha256）"
+          },
+          "401": {
+            "description": "Agent token 无效/已停用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "包不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents": {
       "get": {
         "tags": [
@@ -342,6 +387,77 @@
           },
           "422": {
             "description": "输入校验失败（名非空/字符集、标签形态、槽位 >= 1）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/upgrade": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "全量升级（全局 admin）：向所有「版本非目标包」的未停用 Agent 下发升级\n指令。在线即送、离线挂起（重连补发）；已在目标版本者跳过（免无谓排空重启）。",
+        "operationId": "upgrade_all",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpgradeCommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "已受理：issued 在线/挂起下发数，skipped 已在目标版本数",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeIssuedSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "升级包不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -495,6 +611,412 @@
         }
       }
     },
+    "/api/v1/agents/{name}/cache/delete": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "缓存删除（全局 admin；fire-and-forget，Agent 侧无 ack）。",
+        "operationId": "cache_delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "构建机名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CacheDeleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "已下发删除指令"
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent 不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Agent 离线",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{name}/cache/list": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "缓存列表（全局 admin；经通道往返）。",
+        "operationId": "cache_list",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "构建机名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "缓存条目（经通道往返）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent 不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Agent 离线",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Agent 在线但未在窗口内回响应",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{name}/upgrade": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "单台升级（全局 admin）：强制该 Agent 升级到目标包。已在目标版本 → 409。",
+        "operationId": "upgrade_one",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "构建机名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpgradeCommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "已受理，返回落定后的 Agent（含升级阶段）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent 或升级包不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Agent 已在目标版本",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{name}/workspace/clean": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "工作区清理（全局 admin；fire-and-forget，Agent 侧无 ack）。",
+        "operationId": "workspace_clean",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "构建机名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceCleanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "已下发清理指令"
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent 不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Agent 离线",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{name}/workspace/list": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "工作区列表（全局 admin；经通道往返）。",
+        "operationId": "workspace_list",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "构建机名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "工作区条目（经通道往返）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent 不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Agent 离线",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Agent 在线但未在窗口内回响应",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/audit": {
       "get": {
         "tags": [
@@ -578,7 +1100,10 @@
                 "agent_disabled",
                 "agent_enabled",
                 "agent_registered",
-                "scm_credential_set"
+                "scm_credential_set",
+                "upgrade_package_uploaded",
+                "upgrade_package_deleted",
+                "upgrade_command_issued"
               ]
             }
           },
@@ -3242,6 +3767,164 @@
         }
       }
     },
+    "/api/v1/upgrade-packages": {
+      "get": {
+        "tags": [
+          "upgrade-packages"
+        ],
+        "summary": "升级包清单（全局 admin；按包名排序）。",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "全部升级包（按包名排序）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UpgradePackageResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "upgrade-packages"
+        ],
+        "summary": "上传升级包（全局 admin）：raw octet-stream body + `X-Sisyphus-Filename` 头。",
+        "operationId": "upload",
+        "responses": {
+          "201": {
+            "description": "已上传；返回包元数据（含解析版本/目标/sha256）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradePackageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "版本窗外（< N-1 或 > Server）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "文件名缺/不可解析/目标三元组非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/upgrade-packages/{package_name}": {
+      "delete": {
+        "tags": [
+          "upgrade-packages"
+        ],
+        "summary": "删除升级包（全局 admin）：删元数据行 + 字节文件。",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "package_name",
+            "in": "path",
+            "description": "包名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "已删除"
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "包不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/users": {
       "get": {
         "tags": [
@@ -3591,6 +4274,8 @@
           "custom_labels",
           "max_concurrency",
           "active_jobs",
+          "version_compatible",
+          "draining",
           "created_at",
           "updated_at"
         ],
@@ -3599,6 +4284,17 @@
             "type": "integer",
             "format": "int64",
             "description": "在途任务数（running/unknown 占槽，ADR-0008 中心化计数）。"
+          },
+          "agent_version": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/VersionDto",
+                "description": "握手上报的 Agent 版本（ADR-0017；从未握手为空）。"
+              }
+            ]
           },
           "created_at": {
             "type": "integer",
@@ -3626,6 +4322,10 @@
                 "description": "磁盘占用（ADR-0019：卷级/缓存/工作区最近采样；从未上报为空）。"
               }
             ]
+          },
+          "draining": {
+            "type": "boolean",
+            "description": "排空/升级中（在线但不可派发——pending 升级指令或 draining/downloading/\nswapping/restarting 阶段；fallback 与无升级为 false，ADR-0017）。"
           },
           "last_seen_at": {
             "type": [
@@ -3659,6 +4359,24 @@
             "type": "integer",
             "format": "int64",
             "description": "最后更新时间（Unix 毫秒）。"
+          },
+          "upgrade_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "升级失败原因（fallback 时记；否则为空）。"
+          },
+          "upgrade_phase": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "升级阶段（draining/downloading/swapping/restarting/fallback；无升级为空）。"
+          },
+          "version_compatible": {
+            "type": "boolean",
+            "description": "版本是否兼容（落在 N-1 窗口内；过旧/过新为 false，ADR-0017 四态派生面）。"
           }
         }
       },
@@ -3992,6 +4710,65 @@
           "trigger_by": {
             "type": "string",
             "description": "触发人（业务表实名）。"
+          }
+        }
+      },
+      "CacheDeleteRequest": {
+        "type": "object",
+        "description": "缓存删除请求体（per-Agent；key 空 = 全清）。",
+        "properties": {
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "缓存 key（空 = 全清；非空 = 跨 pipeline 匹配完整 key）。"
+          }
+        }
+      },
+      "CacheEntryDto": {
+        "type": "object",
+        "description": "缓存条目（per-Agent 列表，经通道往返；ADR-0012）。",
+        "required": [
+          "key",
+          "pipeline",
+          "size_bytes",
+          "last_used_at_ms"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "缓存 key（含 files 哈希后缀）。"
+          },
+          "last_used_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "最近使用时刻（Unix 毫秒）。"
+          },
+          "pipeline": {
+            "type": "string",
+            "description": "所属 pipeline。"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "字节数。"
+          }
+        }
+      },
+      "CacheListResponse": {
+        "type": "object",
+        "description": "缓存列表响应（per-Agent，经通道往返）。",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CacheEntryDto"
+            },
+            "description": "缓存条目。"
           }
         }
       },
@@ -5105,6 +5882,92 @@
           "poll"
         ]
       },
+      "UpgradeCommandRequest": {
+        "type": "object",
+        "description": "升级指令请求体（全局 admin；全量与单台共用）。",
+        "required": [
+          "package_name"
+        ],
+        "properties": {
+          "package_name": {
+            "type": "string",
+            "description": "目标升级包名（ADR-0010 规范 `sisyphus-agent-<ver>-<os>-<arch>`；已上传）。"
+          }
+        }
+      },
+      "UpgradeIssuedSummary": {
+        "type": "object",
+        "description": "全量升级受理摘要（202）。",
+        "required": [
+          "package_name",
+          "issued",
+          "skipped"
+        ],
+        "properties": {
+          "issued": {
+            "type": "integer",
+            "format": "int64",
+            "description": "已下发（含在线即送与离线挂起补发）的 Agent 数。",
+            "minimum": 0
+          },
+          "package_name": {
+            "type": "string",
+            "description": "目标升级包名。"
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "跳过数（已在目标版本，无需升级）。",
+            "minimum": 0
+          }
+        }
+      },
+      "UpgradePackageResponse": {
+        "type": "object",
+        "description": "升级包视图（与 [`crate::store::upgrade_packages::UpgradePackageMeta`] 同构）。",
+        "required": [
+          "package_name",
+          "version",
+          "target_os",
+          "target_arch",
+          "size",
+          "sha256",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "上传时刻（Unix 毫秒）。"
+          },
+          "package_name": {
+            "type": "string",
+            "description": "包名（ADR-0010 规范 `sisyphus-agent-<ver>-<os>-<arch>`）。"
+          },
+          "sha256": {
+            "type": "string",
+            "description": "SHA-256 校验和（十六进制小写）。"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "字节数。",
+            "minimum": 0
+          },
+          "target_arch": {
+            "type": "string",
+            "description": "目标架构（x86_64/aarch64）。"
+          },
+          "target_os": {
+            "type": "string",
+            "description": "目标 OS（linux/macos/windows）。"
+          },
+          "version": {
+            "$ref": "#/components/schemas/VersionDto",
+            "description": "解析自文件名的版本。"
+          }
+        }
+      },
       "UserResponse": {
         "type": "object",
         "description": "用户管理视图（密码哈希永不出现；含 disabled——禁用行仍可见可管理）。",
@@ -5164,6 +6027,35 @@
           }
         }
       },
+      "VersionDto": {
+        "type": "object",
+        "description": "语义版本号（与 proto `Version` 同构；握手版本落库后回显）。",
+        "required": [
+          "major",
+          "minor",
+          "patch"
+        ],
+        "properties": {
+          "major": {
+            "type": "integer",
+            "format": "int32",
+            "description": "主版本。",
+            "minimum": 0
+          },
+          "minor": {
+            "type": "integer",
+            "format": "int32",
+            "description": "次版本。",
+            "minimum": 0
+          },
+          "patch": {
+            "type": "integer",
+            "format": "int32",
+            "description": "补丁版本。",
+            "minimum": 0
+          }
+        }
+      },
       "VolumeUsageDto": {
         "type": "object",
         "description": "卷级磁盘占用（详情视图）。",
@@ -5186,6 +6078,71 @@
             "type": "integer",
             "format": "int64",
             "description": "总量（字节）。"
+          }
+        }
+      },
+      "WorkspaceCleanRequest": {
+        "type": "object",
+        "description": "工作区清理请求体（per-Agent；pipeline/job 皆空 = 全清，job 空 = 该 pipeline 全部）。",
+        "properties": {
+          "job": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "任务名（空 = 清该 pipeline 全部）。"
+          },
+          "pipeline": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "pipeline 名（空 = 全清）。"
+          }
+        }
+      },
+      "WorkspaceEntryDto": {
+        "type": "object",
+        "description": "工作区条目（per-Agent 列表，经通道往返；ADR-0011）。",
+        "required": [
+          "pipeline",
+          "job",
+          "path",
+          "last_used_at_ms"
+        ],
+        "properties": {
+          "job": {
+            "type": "string",
+            "description": "任务名。"
+          },
+          "last_used_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "最近使用时刻（Unix 毫秒）。"
+          },
+          "path": {
+            "type": "string",
+            "description": "工作区绝对路径（Agent 侧）。"
+          },
+          "pipeline": {
+            "type": "string",
+            "description": "pipeline 名。"
+          }
+        }
+      },
+      "WorkspaceListResponse": {
+        "type": "object",
+        "description": "工作区列表响应（per-Agent，经通道往返）。",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceEntryDto"
+            },
+            "description": "工作区条目。"
           }
         }
       }
@@ -5239,6 +6196,10 @@
     {
       "name": "agents",
       "description": "Agent 注册面（票 B2c-T3：建条目/启停/编辑/详情——全局 admin 专属；token 与注册码明文仅在创建响应出现一次）"
+    },
+    {
+      "name": "upgrade-packages",
+      "description": "升级包管理（票 #76，ADR-0017：admin 上传/列表/删除 + Agent token 鉴权下载；文件名解析版本/目标三元组、窗口校验）"
     }
   ]
 }

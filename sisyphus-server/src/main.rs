@@ -112,10 +112,11 @@ async fn main() {
     // 静态资源本地覆盖目录（B2a-T5）：数据目录 web/ 子目录，不存在即纯内嵌。
     let web_override_dir = config.data_dir.join(sisyphus_server::config::WEB_DIR);
 
-    // 调度装配（票 B2c-T4，ADR-0008）：会话注册表（grpc 面）→ 下发端口
-    // （真实通道）→ 调度循环（事件驱动，共享 engine + 事件总线）。调度
-    // 循环与 gRPC 服务同生命周期（server 进程即调度进程，单实例纪律）。
-    let sessions = Arc::new(grpc::SessionRegistry::new());
+    // 调度装配（票 B2c-T4，ADR-0008）：会话注册表（grpc 面 + REST 经通道查询
+    // 共享，票 #76）→ 下发端口（真实通道）→ 调度循环（事件驱动，共享 engine
+    // + 事件总线）。会话注册表随 AppState 单例（main 与 grpc::service 同源）；
+    // 调度循环与 gRPC 服务同生命周期（server 进程即调度进程，单实例纪律）。
+    let sessions = state.agent_sessions.clone();
     let dispatcher = Arc::new(grpc::GrpcDispatcher::new(sessions.clone()));
     let scheduler = sched::Scheduler::new(
         state.engine.clone(),
@@ -126,8 +127,8 @@ async fn main() {
     let scheduler_handle = scheduler.handle();
     let scheduler_state = state.clone();
     let sched_task = tokio::spawn(async move {
-        // 启动从库重建（running/queued/unknown 任务、挂起取消补发）后进入
-        // 事件驱动循环。
+        // 启动从库重建（running/queued/unknown 任务、挂起取消与待补发升级指令
+        // 补发）后进入事件驱动循环。
         if let Err(e) = scheduler.reconstruct().await {
             tracing::error!(error = %e, "调度状态重建失败");
         }

@@ -61,12 +61,20 @@ pub enum AuditEvent {
     /// 设置/清空项目 SCM 凭据（B5-T3，ADR-0015：凭据变更属安全事件；detail
     /// 只记 set/clear 动作，永不记用户名/密码值——值形态在审计路径不存在）。
     ScmCredentialSet,
+    /// 上传升级包（B5-T4，ADR-0017：管理员上传 agent 发行包；detail 记包名 +
+    /// 解析版本 + 目标三元组，sha256 不落审计——下载端点另校验）。
+    UpgradePackageUploaded,
+    /// 删除升级包（B5-T4，ADR-0017：管理员删旧包；detail 记包名）。
+    UpgradePackageDeleted,
+    /// 下发升级指令（B5-T4，ADR-0017：全量/单台；detail 记包名 + 目标 Agent
+    /// 名清单——指令值/下载 URL 不落审计）。
+    UpgradeCommandIssued,
 }
 
 impl AuditEvent {
     /// 全部事件类型（契约单点：`as_str` 映射 + [`Self::parse`] 识别 +
     /// OpenAPI enum 生成的共同来源——新增事件类型只改这里与 [`Self::as_str`]）。
-    pub const ALL: [AuditEvent; 19] = [
+    pub const ALL: [AuditEvent; 22] = [
         Self::LoginSuccess,
         Self::LoginFailure,
         Self::Logout,
@@ -86,6 +94,9 @@ impl AuditEvent {
         Self::AgentEnabled,
         Self::AgentRegistered,
         Self::ScmCredentialSet,
+        Self::UpgradePackageUploaded,
+        Self::UpgradePackageDeleted,
+        Self::UpgradeCommandIssued,
     ];
 
     /// 落库 / 查询过滤文本（契约值；filter 参数按此匹配）。
@@ -110,6 +121,9 @@ impl AuditEvent {
             Self::AgentEnabled => "agent_enabled",
             Self::AgentRegistered => "agent_registered",
             Self::ScmCredentialSet => "scm_credential_set",
+            Self::UpgradePackageUploaded => "upgrade_package_uploaded",
+            Self::UpgradePackageDeleted => "upgrade_package_deleted",
+            Self::UpgradeCommandIssued => "upgrade_command_issued",
         }
     }
 

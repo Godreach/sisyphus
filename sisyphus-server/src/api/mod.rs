@@ -39,11 +39,13 @@ pub mod scm;
 pub mod secrets;
 pub mod tokens;
 pub mod triggers;
+pub mod upgrade_packages;
 pub mod users;
 
 mod web;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::State;
@@ -59,6 +61,7 @@ use crate::api::error::ApiError;
 use crate::auth::LoginRateLimiter;
 use crate::engine::Engine;
 use crate::events::EventBus;
+use crate::grpc::SessionRegistry;
 use crate::secrets::MasterKey;
 use crate::store::SqliteLogStore;
 use crate::store::agents::AgentRepo;
@@ -72,6 +75,7 @@ use crate::store::secrets::SecretRepo;
 use crate::store::sessions::SessionRepo;
 use crate::store::tokens::PatRepo;
 use crate::store::triggers::TriggerRepo;
+use crate::store::upgrade_packages::{LocalDiskUpgradePackageStore, UpgradePackageRepo};
 use crate::store::users::UserRepo;
 
 /// REST 层共享状态：repo 组合注入（池在 [`AppState::new`] 处消费一次后
@@ -115,6 +119,15 @@ pub struct AppState {
     pub artifacts: LocalDiskArtifactStore,
     /// 产物元数据仓储（票 #74，ADR-0004）：上传完成记行、列表/下载查询。
     pub artifact_meta: SqliteArtifactMetaRepo,
+    /// 升级包字节存储（票 #76，ADR-0017）：管理员上传 agent 发行包落盘、
+    /// Agent 下载读取。布局 data/upgrade-packages/<package_name>。
+    pub upgrade_packages: LocalDiskUpgradePackageStore,
+    /// 升级包元数据仓储（票 #76，ADR-0017）：上传完成记行、列表/下载查询。
+    pub upgrade_package_meta: UpgradePackageRepo,
+    /// Agent 通道会话注册表（票 #76，ADR-0011/0012/0017）：REST「经通道查询」
+    /// （工作区/缓存列表）与升级指令下发的共享目的地。与 gRPC 服务同源
+    /// （main.rs 经 `state.agent_sessions.clone()` 注入 grpc::service）。
+    pub agent_sessions: Arc<SessionRegistry>,
     /// 编排引擎（票 B2c-T2，ADR-0006：统一触发入口 + 构建推进 + 任务终态
     /// 接线点；sched/grpc/REST 共享同一引擎与事件总线）。
     pub engine: Engine,
@@ -169,6 +182,11 @@ impl AppState {
             logs: SqliteLogStore::open(&pool).await?,
             artifacts: LocalDiskArtifactStore::new(data_dir.join(crate::config::ARTIFACTS_DIR)),
             artifact_meta: SqliteArtifactMetaRepo::new(pool.clone()),
+            upgrade_packages: LocalDiskUpgradePackageStore::new(
+                data_dir.join(crate::config::UPGRADE_PACKAGES_DIR),
+            ),
+            upgrade_package_meta: UpgradePackageRepo::new(pool.clone()),
+            agent_sessions: Arc::new(SessionRegistry::new()),
             engine: Engine::new(pool.clone(), master_key, bus.clone()),
             bus,
             master_key,
@@ -209,6 +227,10 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route(
             "/agent/artifacts/{job_id}/downloads/{source_job}/{name}",
             get(artifacts::agent_download),
+        )
+        .route(
+            "/agent/upgrade-packages/{package_name}",
+            get(upgrade_packages::download),
         )
         .route_layer(from_fn_with_state(
             state.clone(),
@@ -294,8 +316,21 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
             get(triggers::get_one).patch(triggers::patch),
         )
         .route("/audit", get(audit::list))
+        .route("/upgrade-packages", get(upgrade_packages::list).post(upgrade_packages::upload))
+        .route(
+            "/upgrade-packages/{package_name}",
+            delete(upgrade_packages::delete),
+        )
+        // 全量升级（静态段置于 /agents/{name} 前，免被动态段捕获）。
+        .route("/agents/upgrade", post(agents::upgrade_all))
         .route("/agents", get(agents::list).post(agents::create))
         .route("/agents/{name}", get(agents::get_one).patch(agents::patch))
+        // 单台升级 / 工作区 / 缓存（per-Agent 经通道转发，ADR-0011/0012/0017）。
+        .route("/agents/{name}/upgrade", post(agents::upgrade_one))
+        .route("/agents/{name}/workspace/list", post(agents::workspace_list))
+        .route("/agents/{name}/workspace/clean", post(agents::workspace_clean))
+        .route("/agents/{name}/cache/list", post(agents::cache_list))
+        .route("/agents/{name}/cache/delete", post(agents::cache_delete))
         // 层序（route_layer 后加者在外、先跑）：认证（401）在外层把关
         // 「谁在说话」（cookie 会话 / Bearer PAT 双通道，票 B2b-T3）；
         // CSRF（403）在其内层，只拦「已过认证且以 cookie 认证」的非安全

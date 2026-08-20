@@ -92,6 +92,13 @@ pub trait JobDispatcher: Send + Sync {
     /// 下发 CancelBuild（build 级 + job_id）。
     async fn cancel_job(&self, agent_id: i64, build_id: i64, job_id: i64)
     -> Result<(), SchedError>;
+    /// 下发 UpgradeCommand（ADR-0017）。`Ok(true)` 已投递；`Ok(false)` Agent
+    /// 离线——调度侧保留持久化指令、重连补发（与取消指令同机制）。
+    async fn dispatch_upgrade(
+        &self,
+        agent_id: i64,
+        cmd: sisyphus_proto::agent::UpgradeCommand,
+    ) -> Result<bool, SchedError>;
 }
 
 /// 调度循环的内部事件（grpc 任务面 → 单循环串行化入口）。
@@ -412,6 +419,15 @@ impl Scheduler {
                     .await;
             }
         }
+        // 离线时挂起的升级指令补发（ADR-0017）：全库 pending 已记且未回执者
+        // ——重启后这些 Agent 一旦重连即由 on_job_reported 补发；此处对当前
+        // 在线者立即补发（重启时仍连着的 Agent 不会触发 on_job_reported）。
+        for (agent_id, cmd) in self.agents.pending_upgrade_resend().await? {
+            let _ = self
+                .dispatcher
+                .dispatch_upgrade(agent_id, cmd.to_upgrade_command())
+                .await;
+        }
         Ok(())
     }
 
@@ -616,9 +632,21 @@ impl Scheduler {
                 let _ = self.dispatcher.cancel_job(id, job.build_id, job.id).await;
             }
         }
+        // 离线时挂起的升级指令补发（ADR-0017，与取消指令同机制）：该 Agent 有
+        // 待补发指令（pending 已记）且未收 UpgradeStatus 回执（phase 仍空）→
+        // 重连即补发。已收回执者 pending 已清——不补发（Agent 正在升级，重发
+        // 非幂等）。
+        if let Some(row) = self.agents.get(agent_id).await?
+            && let Some(cmd) = row.pending_upgrade()?
+            && row.upgrade_phase.is_none()
+        {
+            let _ = self
+                .dispatcher
+                .dispatch_upgrade(agent_id, cmd.to_upgrade_command())
+                .await;
+        }
         self.match_pass(now).await
     }
-
     // -----------------------------------------------------------------------
     // Agent 离线 / 超时 / 宽限 / 取消
     // -----------------------------------------------------------------------
@@ -747,18 +775,20 @@ impl Scheduler {
 mod tests {
     use super::*;
     use crate::engine::{StartBuildInput, TriggerDetail};
+    use crate::store::agents::PendingUpgrade;
     use crate::store::builds::TriggerSource;
     use crate::store::pipelines::PipelineRepo;
     use crate::store::projects::{NewProject, ProjectRepo, ScmType};
     use sisyphus_model::pipeline::{Job, Pipeline, Shell, Stage, Step};
     use std::sync::atomic::{AtomicI64, Ordering};
 
-    /// 内存 fake 下发端口：记录下发/取消；`online=false` 模拟「Agent 无会话」
-    /// （dispatch 返回 false → 调度侧回收槽位、回池）。
+    /// 内存 fake 下发端口：记录下发/取消/升级；`online=false` 模拟「Agent 无
+    /// 会话」（dispatch 返回 false → 调度侧回收槽位、回池）。
     #[derive(Default)]
     struct FakeDispatcher {
         dispatched: std::sync::atomic::AtomicU64,
         cancels: std::sync::atomic::AtomicU64,
+        upgrades: std::sync::atomic::AtomicU64,
         online: std::sync::atomic::AtomicBool,
     }
 
@@ -779,6 +809,17 @@ mod tests {
         ) -> Result<(), SchedError> {
             self.cancels.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+        async fn dispatch_upgrade(
+            &self,
+            _agent_id: i64,
+            _cmd: sisyphus_proto::agent::UpgradeCommand,
+        ) -> Result<bool, SchedError> {
+            if !self.online.load(Ordering::SeqCst) {
+                return Ok(false);
+            }
+            self.upgrades.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
         }
     }
 
@@ -1184,5 +1225,77 @@ mod tests {
             .expect("查")
             .expect("应存在");
         assert_eq!(build_row.status, BuildStatus::Running, "重建放行排队构建");
+    }
+
+    /// 票 #76 AC：升级指令离线补发——pending 已记、未收 UpgradeStatus 回执的
+    /// Agent 重连（on_job_reported）即补发升级指令（FakeDispatcher 记账）；已
+    /// 回执（upgrade_phase 置位）后不再补发（Agent 正在升级，重发非幂等）。
+    #[tokio::test]
+    async fn on_job_reported_resends_pending_upgrade_until_acked() {
+        let t = fixture(vec![], vec!["sisyphus/os=linux"]).await;
+        let agent = t
+            .sched
+            .agents
+            .get_by_name("linux-1")
+            .await
+            .unwrap()
+            .unwrap();
+        let cmd = PendingUpgrade {
+            package_name: "sisyphus-agent-1.0.0-linux-x86_64.tar.gz".into(),
+            sha256: "abc".into(),
+            download_url: "/api/v1/agent/upgrade-packages/sisyphus-agent-1.0.0-linux-x86_64.tar.gz"
+                .into(),
+        };
+        t.sched
+            .agents
+            .set_pending_upgrade(agent.id, &cmd)
+            .await
+            .unwrap();
+        assert_eq!(
+            t.dispatcher.upgrades.load(Ordering::SeqCst),
+            0,
+            "补发前无下发"
+        );
+
+        // 重连（空在途）：on_job_reported 补发挂起的升级指令。
+        t.sched
+            .on_job_reported(agent.id, &[], t.now())
+            .await
+            .unwrap();
+        assert_eq!(
+            t.dispatcher.upgrades.load(Ordering::SeqCst),
+            1,
+            "重连补发一次升级指令"
+        );
+
+        // 收到 UpgradeStatus 回执（phase 置位）后不再补发（pending 仍在列里，
+        // 但 phase 非空 → 补发视图排除）。
+        t.sched
+            .agents
+            .set_upgrade_status(agent.id, "draining", None)
+            .await
+            .unwrap();
+        t.sched
+            .on_job_reported(agent.id, &[], t.now())
+            .await
+            .unwrap();
+        assert_eq!(
+            t.dispatcher.upgrades.load(Ordering::SeqCst),
+            1,
+            "已回执（phase 置位）不再补发"
+        );
+
+        // 启动重建（reconstruct）也补发：清 phase（模拟未回执）后重建再补发。
+        t.sched
+            .agents
+            .clear_upgrade_state(agent.id)
+            .await
+            .unwrap();
+        t.sched.reconstruct().await.unwrap();
+        assert_eq!(
+            t.dispatcher.upgrades.load(Ordering::SeqCst),
+            2,
+            "重建时对未回执者补发一次"
+        );
     }
 }

@@ -292,9 +292,6 @@ function openDetail(agent: AgentResponse): void {
       </div>
     </div>
 
-    <!-- 排空/不兼容 退化标注（REST 契约未暴露排空/版本字段）。 -->
-    <p v-if="agents && agents.length > 0" class="form-hint">{{ t('agents.statesDegraded') }}</p>
-
     <!-- Agent 列表（按名排序）。 -->
     <ul v-if="agents" class="agent-list">
       <li v-for="agent in agents" :key="agent.name" class="agent-item">

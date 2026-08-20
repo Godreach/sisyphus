@@ -32,12 +32,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sisyphus_proto::agent::{
-    CancelBuild, ChannelMessage, DiskUsage, Handshake, Version,
+    CancelBuild, ChannelMessage, DiskUsage, Handshake, UpgradeCommand, Version,
     agent_channel_server::{AgentChannel, AgentChannelServer},
     channel_message::Kind,
 };
 use sisyphus_proto::version;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming, metadata::MetadataMap};
 
@@ -47,7 +47,7 @@ use crate::engine::{ResolvedJobSpec, ResolvedStep, Vcs};
 use crate::events::Event;
 use crate::sched::{JobDispatcher, SchedError, SchedulerHandle};
 use crate::store::LogStore;
-use crate::store::agents::{AgentDiskUsage, VolumeUsage};
+use crate::store::agents::{AgentDiskUsage, AgentVersion, VolumeUsage};
 use crate::store::jobs::JobRow;
 use crate::store::now_ms;
 
@@ -71,9 +71,125 @@ const META_CONTAINER: &str = "x-sisyphus-container";
 /// 满即背压——session_loop 等待，不丢下行帧。
 const SESSION_TX_CAPACITY: usize = 64;
 
+/// REST「经通道查询」请求-响应往返的最长等待（工作区/缓存列表：发指令 →
+/// 等上行响应帧）。超时即 504——UI 可重发查询（ADR-0011/0012 列表响应无
+/// 离线补发，丢了无害）。
+const AWAIT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Server 侧版本（ADR-0010：与 Agent 同版本成对发布）。
 pub fn server_version() -> Version {
     version::VERSION
+}
+
+/// 经通道往返的响应种类（工作区列表 / 缓存列表）。键入 `(agent_id, kind)`：
+/// 每 Agent 每种响应至多一个待满足请求（UI 一次查一种），免并发往返竞态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AwaitKind {
+    /// 工作区列表响应（`Kind::WorkspaceList`）。
+    WorkspaceList,
+    /// 缓存列表响应（`Kind::CacheList`）。
+    CacheList,
+}
+
+/// 经通道往返的错误（REST 映射 409/504）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AwaitError {
+    /// Agent 离线（无会话 / 会话断开）——REST 409。
+    Offline,
+    /// 响应超时（Agent 在线但未在 [`AWAIT_TIMEOUT`] 内回帧）——REST 504。
+    Timeout,
+}
+
+/// 在线 Agent 会话注册表：agent_id → 会话下行发送器。JobSpec/CancelBuild/
+/// UpgradeCommand 的下发目的地（[`GrpcDispatcher`]）+ REST「经通道查询」的
+/// 请求-响应往返（[`Self::send_and_await`]）。连接建立注册、断开/踢线注销。
+#[derive(Default)]
+pub struct SessionRegistry {
+    /// 下行发送器（指令下发目的地）。
+    inner: RwLock<HashMap<i64, mpsc::Sender<Result<ChannelMessage, Status>>>>,
+    /// 待满足的往返响应（REST 工作区/缓存列表查询等上行帧）：键 `(agent_id,
+    /// kind)` → 回应 oneshot。session_loop 收到 `WorkspaceList`/`CacheList`
+    /// 经 [`Self::fulfill`] 满足；断开/超时经 [`Self::cancel`] 丢弃。
+    pending: RwLock<HashMap<(i64, AwaitKind), oneshot::Sender<ChannelMessage>>>,
+}
+
+impl std::fmt::Debug for SessionRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionRegistry")
+            .finish_non_exhaustive()
+    }
+}
+
+impl SessionRegistry {
+    /// 新建注册表。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 注册会话（连接建立后）。重复注册（同 Agent 并发连接）覆盖旧会话——
+    /// 最晚连接优先（Agent 重连即旧会话作废）。
+    async fn register(&self, agent_id: i64, tx: mpsc::Sender<Result<ChannelMessage, Status>>) {
+        self.inner.write().await.insert(agent_id, tx);
+    }
+
+    /// 注销会话（断开/踢线）：移除下行发送器 + 取消该 Agent 的待满足往返
+    /// （oneshot 发送器随移除而 drop → 等待方收 `RecvError` 即 [`AwaitError::Offline`]）。
+    async fn unregister(&self, agent_id: i64) {
+        self.inner.write().await.remove(&agent_id);
+        let mut pending = self.pending.write().await;
+        pending.retain(|(id, _), _| *id != agent_id);
+    }
+
+    /// 向 Agent 会话投递一帧下行消息。`Ok(true)` 已投递（发送器仍持有）；
+    /// `Ok(false)` 无会话或发送失败（对端关闭/通道满——Agent 离线或不可达）。
+    pub async fn send(&self, agent_id: i64, msg: ChannelMessage) -> Result<bool, SchedError> {
+        let sender = self.inner.read().await.get(&agent_id).cloned();
+        match sender {
+            Some(tx) => tx
+                .send(Ok(msg))
+                .await
+                .map(|_| true)
+                .map_err(|_| SchedError::Dispatch("Agent 会话已断开".into())),
+            None => Ok(false),
+        }
+    }
+
+    /// 经通道往返：先注册待满足响应，再发指令，等上行响应帧（由 session_loop
+    /// 的 `WorkspaceList`/`CacheList` 臂经 [`Self::fulfill`] 满足）。
+    ///
+    /// 注册先于发送——避免「发送后、注册前」响应已到却被丢的窄窗口。Agent
+    /// 离线（无会话）即 [`AwaitError::Offline`]；超时即 [`AwaitError::Timeout`]；
+    /// 会话中途断开（oneshot 发送器 drop）即 [`AwaitError::Offline`]。
+    pub async fn send_and_await(
+        &self,
+        agent_id: i64,
+        cmd: ChannelMessage,
+        kind: AwaitKind,
+    ) -> Result<ChannelMessage, AwaitError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.pending.write().await.insert((agent_id, kind), resp_tx);
+        if !matches!(self.send(agent_id, cmd).await, Ok(true)) {
+            // 离线 / 发送失败：清待满足，返回 Offline（pending 指令不发——
+            // 工作区/缓存列表无离线补发，UI 重发查询即可，ADR-0011/0012）。
+            self.pending.write().await.remove(&(agent_id, kind));
+            return Err(AwaitError::Offline);
+        }
+        match tokio::time::timeout(AWAIT_TIMEOUT, resp_rx).await {
+            Ok(Ok(msg)) => Ok(msg),
+            Ok(Err(_)) => Err(AwaitError::Offline), // 会话断开：发送器 drop
+            Err(_) => {
+                self.pending.write().await.remove(&(agent_id, kind));
+                Err(AwaitError::Timeout)
+            }
+        }
+    }
+
+    /// session_loop 收到响应帧时满足待等待的往返（无等待者即丢弃——UI 可重发）。
+    async fn fulfill(&self, agent_id: i64, kind: AwaitKind, msg: ChannelMessage) {
+        if let Some(tx) = self.pending.write().await.remove(&(agent_id, kind)) {
+            let _ = tx.send(msg);
+        }
+    }
 }
 
 /// Agent 通道服务：持有组合根状态（认证面 + 心跳面 + 任务面共用 repo，与
@@ -96,45 +212,6 @@ impl AgentChannelService {
             state,
             sessions,
             scheduler,
-        }
-    }
-}
-
-/// 在线 Agent 会话注册表：agent_id → 会话下行发送器。JobSpec/CancelBuild
-/// 的下发目的地（[`GrpcDispatcher`]）。连接建立注册、断开/踢线注销。
-#[derive(Default)]
-pub struct SessionRegistry {
-    inner: RwLock<HashMap<i64, mpsc::Sender<Result<ChannelMessage, Status>>>>,
-}
-
-impl SessionRegistry {
-    /// 新建注册表。
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 注册会话（连接建立后）。重复注册（同 Agent 并发连接）覆盖旧会话——
-    /// 最晚连接优先（Agent 重连即旧会话作废）。
-    async fn register(&self, agent_id: i64, tx: mpsc::Sender<Result<ChannelMessage, Status>>) {
-        self.inner.write().await.insert(agent_id, tx);
-    }
-
-    /// 注销会话（断开/踢线）。
-    async fn unregister(&self, agent_id: i64) {
-        self.inner.write().await.remove(&agent_id);
-    }
-
-    /// 向 Agent 会话投递一帧下行消息。`Ok(true)` 已投递（发送器仍持有）；
-    /// `Ok(false)` 无会话或发送失败（对端关闭/通道满——Agent 离线或不可达）。
-    async fn send(&self, agent_id: i64, msg: ChannelMessage) -> Result<bool, SchedError> {
-        let sender = self.inner.read().await.get(&agent_id).cloned();
-        match sender {
-            Some(tx) => tx
-                .send(Ok(msg))
-                .await
-                .map(|_| true)
-                .map_err(|_| SchedError::Dispatch("Agent 会话已断开".into())),
-            None => Ok(false),
         }
     }
 }
@@ -183,6 +260,20 @@ impl JobDispatcher for GrpcDispatcher {
         };
         self.sessions.send(agent_id, msg).await?;
         Ok(())
+    }
+
+    async fn dispatch_upgrade(
+        &self,
+        agent_id: i64,
+        cmd: UpgradeCommand,
+    ) -> Result<bool, SchedError> {
+        // 升级指令经通道下发（ADR-0017）：Agent 自排空 → 下载校验 → 原子换入
+        // → spawn 重启，状态经 UpgradeStatus 上报。离线 Agent 由调度侧
+        // 持久化指令、重连补发（与取消指令同机制）。
+        let msg = ChannelMessage {
+            kind: Some(Kind::Upgrade(cmd)),
+        };
+        self.sessions.send(agent_id, msg).await
     }
 }
 
@@ -361,6 +452,29 @@ impl AgentChannel for AgentChannelService {
             .await
             .map_err(|e| Status::internal(format!("上线落库失败：{e}")))?;
 
+        // 版本进契约 + 升级态收敛（ADR-0017）：握手上报版本落库；若版本已变
+        // （升级成功，新进程以新版本重连）或上次停在 restarting（新进程重连，
+        // RESTARTING 报告可能在旧进程退出前丢失）则清升级态与待补发指令——
+        // 升级已终结，回到「可派发」。首连（prev 版本为空）不清：待补发指令
+        // 留给 on_job_reported 补发。
+        let new_version = AgentVersion::from_proto(&agent_version);
+        let prev_version = agent.agent_version().unwrap_or(None);
+        self.state
+            .agents
+            .set_agent_version(agent.id, &new_version)
+            .await
+            .map_err(|e| Status::internal(format!("版本落库失败：{e}")))?;
+        let upgraded = prev_version.is_some_and(|p| p != new_version)
+            || agent.upgrade_phase.as_deref() == Some("restarting");
+        if upgraded {
+            if let Err(e) = self.state.agents.clear_upgrade_state(agent.id).await {
+                tracing::warn!(agent = %agent.name, error = %e, "清升级态失败");
+            }
+            if let Err(e) = self.state.agents.clear_pending_upgrade(agent.id).await {
+                tracing::warn!(agent = %agent.name, error = %e, "清待补发升级指令失败");
+            }
+        }
+
         tracing::info!(agent = %agent.name, "agent connected（通道认证通过）");
 
         let (tx, rx) = mpsc::channel(SESSION_TX_CAPACITY);
@@ -483,10 +597,63 @@ async fn session_loop(
                     tracing::warn!(agent = %agent, error = %e, "LogBatch 落库失败");
                 }
             }
+            Some(Kind::UpgradeStatus(status)) => {
+                // 升级状态上报（ADR-0017）：首条回执 = 指令已送达 → 清待补发
+                // （停止离线补发，避免对正在升级的 Agent 重发非幂等指令）；
+                // 落当前阶段。UNSPECIFIED/未知 → 清升级态（复位）。
+                if let Err(e) = state.agents.clear_pending_upgrade(agent_id).await {
+                    tracing::warn!(agent = %agent, error = %e, "清待补发升级指令失败");
+                }
+                match map_upgrade_phase(status.phase) {
+                    Some(phase) => {
+                        // 空 error 不落（COALESCE 保留旧 error——如下载失败后再报
+                        // 同阶段不带 error 不清原因）。
+                        let error = (!status.error.is_empty()).then_some(status.error.as_str());
+                        if let Err(e) = state
+                            .agents
+                            .set_upgrade_status(agent_id, phase, error)
+                            .await
+                        {
+                            tracing::warn!(agent = %agent, error = %e, "升级状态落库失败");
+                        }
+                    }
+                    None => {
+                        if let Err(e) = state.agents.clear_upgrade_state(agent_id).await {
+                            tracing::warn!(agent = %agent, error = %e, "清升级态失败");
+                        }
+                    }
+                }
+            }
+            Some(Kind::WorkspaceList(list)) => {
+                // 工作区列表响应（REST 经 send_and_await 往返）：满足等待者；
+                // 无等待者（UI 已超时放弃）即丢弃——列表响应无离线补发，重发查询即可。
+                sessions
+                    .fulfill(
+                        agent_id,
+                        AwaitKind::WorkspaceList,
+                        ChannelMessage {
+                            kind: Some(Kind::WorkspaceList(list)),
+                        },
+                    )
+                    .await;
+            }
+            Some(Kind::CacheList(list)) => {
+                // 缓存列表响应：同工作区列表。
+                sessions
+                    .fulfill(
+                        agent_id,
+                        AwaitKind::CacheList,
+                        ChannelMessage {
+                            kind: Some(Kind::CacheList(list)),
+                        },
+                    )
+                    .await;
+            }
             _ => {
-                // 非任务面帧（升级/工作区/缓存/未知）：只做「下一请求即拒」
-                // 的踢线复核。查库失败（瞬态 IO）不断健康会话——只有「明确
-                // 查到且已停用/不存在」才踢线。
+                // 兜底臂：UpgradeStatus / WorkspaceList / CacheList 已在上臂处理，
+                // 此处只接未知/契约外帧（演进只加字段、旧 Server 忽略新 kind）。
+                // 顺带做「下一请求即拒」的踢线复核：查库失败（瞬态 IO）不断健康
+                // 会话——只有「明确查到且已停用/不存在」才踢线。
                 match state.agents.find_active_by_hash(&token_hash).await {
                     Ok(None) => {
                         tracing::info!(agent = %agent, "agent 已停用/吊销：断开会话");
@@ -501,6 +668,22 @@ async fn session_loop(
         }
     }
     sessions.unregister(agent_id).await;
+}
+
+/// proto `UpgradePhase` → 升级阶段字符串（落库 `agents.upgrade_phase`）。
+/// `None` = UNSPECIFIED/未知（复位：清升级态）。fallback 不在「升级中」集合
+/// （[`crate::store::agents::AgentRow::mid_upgrade`]）→ 落 fallback 后 Agent
+/// 仍可派发（退回旧版本继续跑），UI 显示「退回」+ error。
+fn map_upgrade_phase(phase: i32) -> Option<&'static str> {
+    use sisyphus_proto::agent::UpgradePhase as P;
+    match P::try_from(phase) {
+        Ok(P::UpgradeDraining) => Some("draining"),
+        Ok(P::UpgradeDownloading) => Some("downloading"),
+        Ok(P::UpgradeSwapping) => Some("swapping"),
+        Ok(P::UpgradeRestarting) => Some("restarting"),
+        Ok(P::UpgradeFallback) => Some("fallback"),
+        _ => None, // UNSPECIFIED/未知：复位
+    }
 }
 
 /// proto JobPhase → 任务状态。`None` = 契约未知阶段（契约演进只加字段，

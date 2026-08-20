@@ -13,6 +13,8 @@ import type {
   BuildDetailResponse,
   BuildListResponse,
   BuildStatusDto,
+  CacheDeleteRequest,
+  CacheListResponse,
   CreateAgentRequest,
   CreateProjectRequest,
   CreateTokenRequest,
@@ -38,7 +40,12 @@ import type {
   SecretNameResponse,
   TokenResponse,
   TriggerBuildRequest,
+  UpgradeCommandRequest,
+  UpgradeIssuedSummary,
+  UpgradePackageResponse,
   UserResponse,
+  WorkspaceCleanRequest,
+  WorkspaceListResponse,
 } from './types'
 
 /** 认证端点（后端 `api/auth.rs`，ADR-0014）。 */
@@ -77,6 +84,34 @@ export const agentsApi = {
    *  自定义标签（整组替换）。返回落定后的 Agent。 */
   patch: (name: string, req: PatchAgentRequest) =>
     http.patch<AgentResponse>(`agents/${encodeURIComponent(name)}`, { json: req }),
+
+  /** 全量升级（全局 admin）：向所有版本非目标包的未停用 Agent 下发升级指令。
+   *  在线即送、离线挂起；返回受理摘要（issued/skipped，ADR-0017）。 */
+  upgradeAll: (req: UpgradeCommandRequest) =>
+    http.post<UpgradeIssuedSummary>('agents/upgrade', { json: req }),
+
+  /** 单台升级（全局 admin）：强制该 Agent 升级到目标包；返回落定后的 Agent
+   *  （含升级阶段）。已在目标版本 → 409。 */
+  upgradeOne: (name: string, req: UpgradeCommandRequest) =>
+    http.post<AgentResponse>(`agents/${encodeURIComponent(name)}/upgrade`, { json: req }),
+
+  /** 工作区列表（全局 admin，经通道往返；ADR-0011）。Agent 离线 → 409，
+   *  在线未在窗口内回响应 → 504。 */
+  listWorkspace: (name: string) =>
+    http.post<WorkspaceListResponse>(`agents/${encodeURIComponent(name)}/workspace/list`),
+
+  /** 工作区清理（全局 admin，fire-and-forget；ADR-0011）。pipeline/job 皆空
+   *  = 全清。Agent 离线 → 409。 */
+  cleanWorkspace: (name: string, req: WorkspaceCleanRequest) =>
+    http.post<void>(`agents/${encodeURIComponent(name)}/workspace/clean`, { json: req }),
+
+  /** 缓存列表（全局 admin，经通道往返；ADR-0012）。 */
+  listCache: (name: string) =>
+    http.post<CacheListResponse>(`agents/${encodeURIComponent(name)}/cache/list`),
+
+  /** 缓存删除（全局 admin，fire-and-forget；ADR-0012）。key 空 = 全清。 */
+  deleteCache: (name: string, req: CacheDeleteRequest) =>
+    http.post<void>(`agents/${encodeURIComponent(name)}/cache/delete`, { json: req }),
 }
 
 /** 项目端点（后端 `api/projects.rs`；建项目为全局 admin 专属）。 */
@@ -276,4 +311,24 @@ export const artifactsApi = {
    *  大小与校验和，浏览器原生下载）。 */
   downloadUrl: (project: string, pipeline: string, number: number, name: string) =>
     `api/v1/projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}/artifacts/${encodeURIComponent(name)}`,
+}
+
+/** 升级包端点（后端 `api/upgrade_packages.rs`，票 #76 / B5-T4，ADR-0017）：
+ *  管理面全局 admin（上传/列表/删除）；下载走 Agent token 鉴权，不经本客户端
+ *  （由 Agent 侧拉取，UI 不提供浏览器下载）。一次多包 = 连续多次上传。 */
+export const upgradePackagesApi = {
+  /** 上传升级包（全局 admin，raw octet body + X-Sisyphus-Filename 头携带包名；
+   *  后端按 ADR-0010 文件名规范解析版本/目标三元组、窗口校验、记 sha256）。 */
+  upload: (file: File) =>
+    http.post<UpgradePackageResponse>('upgrade-packages', {
+      body: file,
+      headers: { 'X-Sisyphus-Filename': file.name, 'Content-Type': 'application/octet-stream' },
+    }),
+
+  /** 升级包清单（全局 admin；按包名排序）。 */
+  list: () => http.get<UpgradePackageResponse[]>('upgrade-packages'),
+
+  /** 删除升级包（全局 admin；删旧包——元数据 + 字节）。 */
+  delete: (packageName: string) =>
+    http.del<void>(`upgrade-packages/${encodeURIComponent(packageName)}`),
 }

@@ -123,6 +123,12 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, "CONFLICT", what, None)
     }
 
+    /// 504：上游（Agent 经通道查询）超时——Agent 在线但未在窗口内回响应帧
+    /// （票 #76，ADR-0011/0012 列表经通道往返）。
+    pub fn gateway_timeout(what: impl Into<String>) -> Self {
+        Self::new(StatusCode::GATEWAY_TIMEOUT, "GATEWAY_TIMEOUT", what, None)
+    }
+
     /// 500：内部错误（细节只进日志，不外泄）。
     pub fn internal(context: &str, err: &dyn std::fmt::Display) -> Self {
         tracing::error!(context, error = %err, "API 内部错误");

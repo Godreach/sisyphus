@@ -22,6 +22,7 @@ pub mod secrets;
 pub mod sessions;
 pub mod tokens;
 pub mod triggers;
+pub mod upgrade_packages;
 pub mod users;
 
 // 缝定形：LogStore 随日志批次（票 #73）落 SqliteLogStore 实现；
@@ -29,6 +30,7 @@ pub mod users;
 #[allow(dead_code, unused_imports)]
 mod traits;
 
+pub use agents::{AgentVersion, PendingUpgrade};
 pub use artifacts::{
     ARTIFACT_NAME_MAX, ARTIFACT_RETENTION_DAYS, LocalDiskArtifactStore, SqliteArtifactMetaRepo,
     validate_artifact_name,
@@ -37,6 +39,10 @@ pub use logs::SqliteLogStore;
 pub use scm_credentials::ScmCredentialRepo;
 pub use traits::{
     ArtifactMeta, ArtifactMetaRepo, ArtifactStore, ByteStream, LogChunk, LogLocation, LogStore,
+};
+pub use upgrade_packages::{
+    LocalDiskUpgradePackageStore, UpgradePackageBytes, UpgradePackageMeta, UpgradePackageRepo,
+    PACKAGE_NAME_MAX, validate_package_name,
 };
 
 use std::{
@@ -328,6 +334,7 @@ mod tests {
             "DROP TABLE triggers",
             "DROP TABLE logs",
             "DROP TABLE artifacts",
+            "DROP TABLE upgrade_packages",
             "DROP TABLE project_scm_credentials",
         ] {
             sqlx::raw_sql(stmt)

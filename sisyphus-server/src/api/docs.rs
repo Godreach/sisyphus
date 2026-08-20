@@ -18,6 +18,7 @@ use super::scm;
 use super::secrets;
 use super::tokens;
 use super::triggers;
+use super::upgrade_packages;
 use super::users;
 
 /// Server REST API 契约。
@@ -84,6 +85,16 @@ use super::users;
         agents::register,
         agents::get_one,
         agents::patch,
+        agents::upgrade_all,
+        agents::upgrade_one,
+        agents::workspace_list,
+        agents::workspace_clean,
+        agents::cache_list,
+        agents::cache_delete,
+        upgrade_packages::upload,
+        upgrade_packages::list,
+        upgrade_packages::delete,
+        upgrade_packages::download,
     ),
     components(schemas(
         health::Healthz,
@@ -147,6 +158,16 @@ use super::users;
         agents::RegisterAgentResponse,
         agents::VolumeUsageDto,
         agents::DiskUsageDto,
+        agents::VersionDto,
+        agents::UpgradeCommandRequest,
+        agents::UpgradeIssuedSummary,
+        agents::WorkspaceCleanRequest,
+        agents::CacheDeleteRequest,
+        agents::WorkspaceEntryDto,
+        agents::WorkspaceListResponse,
+        agents::CacheEntryDto,
+        agents::CacheListResponse,
+        upgrade_packages::UpgradePackageResponse,
     )),
     tags(
         (name = "infra", description = "探针与基础设施端点"),
@@ -161,6 +182,7 @@ use super::users;
         (name = "users", description = "用户管理（全局 admin：建/列/禁用/重置，票 B2b-T4）与用户目录（项目 admin 的最小只读清单，票 B2b-T5）"),
         (name = "audit", description = "审计回放（票 B2b-T7：安全事件只增记账，仅全局 admin 可查询——按时间/用户/项目/事件类型过滤 + 分页）"),
         (name = "agents", description = "Agent 注册面（票 B2c-T3：建条目/启停/编辑/详情——全局 admin 专属；token 与注册码明文仅在创建响应出现一次）"),
+        (name = "upgrade-packages", description = "升级包管理（票 #76，ADR-0017：admin 上传/列表/删除 + Agent token 鉴权下载；文件名解析版本/目标三元组、窗口校验）"),
     )
 )]
 pub struct ApiDoc;

@@ -30,14 +30,22 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+use sisyphus_proto::agent::{
+    CacheCommand, CacheDeleteRequest as PCacheDelete, CacheListRequest,
+    WorkspaceCleanRequest as PWorkspaceClean, WorkspaceCommand, WorkspaceListRequest,
+    cache_command::Kind as CacheKind, channel_message::Kind,
+    workspace_command::Kind as WorkspaceKind,
+};
 use utoipa::ToSchema;
 
 use super::AppState;
 use super::error::{ApiError, ErrorBody, ValidationIssue, parse_body};
 use super::policy::RequireGlobalAdmin;
+use super::upgrade_packages::agent_download_path;
 use crate::auth::{TokenFamily, generate_register_code, generate_token, token_hash};
+use crate::grpc::{AwaitError, AwaitKind};
 use crate::store::StoreError;
-use crate::store::agents::{AgentRow, NewAgent, VolumeUsage};
+use crate::store::agents::{AgentRow, NewAgent, PendingUpgrade, VolumeUsage};
 use crate::store::audit::AuditEvent;
 use crate::store::jobs::JobRepo;
 use crate::store::now_ms;
@@ -102,10 +110,46 @@ pub struct AgentResponse {
     /// 磁盘占用（ADR-0019：卷级/缓存/工作区最近采样；从未上报为空）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_usage: Option<DiskUsageDto>,
+    /// 握手上报的 Agent 版本（ADR-0017；从未握手为空）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_version: Option<VersionDto>,
+    /// 版本是否兼容（落在 N-1 窗口内；过旧/过新为 false，ADR-0017 四态派生面）。
+    pub version_compatible: bool,
+    /// 排空/升级中（在线但不可派发——pending 升级指令或 draining/downloading/
+    /// swapping/restarting 阶段；fallback 与无升级为 false，ADR-0017）。
+    pub draining: bool,
+    /// 升级阶段（draining/downloading/swapping/restarting/fallback；无升级为空）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upgrade_phase: Option<String>,
+    /// 升级失败原因（fallback 时记；否则为空）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upgrade_error: Option<String>,
     /// 创建时间（Unix 毫秒）。
     pub created_at: i64,
     /// 最后更新时间（Unix 毫秒）。
     pub updated_at: i64,
+}
+
+/// 语义版本号（与 proto `Version` 同构；握手版本落库后回显）。
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+pub struct VersionDto {
+    /// 主版本。
+    pub major: u32,
+    /// 次版本。
+    pub minor: u32,
+    /// 补丁版本。
+    pub patch: u32,
+}
+
+impl VersionDto {
+    /// 从 store [`AgentVersion`](crate::store::agents::AgentVersion) 转。
+    pub fn from_agent(v: crate::store::agents::AgentVersion) -> Self {
+        Self {
+            major: v.major,
+            minor: v.minor,
+            patch: v.patch,
+        }
+    }
 }
 
 /// 卷级磁盘占用（详情视图）。
@@ -165,6 +209,89 @@ pub struct RegisterAgentResponse {
     /// per-Agent 通道 token（`sisa_` + 43 字符）。请立即保存：注册码兑完
     /// 即作废，本响应是 token 唯一一次出现（此后直连不再需要注册码）。
     pub token: String,
+}
+
+/// 升级指令请求体（全局 admin；全量与单台共用）。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpgradeCommandRequest {
+    /// 目标升级包名（ADR-0010 规范 `sisyphus-agent-<ver>-<os>-<arch>`；已上传）。
+    pub package_name: String,
+}
+
+/// 全量升级受理摘要（202）。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UpgradeIssuedSummary {
+    /// 目标升级包名。
+    pub package_name: String,
+    /// 已下发（含在线即送与离线挂起补发）的 Agent 数。
+    pub issued: u64,
+    /// 跳过数（已在目标版本，无需升级）。
+    pub skipped: u64,
+}
+
+/// 工作区清理请求体（per-Agent；pipeline/job 皆空 = 全清，job 空 = 该 pipeline 全部）。
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct WorkspaceCleanRequest {
+    /// pipeline 名（空 = 全清）。
+    #[serde(default)]
+    pub pipeline: Option<String>,
+    /// 任务名（空 = 清该 pipeline 全部）。
+    #[serde(default)]
+    pub job: Option<String>,
+}
+
+/// 缓存删除请求体（per-Agent；key 空 = 全清）。
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct CacheDeleteRequest {
+    /// 缓存 key（空 = 全清；非空 = 跨 pipeline 匹配完整 key）。
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+/// 工作区条目（per-Agent 列表，经通道往返；ADR-0011）。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WorkspaceEntryDto {
+    /// pipeline 名。
+    pub pipeline: String,
+    /// 任务名。
+    pub job: String,
+    /// 工作区绝对路径（Agent 侧）。
+    pub path: String,
+    /// 最近使用时刻（Unix 毫秒）。
+    pub last_used_at_ms: i64,
+}
+
+/// 工作区列表响应（per-Agent，经通道往返）。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WorkspaceListResponse {
+    /// 工作区条目。
+    pub entries: Vec<WorkspaceEntryDto>,
+}
+
+/// 缓存条目（per-Agent 列表，经通道往返；ADR-0012）。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CacheEntryDto {
+    /// 缓存 key（含 files 哈希后缀）。
+    pub key: String,
+    /// 所属 pipeline。
+    pub pipeline: String,
+    /// 字节数。
+    pub size_bytes: i64,
+    /// 最近使用时刻（Unix 毫秒）。
+    pub last_used_at_ms: i64,
+}
+
+/// 缓存列表响应（per-Agent，经通道往返）。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CacheListResponse {
+    /// 缓存条目。
+    pub entries: Vec<CacheEntryDto>,
+}
+
+/// 升级指令中填给 Agent 的 `download_url`（共享构造，见
+/// [`super::upgrade_packages::agent_download_path`]——路由定义在那，此处只引用）。
+fn upgrade_download_url(package_name: &str) -> String {
+    agent_download_path(package_name)
 }
 
 /// 建 Agent 条目（全局 admin）：签发 token + 注册码，落库行（离线、未
@@ -475,8 +602,377 @@ pub async fn patch(
     Ok(Json(to_response(&state, updated).await?))
 }
 
-/// 组装管理视图：并发读在途任务数（槽位占用，ADR-0008 中心化计数）与
-/// 磁盘占用解析（脏 JSON 视为库损坏）。
+// -----------------------------------------------------------------------
+// 升级指令（B5-T4，ADR-0017）：全量 / 单台。升级指令持久化（pending_upgrade）
+// + 在线即送（经通道）、离线挂起（重连补发由 sched 兑现）。排空由 Agent 侧
+// 自驱动（收到指令即排空，ADR-0017），server 只下发 + 读 UpgradeStatus。
+// -----------------------------------------------------------------------
+
+/// 全量升级（全局 admin）：向所有「版本非目标包」的未停用 Agent 下发升级
+/// 指令。在线即送、离线挂起（重连补发）；已在目标版本者跳过（免无谓排空重启）。
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents/upgrade",
+    tag = "agents",
+    request_body = UpgradeCommandRequest,
+    responses(
+        (status = 202, description = "已受理：issued 在线/挂起下发数，skipped 已在目标版本数", body = UpgradeIssuedSummary),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody),
+        (status = 404, description = "升级包不存在", body = ErrorBody),
+        (status = 422, body = ErrorBody),
+    )
+)]
+pub async fn upgrade_all(
+    State(state): State<AppState>,
+    RequireGlobalAdmin(auth): RequireGlobalAdmin,
+    body: Bytes,
+) -> Result<(StatusCode, Json<UpgradeIssuedSummary>), ApiError> {
+    let req: UpgradeCommandRequest = parse_body(&body)?;
+    validate_upgrade_request(&req)?;
+    let pkg = state
+        .upgrade_package_meta
+        .find(&req.package_name)
+        .await?
+        .ok_or_else(|| ApiError::resource_not_found(format!("升级包 {} 不存在", req.package_name)))?;
+    let pending = PendingUpgrade {
+        package_name: pkg.package_name.clone(),
+        sha256: pkg.sha256.clone(),
+        download_url: upgrade_download_url(&pkg.package_name),
+    };
+    let cmd = upgrade_message(&pending);
+
+    let mut issued: u64 = 0;
+    let mut skipped: u64 = 0;
+    let mut targets: Vec<String> = Vec::new();
+    for agent in state.agents.list().await? {
+        if agent.disabled {
+            continue; // 停用 Agent 连不上，下发了也不送达
+        }
+        // 已在目标版本：跳过（免无谓排空重启；强制重装同版本是 v2 需求）。
+        if agent.agent_version().unwrap_or(None) == Some(pkg.version) {
+            skipped += 1;
+            continue;
+        }
+        state.agents.set_pending_upgrade(agent.id, &pending).await?;
+        // 在线即送、离线挂起（pending 已记，重连补发）；发送结果不区分送达/离线。
+        let _ = state.agent_sessions.send(agent.id, cmd.clone()).await;
+        issued += 1;
+        targets.push(agent.name);
+    }
+    state
+        .audit
+        .insert(
+            now_ms(),
+            &auth.username,
+            AuditEvent::UpgradeCommandIssued,
+            None,
+            Some(&serde_json::json!({ "package": pkg.package_name, "agents": targets }).to_string()),
+        )
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(UpgradeIssuedSummary {
+            package_name: pkg.package_name,
+            issued,
+            skipped,
+        }),
+    ))
+}
+
+/// 单台升级（全局 admin）：强制该 Agent 升级到目标包。已在目标版本 → 409。
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents/{name}/upgrade",
+    tag = "agents",
+    request_body = UpgradeCommandRequest,
+    params(("name" = String, Path, description = "构建机名")),
+    responses(
+        (status = 202, description = "已受理，返回落定后的 Agent（含升级阶段）", body = AgentResponse),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody),
+        (status = 404, description = "Agent 或升级包不存在", body = ErrorBody),
+        (status = 409, description = "Agent 已在目标版本", body = ErrorBody),
+        (status = 422, body = ErrorBody),
+    )
+)]
+pub async fn upgrade_one(
+    State(state): State<AppState>,
+    RequireGlobalAdmin(auth): RequireGlobalAdmin,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<AgentResponse>), ApiError> {
+    let req: UpgradeCommandRequest = parse_body(&body)?;
+    validate_upgrade_request(&req)?;
+    let row = state
+        .agents
+        .get_by_name(&name)
+        .await?
+        .ok_or_else(|| ApiError::resource_not_found(format!("Agent {name} 不存在")))?;
+    let pkg = state
+        .upgrade_package_meta
+        .find(&req.package_name)
+        .await?
+        .ok_or_else(|| ApiError::resource_not_found(format!("升级包 {} 不存在", req.package_name)))?;
+    if row.agent_version().unwrap_or(None) == Some(pkg.version) {
+        return Err(ApiError::conflict(format!(
+            "Agent {name} 已在目标版本 {}.{}.{}",
+            pkg.version.major, pkg.version.minor, pkg.version.patch
+        )));
+    }
+    let pending = PendingUpgrade {
+        package_name: pkg.package_name.clone(),
+        sha256: pkg.sha256.clone(),
+        download_url: upgrade_download_url(&pkg.package_name),
+    };
+    state.agents.set_pending_upgrade(row.id, &pending).await?;
+    let _ = state
+        .agent_sessions
+        .send(row.id, upgrade_message(&pending))
+        .await;
+    state
+        .audit
+        .insert(
+            now_ms(),
+            &auth.username,
+            AuditEvent::UpgradeCommandIssued,
+            None,
+            Some(&serde_json::json!({ "package": pkg.package_name, "agents": [name] }).to_string()),
+        )
+        .await?;
+    let updated = state.agents.get(row.id).await?.expect("刚更新的行必存在");
+    Ok((StatusCode::ACCEPTED, Json(to_response(&state, updated).await?)))
+}
+
+/// 升级指令请求校验：package_name 非空。
+fn validate_upgrade_request(req: &UpgradeCommandRequest) -> Result<(), ApiError> {
+    if req.package_name.trim().is_empty() {
+        return Err(ApiError::validation(
+            "升级指令校验失败",
+            vec![ValidationIssue {
+                path: "package_name".into(),
+                message: "升级包名不能为空".into(),
+            }],
+        ));
+    }
+    Ok(())
+}
+
+/// `PendingUpgrade` → 下行 `ChannelMessage`（UpgradeCommand）。三字段映射由
+/// [`PendingUpgrade::to_upgrade_command`] 单点构造（与 sched 补发共用，免两处漂移）。
+fn upgrade_message(cmd: &PendingUpgrade) -> sisyphus_proto::agent::ChannelMessage {
+    sisyphus_proto::agent::ChannelMessage {
+        kind: Some(Kind::Upgrade(cmd.to_upgrade_command())),
+    }
+}
+
+// -----------------------------------------------------------------------
+// 工作区 / 缓存清理（B5-T4，ADR-0011/0012）：per-Agent 经通道转发 Agent 侧
+// 既有指令。列表经 send_and_await 往返；清理/删除 fire-and-forget（Agent 侧
+// 无 ack，仅记日志）。离线 Agent → 409；列表超时 → 504。
+// -----------------------------------------------------------------------
+
+/// 工作区列表（全局 admin；经通道往返）。
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents/{name}/workspace/list",
+    tag = "agents",
+    params(("name" = String, Path, description = "构建机名")),
+    responses(
+        (status = 200, description = "工作区条目（经通道往返）", body = WorkspaceListResponse),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody),
+        (status = 404, description = "Agent 不存在", body = ErrorBody),
+        (status = 409, description = "Agent 离线", body = ErrorBody),
+        (status = 504, description = "Agent 在线但未在窗口内回响应", body = ErrorBody),
+    )
+)]
+pub async fn workspace_list(
+    State(state): State<AppState>,
+    RequireGlobalAdmin(_auth): RequireGlobalAdmin,
+    Path(name): Path<String>,
+) -> Result<Json<WorkspaceListResponse>, ApiError> {
+    let row = agent_row(&state, &name).await?;
+    let msg = sisyphus_proto::agent::ChannelMessage {
+        kind: Some(Kind::WorkspaceCmd(WorkspaceCommand {
+            kind: Some(WorkspaceKind::List(WorkspaceListRequest {})),
+        })),
+    };
+    let resp = state
+        .agent_sessions
+        .send_and_await(row.id, msg, AwaitKind::WorkspaceList)
+        .await
+        .map_err(|e| await_to_api_error(e, &name))?;
+    let list = match resp.kind {
+        Some(Kind::WorkspaceList(l)) => l,
+        _ => return Err(ApiError::internal("workspace list", &"响应帧非 WorkspaceList")),
+    };
+    Ok(Json(WorkspaceListResponse {
+        entries: list
+            .entries
+            .into_iter()
+            .map(|e| WorkspaceEntryDto {
+                pipeline: e.pipeline,
+                job: e.job,
+                path: e.path,
+                last_used_at_ms: e.last_used_at_ms,
+            })
+            .collect(),
+    }))
+}
+
+/// 工作区清理（全局 admin；fire-and-forget，Agent 侧无 ack）。
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents/{name}/workspace/clean",
+    tag = "agents",
+    request_body = WorkspaceCleanRequest,
+    params(("name" = String, Path, description = "构建机名")),
+    responses(
+        (status = 202, description = "已下发清理指令"),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody),
+        (status = 404, description = "Agent 不存在", body = ErrorBody),
+        (status = 409, description = "Agent 离线", body = ErrorBody),
+    )
+)]
+pub async fn workspace_clean(
+    State(state): State<AppState>,
+    RequireGlobalAdmin(_auth): RequireGlobalAdmin,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    let req: WorkspaceCleanRequest = parse_body(&body)?;
+    let row = agent_row(&state, &name).await?;
+    let msg = sisyphus_proto::agent::ChannelMessage {
+        kind: Some(Kind::WorkspaceCmd(WorkspaceCommand {
+            kind: Some(WorkspaceKind::Clean(PWorkspaceClean {
+                pipeline: req.pipeline.unwrap_or_default(),
+                job: req.job.unwrap_or_default(),
+            })),
+        })),
+    };
+    deliver_fire_and_forget(&state, row.id, msg, &name).await
+}
+
+/// 缓存列表（全局 admin；经通道往返）。
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents/{name}/cache/list",
+    tag = "agents",
+    params(("name" = String, Path, description = "构建机名")),
+    responses(
+        (status = 200, description = "缓存条目（经通道往返）", body = CacheListResponse),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody),
+        (status = 404, description = "Agent 不存在", body = ErrorBody),
+        (status = 409, description = "Agent 离线", body = ErrorBody),
+        (status = 504, description = "Agent 在线但未在窗口内回响应", body = ErrorBody),
+    )
+)]
+pub async fn cache_list(
+    State(state): State<AppState>,
+    RequireGlobalAdmin(_auth): RequireGlobalAdmin,
+    Path(name): Path<String>,
+) -> Result<Json<CacheListResponse>, ApiError> {
+    let row = agent_row(&state, &name).await?;
+    let msg = sisyphus_proto::agent::ChannelMessage {
+        kind: Some(Kind::CacheCmd(CacheCommand {
+            kind: Some(CacheKind::List(CacheListRequest {})),
+        })),
+    };
+    let resp = state
+        .agent_sessions
+        .send_and_await(row.id, msg, AwaitKind::CacheList)
+        .await
+        .map_err(|e| await_to_api_error(e, &name))?;
+    let list = match resp.kind {
+        Some(Kind::CacheList(l)) => l,
+        _ => return Err(ApiError::internal("cache list", &"响应帧非 CacheList")),
+    };
+    Ok(Json(CacheListResponse {
+        entries: list
+            .entries
+            .into_iter()
+            .map(|e| CacheEntryDto {
+                key: e.key,
+                pipeline: e.pipeline,
+                size_bytes: e.size_bytes,
+                last_used_at_ms: e.last_used_at_ms,
+            })
+            .collect(),
+    }))
+}
+
+/// 缓存删除（全局 admin；fire-and-forget，Agent 侧无 ack）。
+#[utoipa::path(
+    post,
+    path = "/api/v1/agents/{name}/cache/delete",
+    tag = "agents",
+    request_body = CacheDeleteRequest,
+    params(("name" = String, Path, description = "构建机名")),
+    responses(
+        (status = 202, description = "已下发删除指令"),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody),
+        (status = 404, description = "Agent 不存在", body = ErrorBody),
+        (status = 409, description = "Agent 离线", body = ErrorBody),
+    )
+)]
+pub async fn cache_delete(
+    State(state): State<AppState>,
+    RequireGlobalAdmin(_auth): RequireGlobalAdmin,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    let req: CacheDeleteRequest = parse_body(&body)?;
+    let row = agent_row(&state, &name).await?;
+    let msg = sisyphus_proto::agent::ChannelMessage {
+        kind: Some(Kind::CacheCmd(CacheCommand {
+            kind: Some(CacheKind::Delete(PCacheDelete {
+                key: req.key.unwrap_or_default(),
+            })),
+        })),
+    };
+    deliver_fire_and_forget(&state, row.id, msg, &name).await
+}
+
+/// 按名取 Agent 行（404 不存在）。
+async fn agent_row(state: &AppState, name: &str) -> Result<AgentRow, ApiError> {
+    state
+        .agents
+        .get_by_name(name)
+        .await?
+        .ok_or_else(|| ApiError::resource_not_found(format!("Agent {name} 不存在")))
+}
+
+/// 经通道往返错误 → API 错误（离线 409 / 超时 504）。
+fn await_to_api_error(e: AwaitError, name: &str) -> ApiError {
+    match e {
+        AwaitError::Offline => ApiError::conflict(format!("Agent {name} 离线，无法经通道查询")),
+        AwaitError::Timeout => {
+            ApiError::gateway_timeout(format!("Agent {name} 经通道查询超时，请重试"))
+        }
+    }
+}
+
+/// fire-and-forget 指令下发：在线 → 202；离线 → 409；通道错误 → 500。
+async fn deliver_fire_and_forget(
+    state: &AppState,
+    agent_id: i64,
+    msg: sisyphus_proto::agent::ChannelMessage,
+    name: &str,
+) -> Result<StatusCode, ApiError> {
+    match state.agent_sessions.send(agent_id, msg).await {
+        Ok(true) => Ok(StatusCode::ACCEPTED),
+        Ok(false) => Err(ApiError::conflict(format!("Agent {name} 离线，指令未送达"))),
+        Err(e) => Err(ApiError::internal("agent command deliver", &e)),
+    }
+}
+
+/// 组装管理视图：并发读在途任务数（槽位占用，ADR-0008 中心化计数）、磁盘
+/// 占用解析（脏 JSON 视为库损坏），与升级面派生字段（版本/排空/升级阶段，
+/// ADR-0017 四态派生的真值面）。
 async fn to_response(state: &AppState, row: AgentRow) -> Result<AgentResponse, ApiError> {
     let active_jobs = JobRepo::new(state.pool.clone())
         .active_by_agent(row.id)
@@ -494,6 +990,16 @@ async fn to_response(state: &AppState, row: AgentRow) -> Result<AgentResponse, A
         cache_bytes: u.cache_bytes,
         workspace_bytes: u.workspace_bytes,
     });
+    let server_version = state.agents.server_version();
+    // 派生字段先算（仅借用 row），再在 struct literal 里 move row.name 等字段。
+    let agent_version = row.agent_version()?.map(VersionDto::from_agent);
+    let version_compatible = !row.version_incompatible(&server_version)?; // 脏 JSON 透传 5xx
+    // 徽标「排空」取 Agent 已上报的升级阶段（upgrade_active），不含 pending_upgrade
+    // ——pending 是「指令已排队未回执」，Agent 尚未开始排空（离线时更是从未收到），
+    // 对其标「排空」是误报。调度派发门另用 mid_upgrade（pending 也挡）。
+    let draining = row.upgrade_active();
+    let upgrade_phase = row.upgrade_phase.clone();
+    let upgrade_error = row.upgrade_error.clone();
     Ok(AgentResponse {
         name: row.name,
         online: row.online,
@@ -506,6 +1012,11 @@ async fn to_response(state: &AppState, row: AgentRow) -> Result<AgentResponse, A
         active_jobs,
         last_seen_at: row.last_seen_at,
         disk_usage,
+        agent_version,
+        version_compatible,
+        draining,
+        upgrade_phase,
+        upgrade_error,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })

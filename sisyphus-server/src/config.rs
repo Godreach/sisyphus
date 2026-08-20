@@ -32,6 +32,8 @@ pub const DB_FILE_NAME: &str = "sisyphus.db";
 pub const MASTER_KEY_FILE_NAME: &str = "master.key";
 /// 数据目录内的产物存储子目录名（ADR-0004）。
 pub const ARTIFACTS_DIR: &str = "artifacts";
+/// 数据目录内的升级包存储子目录名（ADR-0017：管理员上传的 agent 发行包）。
+pub const UPGRADE_PACKAGES_DIR: &str = "upgrade-packages";
 /// 数据目录内的迁移前备份子目录名（ADR-0010）。
 pub const BACKUPS_DIR: &str = "backups";
 /// 数据目录内的静态资源本地覆盖子目录名（数据目录布局 ADR-0010；分层
@@ -247,8 +249,8 @@ impl Config {
     /// 与环境变量及 CLI 覆盖层合并（ADR-0010）。环境变量层由调用方注入
     /// （生产路径传 [`Overrides::from_env`]，测试传空层保证封闭）。
     pub fn load(data_dir: PathBuf, cli: Overrides, env: Overrides) -> Result<Config, ConfigError> {
-        // 数据目录布局（ADR-0010）：数据库文件落在根，产物与迁移备份各占子目录。
-        for sub in [ARTIFACTS_DIR, BACKUPS_DIR] {
+        // 数据目录布局（ADR-0010）：数据库文件落在根，产物/升级包/迁移备份各占子目录。
+        for sub in [ARTIFACTS_DIR, UPGRADE_PACKAGES_DIR, BACKUPS_DIR] {
             std::fs::create_dir_all(data_dir.join(sub))?;
         }
 
