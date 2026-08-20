@@ -47,19 +47,20 @@ use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::{Request, Response, Status, Streaming};
 
-/// 等到谓词成立或超时（异步轮询，10s 上限，避免 flaky）。
+/// 等到谓词成立或超时（异步轮询，15s 上限，避免 flaky——CI Windows
+/// runner 上 spawn pwsh + gRPC 回传链路抖动需更宽上限）。
 async fn wait_until<F, Fut>(mut f: F)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    for _ in 0..100 {
+    for _ in 0..150 {
         if f().await {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("条件在 10s 内未成立");
+    panic!("条件在 15s 内未成立");
 }
 
 /// sha256 → 小写 hex（与 upgrader 内部同算法）。

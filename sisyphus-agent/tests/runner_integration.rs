@@ -42,19 +42,20 @@ use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::{Request, Response, Status, Streaming};
 
-/// 等到谓词成立或超时（异步轮询，5s 上限，避免 flaky）。
+/// 等到谓词成立或超时（异步轮询，15s 上限，避免 CI Windows runner 上
+/// spawn pwsh + gRPC 回传链路抖动致 flaky）。
 async fn wait_until<F, Fut>(mut f: F)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    for _ in 0..100 {
+    for _ in 0..300 {
         if f().await {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("条件在 5s 内未成立");
+    panic!("条件在 15s 内未成立");
 }
 
 /// 平台默认解释器能跑的「退出码 N」命令（Unix sh / Windows pwsh+cmd 均认 `exit <code>`）。

@@ -55,19 +55,20 @@ fn version(major: u32, minor: u32, patch: u32) -> Version {
     }
 }
 
-/// 等到谓词成立或超时（异步路径轮询驱动，避免 flaky；5s 上限）。
+/// 等到谓词成立或超时（异步路径轮询驱动，避免 flaky；15s 上限，
+/// 缓 CI Windows runner 上 spawn pwsh + gRPC 回传链路抖动）。
 async fn wait_until<F, Fut>(mut f: F)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    for _ in 0..50 {
+    for _ in 0..150 {
         if f().await {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("条件在 5s 内未成立");
+    panic!("条件在 15s 内未成立");
 }
 
 // ============================================================
