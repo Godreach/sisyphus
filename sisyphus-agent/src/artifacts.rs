@@ -245,11 +245,17 @@ fn io_err(e: std::io::Error) -> ArtifactError {
     ArtifactError::Io(e.to_string())
 }
 
-/// workspace 相对路径安全拼接：拒绝绝对路径与 `..` 逃逸（声明经 Server
+/// workspace 相对路径安全拼接：拒绝根路径与 `..` 逃逸（声明经 Server
 /// 端 model 校验，此处防御性兜底——容器/宿主两后端共用工作区根）。
+///
+/// 用 [`Path::has_root`] 而非 [`Path::is_absolute`] 判根：Windows 上裸
+/// `/etc/passwd`、`\foo` 这类以分隔符开头的路径 `is_absolute` 为 false
+/// （绝对路径要求盘符 `C:\` 或 UNC），会漏过拦截并被 `join` 替换掉
+/// workspace 前缀逃逸；`has_root` 对盘符/裸分隔符/UNC 一律判 true，跨
+/// 平台一致拒绝。
 pub fn safe_join(ws_dir: &Path, relative: &str) -> Result<PathBuf, ArtifactError> {
     let rel = Path::new(relative);
-    if rel.is_absolute()
+    if rel.has_root()
         || rel
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
@@ -280,6 +286,13 @@ mod tests {
         assert!(safe_join(ws, "/etc/passwd").is_err());
         assert!(safe_join(ws, "../escape").is_err());
         assert!(safe_join(ws, "a/../../escape").is_err());
+        // Windows 盘符绝对路径：拒绝（is_absolute 在此为 true，但同款兜底，
+        // 与裸 `/` 路径一并钉死 Windows 逃逸向量）。
+        #[cfg(windows)]
+        {
+            assert!(safe_join(ws, "C:\\windows\\system32").is_err());
+            assert!(safe_join(ws, r"\root").is_err());
+        }
     }
 
     #[tokio::test]
