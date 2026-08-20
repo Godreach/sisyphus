@@ -281,7 +281,10 @@ mod tests {
                 name: "CARGO_HOME".into(),
                 value: "${SISY_WORKSPACE}/.cargo".into(),
             }],
-            notification: Some(sisyphus_model::pipeline::Notification { on_success: true }),
+            notification: Some(sisyphus_model::pipeline::Notification {
+                on_success: true,
+                ..Default::default()
+            }),
             stages: vec![Stage {
                 name: "build".into(),
                 when: Some("${SISY_BRANCH} == \"main\"".into()),

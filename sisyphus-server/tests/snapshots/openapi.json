@@ -1103,7 +1103,8 @@
                 "scm_credential_set",
                 "upgrade_package_uploaded",
                 "upgrade_package_deleted",
-                "upgrade_command_issued"
+                "upgrade_command_issued",
+                "smtp_config_changed"
               ]
             }
           },
@@ -1583,6 +1584,106 @@
           },
           "404": {
             "description": "id 不存在或不属于当前用户（不暴露存在性）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/smtp": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "读全局 SMTP 配置（脱敏）。",
+        "operationId": "get",
+        "responses": {
+          "200": {
+            "description": "全局 SMTP 配置脱敏态（未配置时 configured=false、config 省略）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SmtpConfigState"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（需全局 admin）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "config"
+        ],
+        "summary": "写全局 SMTP 配置（全量；密码加密落库 + 变更入审计）。",
+        "operationId": "put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SmtpConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已写入，回脱敏态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SmtpConfigState"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（需全局 admin）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "输入校验失败",
             "content": {
               "application/json": {
                 "schema": {
@@ -5712,6 +5813,123 @@
           }
         }
       },
+      "SmtpConfigRequest": {
+        "type": "object",
+        "description": "PUT 请求：全量写。`password` 可选——`None`=保留旧密码、`Some`(非空)=更新、\n`Some`(空串)=清空。",
+        "required": [
+          "host",
+          "port",
+          "tls",
+          "from_address"
+        ],
+        "properties": {
+          "from_address": {
+            "type": "string",
+            "description": "发件人地址（邮件 From）。"
+          },
+          "host": {
+            "type": "string",
+            "description": "SMTP 主机。"
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "密码（可选：`None`=保留旧、`Some`=更新/空串清空；值永不回显）。"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int64",
+            "description": "SMTP 端口（1..=65535）。"
+          },
+          "tls": {
+            "$ref": "#/components/schemas/SmtpTls",
+            "description": "加密模式（none / starttls / implicit）。"
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SMTP AUTH 用户名（可空——无认证）。"
+          }
+        }
+      },
+      "SmtpConfigResponse": {
+        "type": "object",
+        "description": "脱敏的全局 SMTP 配置（GET 回形 / PUT 回形；密码值不回，回 `password_set` 布尔）。",
+        "required": [
+          "host",
+          "port",
+          "tls",
+          "from_address",
+          "password_set"
+        ],
+        "properties": {
+          "from_address": {
+            "type": "string",
+            "description": "发件人地址（邮件 From）。"
+          },
+          "host": {
+            "type": "string",
+            "description": "SMTP 主机。"
+          },
+          "password_set": {
+            "type": "boolean",
+            "description": "是否已设密码（密码值永不回显——只回布尔，ADR-0015 脱敏纪律）。"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int64",
+            "description": "SMTP 端口。"
+          },
+          "tls": {
+            "$ref": "#/components/schemas/SmtpTls",
+            "description": "加密模式。"
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SMTP AUTH 用户名（可空——无认证）。"
+          }
+        }
+      },
+      "SmtpConfigState": {
+        "type": "object",
+        "description": "GET 响应：是否已配置 + 脱敏配置（未配置时 `config` 省略）。",
+        "required": [
+          "configured"
+        ],
+        "properties": {
+          "config": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SmtpConfigResponse",
+                "description": "脱敏配置（未配置时省略）。"
+              }
+            ]
+          },
+          "configured": {
+            "type": "boolean",
+            "description": "是否已配置（单行表有无行）。"
+          }
+        }
+      },
+      "SmtpTls": {
+        "type": "string",
+        "description": "SMTP 加密模式（ADR-0015：`tls` 取值域单点收敛）。\n\n`none`=明文（不加密，仅内网/测试）、`starttls`=STARTTLS 升级（通常 587）、\n`implicit`=隐式 TLS 全程加密（通常 465）。serde `rename_all=lowercase` 与\n[`Self::as_str`] 一致——落库字符串与 JSON 形态同形。",
+        "enum": [
+          "none",
+          "starttls",
+          "implicit"
+        ]
+      },
       "StageViewDto": {
         "type": "object",
         "description": "阶段视图（构建详情内；阶段名取自构建快照）。",
@@ -6209,6 +6427,10 @@
     {
       "name": "audit",
       "description": "审计回放（票 B2b-T7：安全事件只增记账，仅全局 admin 可查询——按时间/用户/项目/事件类型过滤 + 分页）"
+    },
+    {
+      "name": "config",
+      "description": "全局配置（票 B5-T5：SMTP 发件配置——全局 admin 档；读脱敏 / 写全量 + 密码加密落库 + 变更入审计）"
     },
     {
       "name": "agents",

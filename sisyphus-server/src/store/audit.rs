@@ -69,12 +69,16 @@ pub enum AuditEvent {
     /// 下发升级指令（B5-T4，ADR-0017：全量/单台；detail 记包名 + 目标 Agent
     /// 名清单——指令值/下载 URL 不落审计）。
     UpgradeCommandIssued,
+    /// 全局 SMTP 配置变更（B5-T5，ADR-0015：全局配置变更是审计事件；detail 记
+    /// 非机密配置字段 + password_changed 布尔——密码值永不落审计，值形态在
+    /// 审计路径不存在）。全局资源、全局 admin 档（ADR-0014）。
+    SmtpConfigChanged,
 }
 
 impl AuditEvent {
     /// 全部事件类型（契约单点：`as_str` 映射 + [`Self::parse`] 识别 +
     /// OpenAPI enum 生成的共同来源——新增事件类型只改这里与 [`Self::as_str`]）。
-    pub const ALL: [AuditEvent; 22] = [
+    pub const ALL: [AuditEvent; 23] = [
         Self::LoginSuccess,
         Self::LoginFailure,
         Self::Logout,
@@ -97,6 +101,7 @@ impl AuditEvent {
         Self::UpgradePackageUploaded,
         Self::UpgradePackageDeleted,
         Self::UpgradeCommandIssued,
+        Self::SmtpConfigChanged,
     ];
 
     /// 落库 / 查询过滤文本（契约值；filter 参数按此匹配）。
@@ -124,6 +129,7 @@ impl AuditEvent {
             Self::UpgradePackageUploaded => "upgrade_package_uploaded",
             Self::UpgradePackageDeleted => "upgrade_package_deleted",
             Self::UpgradeCommandIssued => "upgrade_command_issued",
+            Self::SmtpConfigChanged => "smtp_config_changed",
         }
     }
 

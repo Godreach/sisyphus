@@ -16,6 +16,7 @@ use super::pipelines;
 use super::projects;
 use super::scm;
 use super::secrets;
+use super::smtp_config;
 use super::tokens;
 use super::triggers;
 use super::upgrade_packages;
@@ -80,6 +81,8 @@ use super::users;
         users::reset_password,
         users::directory,
         audit::list,
+        smtp_config::get,
+        smtp_config::put,
         agents::list,
         agents::create,
         agents::register,
@@ -150,6 +153,10 @@ use super::users;
         users::ResetPasswordRequest,
         users::DirectoryEntryResponse,
         audit::AuditEntryResponse,
+        smtp_config::SmtpConfigState,
+        smtp_config::SmtpConfigResponse,
+        smtp_config::SmtpConfigRequest,
+        crate::store::smtp_config::SmtpTls,
         agents::CreateAgentRequest,
         agents::PatchAgentRequest,
         agents::AgentResponse,
@@ -181,6 +188,7 @@ use super::users;
         (name = "triggers", description = "触发器管理（票 B2c-T6，ADR-0016：cron / poll 触发源 CRUD；项目 admin 档——列/建/改配置与启停；触发历史经 builds 行呈现）"),
         (name = "users", description = "用户管理（全局 admin：建/列/禁用/重置，票 B2b-T4）与用户目录（项目 admin 的最小只读清单，票 B2b-T5）"),
         (name = "audit", description = "审计回放（票 B2b-T7：安全事件只增记账，仅全局 admin 可查询——按时间/用户/项目/事件类型过滤 + 分页）"),
+        (name = "config", description = "全局配置（票 B5-T5：SMTP 发件配置——全局 admin 档；读脱敏 / 写全量 + 密码加密落库 + 变更入审计）"),
         (name = "agents", description = "Agent 注册面（票 B2c-T3：建条目/启停/编辑/详情——全局 admin 专属；token 与注册码明文仅在创建响应出现一次）"),
         (name = "upgrade-packages", description = "升级包管理（票 #76，ADR-0017：admin 上传/列表/删除 + Agent token 鉴权下载；文件名解析版本/目标三元组、窗口校验）"),
     )

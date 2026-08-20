@@ -20,6 +20,7 @@ pub mod projects;
 pub mod scm_credentials;
 pub mod secrets;
 pub mod sessions;
+pub mod smtp_config;
 pub mod tokens;
 pub mod triggers;
 pub mod upgrade_packages;
@@ -37,6 +38,7 @@ pub use artifacts::{
 };
 pub use logs::SqliteLogStore;
 pub use scm_credentials::ScmCredentialRepo;
+pub use smtp_config::{SmtpConfigRepo, SmtpTls};
 pub use traits::{
     ArtifactMeta, ArtifactMetaRepo, ArtifactStore, ByteStream, LogChunk, LogLocation, LogStore,
 };
@@ -281,6 +283,7 @@ mod tests {
             "logs",
             "artifacts",
             "project_scm_credentials",
+            "global_smtp_config",
         ] {
             assert!(
                 tables.iter().any(|t| t == expected),
@@ -336,6 +339,7 @@ mod tests {
             "DROP TABLE artifacts",
             "DROP TABLE upgrade_packages",
             "DROP TABLE project_scm_credentials",
+            "DROP TABLE global_smtp_config",
         ] {
             sqlx::raw_sql(stmt)
                 .execute(&pool)

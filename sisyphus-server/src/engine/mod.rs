@@ -62,6 +62,15 @@ pub struct TriggerDetail {
     pub params: Vec<ParameterOverride>,
 }
 
+/// 触发人：解析 builds.trigger_detail 的 JSON 取 [`TriggerDetail::by`]（损坏按
+/// 空串，不 500——与 REST 视图同纪律）。notify 终态通知与 builds REST 视图共用，
+/// 避免两处各写一遍 JSON 解析。
+pub fn trigger_by(detail: &str) -> String {
+    serde_json::from_str::<TriggerDetail>(detail)
+        .map(|d| d.by)
+        .unwrap_or_default()
+}
+
 /// 参数覆盖（「默认值，手动触发可覆盖」，ADR-0006）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParameterOverride {

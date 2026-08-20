@@ -611,10 +611,9 @@ fn build_summary(row: &BuildRow) -> BuildSummaryResponse {
 }
 
 /// 触发人：解析 builds.trigger_detail 的 TriggerDetail.by（损坏按空串，不 500）。
+/// 解析逻辑收敛在 [`crate::engine::trigger_by`]，notify 终态通知同源消费。
 fn trigger_by(row: &BuildRow) -> String {
-    serde_json::from_str::<TriggerDetail>(&row.trigger_detail)
-        .map(|d| d.by)
-        .unwrap_or_default()
+    crate::engine::trigger_by(&row.trigger_detail)
 }
 
 /// 耗时（毫秒）：已完成 = finished-started；运行中 = now-started；未运行 None。

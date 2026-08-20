@@ -57,9 +57,10 @@ export interface EnvVar {{
   value: string
 }}
 
-/** 通知配置（`on_success` serde `default` 无 skip → 永发）。 */
+/** 通知配置（`on_success`/`recipients` serde `default` 无 skip → 永发）。 */
 export interface Notification {{
   on_success: boolean
+  recipients: string[]
 }}
 
 /** 修订版本。 */

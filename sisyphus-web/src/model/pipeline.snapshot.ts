@@ -34,7 +34,11 @@ export const valid_full: Pipeline = {
   ],
   name: "demo",
   notification: {
-    on_success: true
+    on_success: true,
+    recipients: [
+      "dev@example.com",
+      "ops@example.com"
+    ]
   },
   parameters: [
     {

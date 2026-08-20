@@ -95,12 +95,19 @@ pub struct EnvVar {
     pub value: String,
 }
 
-/// 通知配置（ADR-0006/0008：pipeline 完成时发送；v1 仅邮件）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// 通知配置（ADR-0006/0008：pipeline 完成时发送；v1 仅邮件）。失败必发、成功按
+/// `on_success`；`recipients` 为空则通知跳过（不发送）——收件人在 pipeline 级配置，
+/// 随构建快照落库（ADR-0006）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Notification {
     /// 成功时是否发送（失败必发，不可配）。
     #[serde(default)]
     pub on_success: bool,
+    /// 收件人邮箱列表（ADR-0006：pipeline 级配置，v1 仅邮件）。空列表则通知
+    /// 跳过（不发送）；`#[serde(default)]` 无 skip → 序列化时永发该字段（空列表
+    /// 序列化为 `[]`，非省略），旧快照缺该字段反序列化为空（兼容）。
+    #[serde(default)]
+    pub recipients: Vec<String>,
 }
 
 /// 阶段：按序执行、阶段内任务并行（ADR-0006）。
@@ -303,7 +310,10 @@ mod tests {
                 name: "CARGO_HOME".into(),
                 value: "${SISY_WORKSPACE}/.cargo".into(),
             }],
-            notification: Some(Notification { on_success: true }),
+            notification: Some(Notification {
+                on_success: true,
+                ..Default::default()
+            }),
             stages: vec![Stage {
                 name: "build".into(),
                 when: None,

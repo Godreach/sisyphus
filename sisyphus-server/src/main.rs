@@ -134,8 +134,15 @@ async fn main() {
         }
         scheduler.run(scheduler_state.bus.clone()).await;
     });
-    // 构建终态通知钩子（票 #46 留位；notify 批次在此接 SMTP 发送）。
-    let _notifier = sisyphus_server::notify::spawn_notifier(state.bus.clone());
+    // 构建终态通知（票 B5-T5，ADR-0006/0014/0015）：终态构建按 pipeline 级
+    // notification 配置经全局 SMTP 配置发邮件（失败必发、成功按 on_success）。
+    // SmtpSender 持主密钥解密 SMTP 密码；未配置 / 收件人空 → 跳过并 trace，
+    // 发送失败不判败不重试。生产 lettre 发送器注入（测试缝 trait 在 notify 模块）。
+    let _notifier = sisyphus_server::notify::spawn_notifier(
+        state.bus.clone(),
+        state.clone(),
+        sisyphus_server::notify::SmtpSender::new(state.master_key),
+    );
 
     // 触发器装配（票 B2c-T6，ADR-0016）：触发引擎共享 engine + 事件总线，
     // 后台周期扫表（cron 按表达式命中触发、poll 按节奏轮询）。探测经 scm

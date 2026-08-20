@@ -37,6 +37,7 @@ pub mod policy;
 pub mod projects;
 pub mod scm;
 pub mod secrets;
+pub mod smtp_config;
 pub mod tokens;
 pub mod triggers;
 pub mod upgrade_packages;
@@ -73,6 +74,7 @@ use crate::store::projects::ProjectRepo;
 use crate::store::scm_credentials::ScmCredentialRepo;
 use crate::store::secrets::SecretRepo;
 use crate::store::sessions::SessionRepo;
+use crate::store::smtp_config::SmtpConfigRepo;
 use crate::store::tokens::PatRepo;
 use crate::store::triggers::TriggerRepo;
 use crate::store::upgrade_packages::{LocalDiskUpgradePackageStore, UpgradePackageRepo};
@@ -102,6 +104,9 @@ pub struct AppState {
     /// 项目 SCM 凭据 repo（票 B5-T3，ADR-0015/0016：加密落库 + 探测路径解密；
     /// create/项目设置可存取，poll 与测试连接解密后经 ASKPASS/递送探测）。
     pub scm_credentials: ScmCredentialRepo,
+    /// 全局 SMTP 配置 repo（票 B5-T5，ADR-0014/0015：单行发件配置，加密落库；
+    /// notify 终态发送路径读用，REST GET 转脱敏形态）。
+    pub smtp_config: SmtpConfigRepo,
     /// Agent 注册面 repo（票 B2c-T3：建条目/启停/编辑/在线维护/标签匹配；
     /// REST 面与 gRPC 通道认证面共用）。
     pub agents: AgentRepo,
@@ -176,6 +181,7 @@ impl AppState {
             members: MemberRepo::new(pool.clone()),
             secrets: SecretRepo::new(pool.clone()),
             scm_credentials: ScmCredentialRepo::new(pool.clone()),
+            smtp_config: SmtpConfigRepo::new(pool.clone()),
             agents: AgentRepo::new(pool.clone()),
             triggers: TriggerRepo::new(pool.clone()),
             audit: AuditRepo::new(pool.clone()),
@@ -316,6 +322,9 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
             get(triggers::get_one).patch(triggers::patch),
         )
         .route("/audit", get(audit::list))
+        // 全局 SMTP 配置（票 B5-T5，ADR-0014/0015：全局 admin 档；读脱敏 / 写全量 +
+        // 密码加密落库 + 变更入审计）。
+        .route("/config/smtp", get(smtp_config::get).put(smtp_config::put))
         .route("/upgrade-packages", get(upgrade_packages::list).post(upgrade_packages::upload))
         .route(
             "/upgrade-packages/{package_name}",

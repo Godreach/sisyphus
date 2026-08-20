@@ -127,7 +127,10 @@ fn full() -> Pipeline {
             name: "CARGO_HOME".into(),
             value: "${SISY_WORKSPACE}/.cargo".into(),
         }],
-        notification: Some(Notification { on_success: true }),
+        notification: Some(Notification {
+            on_success: true,
+            recipients: vec!["dev@example.com".into(), "ops@example.com".into()],
+        }),
         stages: vec![Stage {
             name: "build".into(),
             when: Some("${SISY_BRANCH} == \"main\"".into()),

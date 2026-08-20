@@ -42,6 +42,15 @@ chacha20poly1305.workspace = true
 cron.workspace = true
 chrono.workspace = true
 flate2.workspace = true
+# SMTP 发送（票 B5-T5，ADR-0006）：lettre + rustls TLS。lettre 本体纯 Rust；TLS
+# 后端 rustls 的加密提供方为 ring（含 C/asm）——纯 Rust TLS 实现不存在，ring 是
+# openssl/native-tls 之外最交叉编译友好的唯一选择。这是 SMTP 传输 TLS 对仓库
+# 「避 C 加密」立场（ADR-0015）的有界例外：机密值加密仍走纯 Rust chacha20poly1305，
+# 仅 SMTP 传输 TLS 用 ring。取舍裁定见 docs/adr/0022-smtp-tls-via-ring-exception.md。
+# default-features=false 排除 native-tls/openssl（dep tree 审计无二者）。6 目标矩阵
+# 原生构建归 B5-T10/CI；本地 Windows→Linux 交叉编译被既有 libsqlite3-sys + ring 的
+# C 工具链需求阻断（非 lettre 特有），不在此验。
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "builder", "smtp-transport"] }
 
 [dev-dependencies]
 tempfile = "3"
