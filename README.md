@@ -67,6 +67,25 @@ cargo test --workspace                         # 测试
 cargo clippy --workspace -- -D warnings        # lint
 ```
 
+### 提交信息
+
+提交信息遵循 Conventional Commits——`<type>[(<scope>)][!]: <中文描述>`，type ∈ {feat,fix,docs,chore,style,refactor,perf,test,build,ci,revert}，scope 可选（如 `server`/`web`/`agent`）。feat/fix 末尾惯例带票号 `（票 #NN）`，body 末 `Closes #NN`。
+
+```bash
+# 正例
+feat: 产物链路——存储/端点/Agent 传输/前端产物区（票 #74）
+fix(web): headless 冒烟钉中文 locale——修 CI en-US 红灯
+docs: 补五 crate README——proto/model/codegen/server/agent 各一份 crate 根文档
+```
+
+本地 commit-msg hook 与 CI 会拦下缺 `type:` 前缀的 subject（如 `产物链路：…`）。启用本地 hook（一次性，本地配置不入 git）：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+完整规则与正例反例见 [docs/agents/commit-messages.md](docs/agents/commit-messages.md)。
+
 ### 数据库迁移工作流
 
 迁移 SQL 位于 `sisyphus-server/src/store/migrations/`，经 `sqlx::migrate!` 编译期嵌入——单二进制自带迁移（ADR-0009）。新增迁移后：
@@ -109,6 +128,10 @@ sisyphus-agent --server-url http://<server>:50051 --api-url http://<server>:8080
 注册成功 token 落 `<data>/token`（Unix 0600），后续启动读 token 直连、不再需要注册码；注册失败（无效/已用/过期/停用/网络不可达）明确报错退出。注册码一次性 + 24h 过期（ADR-0010）。
 
 数据目录布局（票 B3-T1 五处约定）：根放 `token`（per-Agent 凭据，注册批次落盘）与 `agent.json`（本地状态）两个文件位，`workspaces/`（工作区根，ADR-0011）、`cache/`（缓存根 + registry.json，ADR-0012）、`logbuf/`（断线日志缓冲，ADR-0007/0013）三个子目录。心跳间隔、重连退避等运行参数内置默认（15s 心跳；重连 1s 起、×2、上限 60s、±20% 抖动、永久重试），不对外暴露。
+
+## 贡献
+
+环境前置、质量门、提交规范、PR 流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 项目状态
 

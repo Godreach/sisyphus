@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# 校验给定 range 内每个提交的 subject（CI / 手动用）。
+# 用法：bash .githooks/lint-commits <range>
+#   range 例：origin/main..HEAD、HEAD~5..HEAD、HEAD（单条）
+# 规则详见 docs/agents/commit-messages.md。
+set -euo pipefail
+dir=$(cd "$(dirname "$0")" && pwd)
+. "$dir/commit-msg-lib.sh"
+
+range="${1:?用法: lint-commits <range>，如 origin/main..HEAD}"
+
+commits=$(git rev-list "$range" 2>/dev/null || true)
+if [ -z "$commits" ]; then
+  printf '%s\n' "（range 内无提交，跳过）"
+  exit 0
+fi
+
+fail=0
+while IFS= read -r sha; do
+  subject=$(git log -1 --format=%s "$sha")
+  if ! lint_subject "$subject"; then
+    printf '%s\n' "  ↳ 提交: $(git log -1 --format='%h %s' "$sha")" >&2
+    fail=1
+  fi
+done <<< "$commits"
+
+exit "$fail"

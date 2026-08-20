@@ -1,0 +1,3 @@
+# 钉 .githooks/ 下脚本行尾为 LF——防 Windows autocrlf 把脚本转 CRLF 致
+# `#!/usr/bin/env bash\r` 找不到解释器（本地 git bash 与 ubuntu CI 同坑）。
+.githooks/* eol=lf

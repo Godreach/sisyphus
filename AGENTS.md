@@ -13,3 +13,7 @@ Default triage labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-f
 ### Domain docs
 
 Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Commit messages
+
+Commit subjects follow Conventional Commits (`<type>[(<scope>)][!]: <Chinese subject>`). A local `commit-msg` hook (`.githooks/`, enable with `git config core.hooksPath .githooks`) and a CI job enforce the prefix. See `docs/agents/commit-messages.md`.
