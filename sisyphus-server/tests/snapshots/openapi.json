@@ -13,6 +13,161 @@
     "version": "1.0.0"
   },
   "paths": {
+    "/api/v1/agent/artifacts/{job_id}/downloads/{source_job}/{name}": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "Agent 依赖产物下载（agent token 鉴权，票 #74）：拉取本次构建内其它\n任务的产物。`job_id` 定位构建，`source_job`/`name` 定位产物（声明的\n来源任务名用于报错定位）。产物尚不存在 → 404 附清晰报错。",
+        "operationId": "agent_download",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "拉取任务自身行 id（由此定位构建）",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "source_job",
+            "in": "path",
+            "description": "声明的来源任务名（报错定位用）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "产物名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "产物字节流（响应头 Content-Length + X-Sisyphus-Sha256）",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "401": {
+            "description": "未认证（仅 Agent token `sisa_` 族可用）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "任务不存在 / 来源任务不存在 / 依赖产物尚不存在（未上传）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/artifacts/{job_id}/{name}": {
+      "post": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "Agent 产物上传（agent token 鉴权，票 #74 / ADR-0007）：请求体即产物\n字节（流式写盘，不整读内存），落定后记元数据行，返回大小 + 校验和。",
+        "operationId": "agent_upload",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "上传任务自身行 id（JobSpec.job_id 同源）",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "产物名（任务级声明；不得含路径分隔符）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "产物字节流（chunked/流式，服务端不设 v1 体积上限）",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "已落盘并记元数据",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactUploadedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证（仅 Agent token `sisa_` 族可用；PAT/会话 401）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "任务行不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "产物名非法（空/含路径分隔符/超长）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agent/register": {
       "post": {
         "tags": [
@@ -1662,6 +1817,173 @@
         }
       }
     },
+    "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/artifacts": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "构建产物列表（viewer 档，票 #74）：构建详情页产物区数据源。",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "description": "构建号",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "构建全部产物（按名排序）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BuildArtifactsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（需 viewer 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见，或构建号不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/artifacts/{artifact}": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "单产物下载（viewer 档，票 #74）：流式响应，响应头带大小\n（Content-Length）与校验和（X-Sisyphus-Sha256）。",
+        "operationId": "download",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "description": "构建号",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "artifact",
+            "in": "path",
+            "description": "产物名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "产物字节流（Content-Length = 大小，X-Sisyphus-Sha256 = 校验和）",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（需 viewer 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见，构建号或产物不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/cancel": {
       "post": {
         "tags": [
@@ -3050,6 +3372,62 @@
           }
         }
       },
+      "ArtifactDto": {
+        "type": "object",
+        "description": "产物条目（构建产物列表）。",
+        "required": [
+          "name",
+          "size",
+          "sha256",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "上传时刻（Unix 毫秒；重跑同名再传刷新）。"
+          },
+          "name": {
+            "type": "string",
+            "description": "产物名（任务级声明的上传名）。"
+          },
+          "sha256": {
+            "type": "string",
+            "description": "SHA-256 校验和（十六进制小写）。"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "字节数。",
+            "minimum": 0
+          }
+        }
+      },
+      "ArtifactUploadedResponse": {
+        "type": "object",
+        "description": "Agent 上传完成响应：落定的产物元数据（大小 + 校验和回执）。",
+        "required": [
+          "name",
+          "size",
+          "sha256"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "产物名。"
+          },
+          "sha256": {
+            "type": "string",
+            "description": "SHA-256 校验和（十六进制小写）。"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "字节数。",
+            "minimum": 0
+          }
+        }
+      },
       "AuditEntryResponse": {
         "type": "object",
         "description": "审计条目（detail 为 JSON 对象——机密事件只含名，永不出现值形态）。",
@@ -3118,6 +3496,22 @@
           "status": {
             "$ref": "#/components/schemas/BuildStatusDto",
             "description": "受理时状态（queued / running）。"
+          }
+        }
+      },
+      "BuildArtifactsResponse": {
+        "type": "object",
+        "description": "构建产物列表响应。",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtifactDto"
+            },
+            "description": "构建全部产物（按名排序）。"
           }
         }
       },
@@ -4384,6 +4778,10 @@
     {
       "name": "builds",
       "description": "构建生命周期（票 B2c-T5：手动触发 / 取消 / 重跑 / 列表 / 详情；runner 档触发/取消/重跑、viewer 档列表/详情）"
+    },
+    {
+      "name": "artifacts",
+      "description": "产物链路（票 #74，ADR-0004/0007：Agent token 鉴权的上传/依赖拉取 + viewer 档的构建产物列表/流式下载）"
     },
     {
       "name": "triggers",

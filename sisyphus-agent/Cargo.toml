@@ -27,7 +27,12 @@ tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "stream"] }
+# 产物上传/下载的请求/响应体流式化（票 #74：reqwest Body::wrap_stream /
+# bytes_stream 需 stream feature；workspace 已有）。
+futures.workspace = true
+# 上传请求体的流块类型（reqwest Body::wrap_stream 的元素；workspace 已有）。
+bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # 缓存 files 哈希后缀（ADR-0012：声明顺序拼接文件内容 sha256 前 12 位 hex）+
@@ -57,3 +62,6 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32
 
 [dev-dependencies]
 tempfile = "3"
+# 产物 HTTP 缝测试（票 #74）：极简 axum stub server 驱动真 reqwest client
+# （chunked 上传体/流式下载响应的语义由真 HTTP 栈保证，手写 TCP stub 不可靠）。
+axum.workspace = true

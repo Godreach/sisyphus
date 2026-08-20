@@ -79,6 +79,7 @@ pub async fn test_app_at_with(data_dir: &Path, registration_enabled: bool) -> Te
     .expect("测试主密钥");
     let state = AppState::new(
         pool.clone(),
+        data_dir.to_path_buf(),
         registration_enabled,
         master_key,
         sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES,

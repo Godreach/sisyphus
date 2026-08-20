@@ -15,11 +15,12 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 
-import { buildsApi, pipelinesApi } from '@/api/client'
+import { buildsApi, artifactsApi, pipelinesApi } from '@/api/client'
 import { isLiveStatus } from '@/utils/format'
 import type {
   BuildDetailResponse,
   BuildAcceptedResponse,
+  BuildArtifactsResponse,
   ModelPipeline,
   RerunBuildRequest,
   TriggerBuildRequest,
@@ -34,6 +35,8 @@ export type BuildDetailStatus = 'loading' | 'ready' | 'error' | 'not-found'
 export const useBuildDetailStore = defineStore('buildDetail', () => {
   const build = ref<BuildDetailResponse | null>(null)
   const definition = ref<ModelPipeline | null>(null)
+  /** 已上传产物清单（详情页产物区：声明 × 已上传比对）。 */
+  const artifacts = ref<BuildArtifactsResponse['items']>([])
   const status = ref<BuildDetailStatus>('loading')
   const errorMessage = ref('')
 
@@ -63,6 +66,12 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
     return job?.artifact_uploads ?? []
   }
 
+  /** 按名查已上传产物（产物区下载链接接上，票 #74）：未上传返回 null
+   *  （视图展示占位）；同名重传以列表最新为准。 */
+  function uploadedArtifact(name: string) {
+    return artifacts.value.find((a) => a.name === name) ?? null
+  }
+
   async function load(
     project: string,
     pipeline: string,
@@ -71,14 +80,17 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
     status.value = 'loading'
     errorMessage.value = ''
     try {
-      const [detail, defResp] = await Promise.all([
+      const [detail, defResp, arts] = await Promise.all([
         buildsApi.detail(project, pipeline, number),
         // 定义加载失败不阻塞详情（404 时无定义——产物/等待态退化为空）。
         pipelinesApi.getDefinition(project, pipeline).catch(() => null),
+        // 产物列表失败不阻塞详情（产物区退化为声明占位）。
+        artifactsApi.list(project, pipeline, number).catch(() => null),
       ])
       build.value = detail
       definition.value =
         (defResp?.definition as ModelPipeline | undefined) ?? null
+      artifacts.value = arts?.items ?? []
       status.value = 'ready'
       schedulePoll(project, pipeline, number)
     } catch (err) {
@@ -91,7 +103,8 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
     }
   }
 
-  /** 刷新详情（轮询与提交后共用；终态停轮询）。 */
+  /** 刷新详情（轮询与提交后共用；终态停轮询；产物列表随刷新同步——构建
+   *  推进中任务陆续上传产物，页面须跟上传态）。 */
   async function refresh(
     project: string,
     pipeline: string,
@@ -99,8 +112,12 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
   ): Promise<void> {
     if (status.value === 'not-found') return
     try {
-      const detail = await buildsApi.detail(project, pipeline, number)
+      const [detail, arts] = await Promise.all([
+        buildsApi.detail(project, pipeline, number),
+        artifactsApi.list(project, pipeline, number).catch(() => null),
+      ])
       build.value = detail
+      artifacts.value = arts?.items ?? []
       status.value = 'ready'
       schedulePoll(project, pipeline, number)
     } catch {
@@ -164,6 +181,7 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
     }
     build.value = null
     definition.value = null
+    artifacts.value = []
     status.value = 'loading'
     errorMessage.value = ''
   }
@@ -171,10 +189,12 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
   return {
     build,
     definition,
+    artifacts,
     status,
     errorMessage,
     jobLabels,
     jobArtifactUploads,
+    uploadedArtifact,
     load,
     refresh,
     trigger,

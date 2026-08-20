@@ -9,6 +9,7 @@ import type {
   AuditEntryResponse,
   AuditQuery,
   BuildAcceptedResponse,
+  BuildArtifactsResponse,
   BuildDetailResponse,
   BuildListResponse,
   BuildStatusDto,
@@ -236,4 +237,20 @@ export const buildsApi = {
     http.get<BuildDetailResponse>(
       `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}`,
     ),
+}
+
+/** 产物端点（后端 `api/artifacts.rs`，票 #74 / B5-T2，ADR-0004/0007）：构建
+ *  产物列表（详情页产物区）与单产物下载（cookie 会话随 `<a href>` 自动携
+ *  带，浏览器原生下载）。 */
+export const artifactsApi = {
+  /** 构建产物列表（viewer 档）：任务声明展示与已上传产物匹配的比对源。 */
+  list: (project: string, pipeline: string, number: number) =>
+    http.get<BuildArtifactsResponse>(
+      `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}/artifacts`,
+    ),
+
+  /** 单产物下载 URL（相对路径——cookie 会话随同源导航自动携带；响应头带
+   *  大小与校验和，浏览器原生下载）。 */
+  downloadUrl: (project: string, pipeline: string, number: number, name: string) =>
+    `api/v1/projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}/artifacts/${encodeURIComponent(name)}`,
 }

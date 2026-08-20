@@ -33,7 +33,12 @@
 //!   兜底判 failed，ADR-0008）。
 //! - **checkout 步骤**：交 [`crate::checkout`]（B3-T6 / #60）；容器任务在容器内
 //!   执行（镜像须带 git/svn，B3-T7 / #53）。
-//! - **产物上传/下载**：本批不做（仅留时序钩子位，票 #59 范围边界）。
+//! - **产物上传/下载**（票 #74，ADR-0006/0007/0008/0012）：下载依赖在步骤
+//!   执行前（工作区就位即拉，失败任务立刻 failed、detail 带服务端「依赖
+//!   产物尚不存在」等清晰消息）；上传在步骤全部成功、缓存 save 之后、
+//!   终态上报**之前**（传输经 [`crate::artifacts`] 的 REST 缝，不发 gRPC）
+//!   ——槽位占用到上传完成由时序保证：Server 只认终态上报释放槽位，上传
+//!   中任务不释放；上传失败不静默，任务上报 failed。
 //!
 //! 上行纪律：JobAck / JobStatus(running) / 终态经 [`RunnerUplink`] 的活体发送器
 //! （`run_connection` 每连接 `set_live` 注入，与 logbuf / workspace 同款单 writer
@@ -53,6 +58,7 @@ use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::ReceiptLog;
+use crate::artifacts::{ArtifactIo, safe_join};
 use crate::cache::{Cache, RestoreError};
 use crate::checkout;
 use crate::container;
@@ -220,11 +226,13 @@ pub struct Handle {
     /// 排空闸门（ADR-0017：升级排空时拒接新任务；终态释放唤醒等待排空的 upgrader）。
     gate: DrainGate,
     receipts: ReceiptLog,
+    /// 产物传输缝（票 #74）：上传/依赖下载经 REST 面；测试注入 fake。
+    artifact_io: Arc<dyn ArtifactIo>,
 }
 
 impl Handle {
-    /// 以分派接收端、上行链路、在途集、工作区、缓存、日志缓冲、排空闸门与收帧
-    /// 观测构造。
+    /// 以分派接收端、上行链路、在途集、工作区、缓存、日志缓冲、排空闸门、收帧
+    /// 观测与产物传输缝构造。
     #[allow(clippy::too_many_arguments)] // 各依赖语义独立，聚合在 Handle 构造
     pub fn new(
         rx: mpsc::Receiver<ChannelMessage>,
@@ -235,6 +243,7 @@ impl Handle {
         logbuf: LogBuffer,
         gate: DrainGate,
         receipts: ReceiptLog,
+        artifact_io: Arc<dyn ArtifactIo>,
     ) -> Self {
         Self {
             rx,
@@ -247,7 +256,14 @@ impl Handle {
             jobs: JoinSet::new(),
             gate,
             receipts,
+            artifact_io,
         }
+    }
+
+    /// 覆盖产物传输缝（组合根 `run` 前、spawn 前注入一次；默认 real——
+    /// `with_channel_config` 装配，测试经 `Agent::with_artifact_io` 换 fake）。
+    pub fn set_artifact_io(&mut self, io: Arc<dyn ArtifactIo>) {
+        self.artifact_io = io;
     }
 
     /// 下行循环：JobSpec → 起任务执行；Cancel → 触发对应 job 取消；同时回收
@@ -337,10 +353,12 @@ impl Handle {
         let logbuf = self.logbuf.clone();
         let cancels = self.cancels.clone();
         let gate = self.gate.clone();
+        let artifact_io = self.artifact_io.clone();
         let job_id_for_cleanup = job_id.clone();
         self.jobs.spawn(async move {
             run_job(
                 spec, cancel_rx, uplink, in_flight, workspace, cache, logbuf, gate,
+                artifact_io,
             )
             .await;
             // 清理取消注册（已取消则 no-op；防 stale 发送器泄漏）。
@@ -485,9 +503,12 @@ impl<'a> Backend<'a> {
     }
 }
 
-/// 单个 job 的执行主体：running 上报 → 工作区解析 → 执行后端装配 → 步骤序贯 →
-/// 终态上报 → 在途释放（释放经排空闸门唤醒等待排空的 upgrader）。
-#[allow(clippy::too_many_arguments)] // spec + 共享状态 + 取消信号，语义独立
+/// 单个 job 的执行主体：running 上报 → 工作区解析 → 依赖产物拉取（步骤前，
+/// 票 #74）→ 执行后端装配 → 步骤序贯 → 产物上传（成功后、终态前，缓存
+/// save 在 run_steps 尾部先于上传，ADR-0012）→ 终态上报 → 在途释放（释放
+/// 经排空闸门唤醒等待排空的 upgrader；槽位占用到上传完成由「终态上报
+/// 晚于上传」保证，ADR-0008）。
+#[allow(clippy::too_many_arguments)] // spec + 共享状态 + 取消信号 + 产物缝，语义独立
 async fn run_job(
     spec: JobSpec,
     cancel_rx: watch::Receiver<bool>,
@@ -497,6 +518,7 @@ async fn run_job(
     cache: Cache,
     logbuf: LogBuffer,
     gate: DrainGate,
+    artifact_io: Arc<dyn ArtifactIo>,
 ) {
     let job_id = spec.job_id.clone();
     let attempt = spec.attempt;
@@ -529,6 +551,19 @@ async fn run_job(
             return;
         }
     };
+
+    // 依赖产物拉取（步骤前，票 #74 / ADR-0006）：本次构建内其它任务的产物
+    // 落到声明的工作区相对路径。失败（含「依赖产物尚不存在」的 404）任务
+    // 立刻 failed、detail 带服务端清晰消息——不静默空等。
+    if !spec.downloads.is_empty()
+        && let Err(detail) = download_deps(&artifact_io, &spec, &ws_dir).await
+    {
+        uplink
+            .report_terminal(&job_id, JobPhase::JobFailed, None, &detail)
+            .await;
+        release_inflight(&in_flight, &job_id, &gate).await;
+        return;
+    }
 
     let secret_values = collect_secrets(&spec);
     let trunc = Arc::new(Truncation::new(log_limit_bytes(spec.log_limit_bytes)));
@@ -569,6 +604,18 @@ async fn run_job(
         &logbuf,
     )
     .await;
+
+    // 产物上传（票 #74，ADR-0006/0008/0012）：仅步骤全部成功后（缓存 save
+    // 已在 run_steps 尾部完成）；先于终态上报——上传中不释放槽位。失败不
+    // 静默：任务上报 failed、detail 点名。
+    let outcome = if matches!(outcome, JobOutcome::Succeeded) && !spec.uploads.is_empty() {
+        match upload_artifacts(&artifact_io, &spec, &ws_dir).await {
+            Ok(()) => outcome,
+            Err(detail) => JobOutcome::SpawnFailed(detail),
+        }
+    } else {
+        outcome
+    };
 
     let (phase, exit_code, detail) = outcome_phase(outcome);
     uplink
@@ -855,6 +902,50 @@ async fn run_steps(
         save_caches(cache, spec, ws_dir).await;
     }
     JobOutcome::Succeeded
+}
+
+// ============================================================
+// 产物上传/依赖下载（票 #74，ADR-0006/0007）
+// ============================================================
+
+/// 步骤执行前拉取全部依赖产物声明（本次构建内其它任务的产物）：声明的是
+/// 来源任务名 + 产物名，经 REST 缝下发（Server 侧定位构建）；落盘到声明的
+/// 工作区相对路径。任一失败即 `Err`（detail 带服务端清晰消息），runner 映射
+/// 任务立刻 failed。无声明 = no-op。
+async fn download_deps(io: &Arc<dyn ArtifactIo>, spec: &JobSpec, ws_dir: &Path) -> Result<(), String> {
+    for d in &spec.downloads {
+        let source_job = d.job_id.as_str();
+        let dest = safe_join(ws_dir, &d.path)
+            .map_err(|e| format!("下载依赖产物 {} 失败：{e}", d.name))?;
+        io.download(&spec.job_id, source_job, &d.name, &dest)
+            .await
+            .map_err(|e| format!("下载依赖产物 {} 失败：{e}", d.name))?;
+    }
+    Ok(())
+}
+
+/// 步骤全部成功后按声明上传产物（缓存 save 之后，ADR-0012）：源文件缺失或
+/// 传输失败即 `Err`（detail 点名），runner 映射任务 failed——上传失败不
+/// 静默（ADR-0008：占用到上传完成的槽位语义要求失败可见）。无声明 = no-op。
+async fn upload_artifacts(io: &Arc<dyn ArtifactIo>, spec: &JobSpec, ws_dir: &Path) -> Result<(), String> {
+    for u in &spec.uploads {
+        let src = safe_join(ws_dir, &u.path)
+            .map_err(|e| format!("上传产物 {} 失败：{e}", u.name))?;
+        if !tokio::fs::try_exists(&src)
+            .await
+            .unwrap_or(false)
+        {
+            return Err(format!(
+                "上传产物 {} 失败：源路径不存在（{}）",
+                u.name,
+                u.path
+            ));
+        }
+        io.upload(&spec.job_id, &u.name, &src)
+            .await
+            .map_err(|e| format!("上传产物 {} 失败：{e}", u.name))?;
+    }
+    Ok(())
 }
 
 // ============================================================

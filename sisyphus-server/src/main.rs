@@ -96,6 +96,7 @@ async fn main() {
     // 随组合根装配（票 #73：读路径独立连接，ADR-0004）。
     let state = match api::AppState::new(
         pool.clone(),
+        config.data_dir.clone(),
         config.registration_enabled,
         master_key,
         config.poll_interval_minutes,

@@ -159,6 +159,8 @@ message ArtifactUpload {
 }
 
 message ArtifactDownload {
+  // 来源任务名（同 pipeline 内、本次构建内声明引用；Server 侧拉取时按
+  // 拉取任务的构建定位来源任务行——与任务行 id 是两个取值域，字段名沿契约保留）。
   string job_id = 1;
   string name = 2;
   string path = 3;

@@ -9,6 +9,7 @@
 //! 只定形不实现，随消费批次落同一缝。
 
 pub mod agents;
+pub mod artifacts;
 pub mod audit;
 pub mod builds;
 pub mod jobs;
@@ -22,11 +23,15 @@ pub mod tokens;
 pub mod triggers;
 pub mod users;
 
-// 缝定形：LogStore 已随日志批次（票 #73）落 SqliteLogStore 实现；
-// ArtifactStore/ArtifactMetaRepo 仍无消费者（随产物批次落实现后清理）。
+// 缝定形：LogStore 随日志批次（票 #73）落 SqliteLogStore 实现；
+// ArtifactStore/ArtifactMetaRepo 随产物批次（票 #74）落实现。
 #[allow(dead_code, unused_imports)]
 mod traits;
 
+pub use artifacts::{
+    ARTIFACT_NAME_MAX, ARTIFACT_RETENTION_DAYS, LocalDiskArtifactStore, SqliteArtifactMetaRepo,
+    validate_artifact_name,
+};
 pub use logs::SqliteLogStore;
 pub use traits::{
     ArtifactMeta, ArtifactMetaRepo, ArtifactStore, ByteStream, LogChunk, LogLocation, LogStore,
@@ -65,6 +70,9 @@ pub enum StoreError {
     NotFound(String),
     /// 事务内条件更新未命中且重试耗尽（并发写冲突）。
     Conflict(String),
+    /// 输入非法（如产物名含路径分隔符——产物名是磁盘路径段，非法名拒绝
+    /// 落盘，票 #74）。
+    Invalid(String),
     /// 定义 JSON 编解码失败（落库内容与 model 形态不符）。
     DefinitionJson(serde_json::Error),
 }
@@ -99,6 +107,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Unique(what) => write!(f, "唯一冲突：{what}"),
             StoreError::NotFound(what) => write!(f, "不存在：{what}"),
             StoreError::Conflict(what) => write!(f, "并发写冲突：{what}"),
+            StoreError::Invalid(what) => write!(f, "输入非法：{what}"),
             StoreError::DefinitionJson(e) => write!(f, "定义 JSON 编解码失败：{e}"),
         }
     }
@@ -262,6 +271,7 @@ mod tests {
             "jobs",
             "triggers",
             "logs",
+            "artifacts",
         ] {
             assert!(
                 tables.iter().any(|t| t == expected),
@@ -314,6 +324,7 @@ mod tests {
             "DROP TABLE jobs",
             "DROP TABLE triggers",
             "DROP TABLE logs",
+            "DROP TABLE artifacts",
         ] {
             sqlx::raw_sql(stmt)
                 .execute(&pool)

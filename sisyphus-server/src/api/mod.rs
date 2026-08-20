@@ -22,6 +22,7 @@
 //!   sisyphus-web 产物 → SPA fallback 回 index.html，B2a-T5）。
 
 pub mod agents;
+pub mod artifacts;
 pub mod audit;
 pub mod auth;
 pub mod builds;
@@ -60,6 +61,7 @@ use crate::events::EventBus;
 use crate::secrets::MasterKey;
 use crate::store::SqliteLogStore;
 use crate::store::agents::AgentRepo;
+use crate::store::artifacts::{LocalDiskArtifactStore, SqliteArtifactMetaRepo};
 use crate::store::audit::AuditRepo;
 use crate::store::members::MemberRepo;
 use crate::store::pipelines::PipelineRepo;
@@ -103,6 +105,11 @@ pub struct AppState {
     /// 构建日志存储（票 #73，ADR-0013）：grpc 落库（写）与 SSE 回放/下载
     /// （读，独立连接）两消费面。
     pub logs: SqliteLogStore,
+    /// 产物字节存储（票 #74，ADR-0004）：Agent 上传端点（写）与下载端点
+    /// （读）两消费面，布局 data/artifacts/<build_id>/<name>。
+    pub artifacts: LocalDiskArtifactStore,
+    /// 产物元数据仓储（票 #74，ADR-0004）：上传完成记行、列表/下载查询。
+    pub artifact_meta: SqliteArtifactMetaRepo,
     /// 编排引擎（票 B2c-T2，ADR-0006：统一触发入口 + 构建推进 + 任务终态
     /// 接线点；sched/grpc/REST 共享同一引擎与事件总线）。
     pub engine: Engine,
@@ -126,13 +133,16 @@ pub struct AppState {
 
 impl AppState {
     /// 由连接池装配（组合根：开池+迁移在 [`crate::store::bootstrap`]）。
-    /// `registration_enabled` 来自合并后的启动配置（CLI > env > toml >
-    /// 默认，ADR-0010）；`master_key` 为机密加密主密钥（ADR-0015，票
-    /// B2b-T6：启动路径已生成/读回密钥文件）；`poll_interval_minutes` 为
-    /// poll 触发器节奏默认（ADR-0016，票 B2c-T6）。日志存储另开独立读
-    /// 连接（ADR-0004：读独立于 gRPC 写路径），开池失败折组合根装配失败。
+    /// `data_dir` 为数据目录（产物字节存储根 artifacts/ 由 config 布局
+    /// 保证存在，票 #74）；`registration_enabled` 来自合并后的启动配置
+    /// （CLI > env > toml > 默认，ADR-0010）；`master_key` 为机密加密主密钥
+    /// （ADR-0015，票 B2b-T6：启动路径已生成/读回密钥文件）；
+    /// `poll_interval_minutes` 为 poll 触发器节奏默认（ADR-0016，票
+    /// B2c-T6）。日志存储另开独立读连接（ADR-0004：读独立于 gRPC 写路径），
+    /// 开池失败折组合根装配失败。
     pub async fn new(
         pool: SqlitePool,
+        data_dir: PathBuf,
         registration_enabled: bool,
         master_key: MasterKey,
         poll_interval_minutes: i64,
@@ -151,6 +161,10 @@ impl AppState {
             triggers: TriggerRepo::new(pool.clone()),
             audit: AuditRepo::new(pool.clone()),
             logs: SqliteLogStore::open(&pool).await?,
+            artifacts: LocalDiskArtifactStore::new(
+                data_dir.join(crate::config::ARTIFACTS_DIR),
+            ),
+            artifact_meta: SqliteArtifactMetaRepo::new(pool.clone()),
             engine: Engine::new(pool.clone(), master_key, bus.clone()),
             bus,
             master_key,
@@ -179,6 +193,23 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         // token 只有注册码——公开端点（与 login 同档放行；注册码本身即
         // 高熵随机，哈希匹配即身份）。
         .route("/agent/register", post(agents::register));
+
+    // Agent 产物面（票 #74，ADR-0007）：独立 agent token 认证中间件
+    // （Bearer sisa_ 族；PAT/会话 401）——不与用户面认证/CSRF 中间件叠加
+    // （Bearer 天然免疫 CSRF，且 Agent 无 cookie 语义）。
+    let v1_agent_artifacts = Router::new()
+        .route(
+            "/agent/artifacts/{job_id}/{name}",
+            post(artifacts::agent_upload),
+        )
+        .route(
+            "/agent/artifacts/{job_id}/downloads/{source_job}/{name}",
+            get(artifacts::agent_download),
+        )
+        .route_layer(from_fn_with_state(
+            state.clone(),
+            artifacts::require_agent_auth,
+        ));
 
     let v1_protected = Router::new()
         .route("/auth/logout", post(auth::logout))
@@ -230,6 +261,14 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
             get(logs::stream),
         )
         .route(
+            "/projects/{name}/pipelines/{pipeline}/builds/{number}/artifacts",
+            get(artifacts::list),
+        )
+        .route(
+            "/projects/{name}/pipelines/{pipeline}/builds/{number}/artifacts/{artifact}",
+            get(artifacts::download),
+        )
+        .route(
             "/projects/{name}/pipelines/{pipeline}/triggers",
             get(triggers::list).post(triggers::create),
         )
@@ -248,6 +287,7 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route_layer(from_fn_with_state(state.clone(), auth::require_auth));
 
     let v1 = v1_public
+        .merge(v1_agent_artifacts)
         .merge(v1_protected)
         .fallback(api_not_found)
         .with_state(state);

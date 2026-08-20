@@ -8,6 +8,7 @@
 //! [`Agent::with_channel_config`] 注入短心跳间隔/短退避与 fake Server 对跑，
 //! 不起独立进程（B2c 同纪律）。
 
+pub mod artifacts;
 pub mod cache;
 pub mod channel;
 pub mod checkout;
@@ -86,6 +87,9 @@ pub struct Agent {
     exit_rx: watch::Receiver<bool>,
     /// 占位模块收帧观测（分派骨架断言面）。
     receipts: ReceiptLog,
+    /// 产物传输缝（票 #74）：runner 上传/依赖下载；默认 real（api_url /
+    /// token 取配置），测试经 [`Self::with_artifact_io`] 注入 fake。
+    artifact_io: Arc<dyn artifacts::ArtifactIo>,
 }
 
 impl Agent {
@@ -157,6 +161,12 @@ impl Agent {
         let (exit_tx, exit_rx) = watch::channel(false);
         // 升级依赖：默认 safe_stub（不触发升级的测试即安全）；Agent::new / 测试覆盖。
         let upgrade_deps = UpgradeDeps::safe_stub();
+        // 产物传输（票 #74）：REST 基址与 token 取配置（api_url 缺失时调用
+        // 恒 Unconfigured 明确报错）；测试经 `with_artifact_io` 注入 fake。
+        let artifact_io: Arc<dyn artifacts::ArtifactIo> = Arc::new(artifacts::RealArtifactIo::new(
+            config.api_url.clone(),
+            channel_cfg.token.clone(),
+        ));
         Self {
             config,
             channel_cfg,
@@ -176,6 +186,7 @@ impl Agent {
                 logbuf,
                 drain_gate.clone(),
                 receipts.clone(),
+                artifact_io.clone(),
             ),
             workspace: workspace::Handle::new(workspace_rx, handle_state, receipts.clone()),
             cache: cache::Handle::new(cache_rx, handle_cache, receipts.clone()),
@@ -186,6 +197,7 @@ impl Agent {
             exit_tx,
             exit_rx,
             receipts,
+            artifact_io,
         }
     }
 
@@ -193,6 +205,13 @@ impl Agent {
     /// 前调用；`Agent::new` 已覆盖为 real，测试据此注入 fake（不真下载/真重启）。
     pub fn with_upgrader_deps(mut self, deps: UpgradeDeps) -> Self {
         self.upgrade_deps = deps;
+        self
+    }
+
+    /// 覆盖产物传输缝（票 #74；测试注入 fake 上传/下载）。须在 `run` 前调用；
+    /// `Agent::new` 已装配 real（reqwest），测试据此注入 fake（不发真请求）。
+    pub fn with_artifact_io(mut self, io: Arc<dyn artifacts::ArtifactIo>) -> Self {
+        self.artifact_io = io;
         self
     }
 
@@ -222,6 +241,11 @@ impl Agent {
     /// `shutdown` 收到 `true` 时退出（测试/将来服务化用；生产主进程常驻）。
     pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
         // 各模块占位循环（收下行指令即记日志；真实执行随后续批次）。
+        // 产物传输缝注入（票 #74）：`with_artifact_io`（run 前）可覆盖组合根
+        // 默认装配的 real io——Handle 持可替换位，与 logbuf/workspace 的
+        // set_live 同款时机语义（spawn 前注入，之后不再变）。
+        self.runner
+            .set_artifact_io(self.artifact_io.clone());
         let runner_task = tokio::spawn(self.runner.run());
         let workspace_task = tokio::spawn(self.workspace.run());
         let cache_task = tokio::spawn(self.cache.run());

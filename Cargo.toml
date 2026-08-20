@@ -38,6 +38,8 @@ prost = "0.14"
 clap = { version = "4", features = ["derive"] }
 # async runtime helpers
 futures = "0.3"
+# 字节缓冲（axum/reqwest body 的元素类型；workspace 统一版本）
+bytes = "1"
 tracing = "0.1"
 # server 配置与日志（ADR-0010/0019）
 toml = "1"

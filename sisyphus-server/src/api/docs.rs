@@ -4,6 +4,7 @@
 use utoipa::OpenApi;
 
 use super::agents;
+use super::artifacts;
 use super::audit;
 use super::auth;
 use super::builds;
@@ -59,6 +60,10 @@ use super::users;
         builds::detail,
         logs::stream,
         logs::download,
+        artifacts::agent_upload,
+        artifacts::agent_download,
+        artifacts::list,
+        artifacts::download,
         triggers::list,
         triggers::create,
         triggers::get_one,
@@ -108,6 +113,9 @@ use super::users;
         builds::TriggerSourceDto,
         builds::JobStatusDto,
         builds::RerunModeDto,
+        artifacts::ArtifactUploadedResponse,
+        artifacts::ArtifactDto,
+        artifacts::BuildArtifactsResponse,
         triggers::TriggerKindDto,
         triggers::CronSpecDto,
         triggers::PollSpecInputDto,
@@ -136,6 +144,7 @@ use super::users;
         (name = "secrets", description = "项目机密（票 B2b-T6：值只写不读——建/覆写、仅名清单、删；viewer/runner 连名不可见，项目 admin 档）"),
         (name = "pipelines", description = "Pipeline 定义读写（model 校验 + revision 语义）"),
         (name = "builds", description = "构建生命周期（票 B2c-T5：手动触发 / 取消 / 重跑 / 列表 / 详情；runner 档触发/取消/重跑、viewer 档列表/详情）"),
+        (name = "artifacts", description = "产物链路（票 #74，ADR-0004/0007：Agent token 鉴权的上传/依赖拉取 + viewer 档的构建产物列表/流式下载）"),
         (name = "triggers", description = "触发器管理（票 B2c-T6，ADR-0016：cron / poll 触发源 CRUD；项目 admin 档——列/建/改配置与启停；触发历史经 builds 行呈现）"),
         (name = "users", description = "用户管理（全局 admin：建/列/禁用/重置，票 B2b-T4）与用户目录（项目 admin 的最小只读清单，票 B2b-T5）"),
         (name = "audit", description = "审计回放（票 B2b-T7：安全事件只增记账，仅全局 admin 可查询——按时间/用户/项目/事件类型过滤 + 分页）"),

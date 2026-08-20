@@ -1163,6 +1163,22 @@ h3 {
   font-size: 11px;
 }
 
+/* 已上传产物的下载链接（票 #74）：同 chip 形态 + 主色强调 + 可点击。 */
+.artifact-link {
+  color: var(--sisy-color-primary);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.artifact-link:hover {
+  text-decoration: underline;
+}
+
+.artifact-size {
+  color: var(--sisy-color-text-secondary);
+  font-size: 11px;
+}
+
 .job-log-toggle {
   border: 1px solid var(--sisy-color-border);
   background: var(--sisy-color-surface);

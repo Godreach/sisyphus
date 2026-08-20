@@ -2042,3 +2042,381 @@ async fn backend_switches_per_job_host_runs_and_container_routes_to_pull() {
     agent_task.await.expect("agent 退出");
     server_task.abort();
 }
+
+// ============================================================
+// 产物上传/依赖下载（票 #74 / B5-T2，ADR-0006/0007/0008）
+// ============================================================
+
+/// 可编排的 fake 产物传输缝：记录上传/下载调用；上传可挂起（watch 门闩），
+/// 下载可配结果（写字节 / 拒绝）。
+struct FakeArtifactIo {
+    /// 上传调用记录：(job_id, name, path)。
+    uploads: Mutex<Vec<(String, String, PathBuf)>>,
+    /// 下载调用记录：(job_id, source_job, name, dest)。
+    downloads: Mutex<Vec<(String, String, String, PathBuf)>>,
+    /// 上传门闩：Some(rx) 时每次上传先等 rx 变 true（阻塞上传的槽位语义
+    /// 断言用）；None 直接过。
+    gate: Option<watch::Receiver<bool>>,
+    /// 下载行为：写字节 / 拒绝（detail 透传断言用）。
+    download_result: Mutex<Result<Vec<u8>, sisyphus_agent::artifacts::ArtifactError>>,
+}
+
+impl FakeArtifactIo {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            uploads: Mutex::new(Vec::new()),
+            downloads: Mutex::new(Vec::new()),
+            gate: None,
+            download_result: Mutex::new(Ok(Vec::new())),
+        })
+    }
+
+    /// 挂起式上传：`tx` 置 true 前每次上传等待。
+    fn gated(
+        gate: watch::Receiver<bool>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            uploads: Mutex::new(Vec::new()),
+            downloads: Mutex::new(Vec::new()),
+            gate: Some(gate),
+            download_result: Mutex::new(Ok(Vec::new())),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl sisyphus_agent::artifacts::ArtifactIo for FakeArtifactIo {
+    async fn upload(
+        &self,
+        job_id: &str,
+        name: &str,
+        path: &Path,
+    ) -> Result<(), sisyphus_agent::artifacts::ArtifactError> {
+        if let Some(gate) = &self.gate {
+            let mut gate = gate.clone();
+            while !*gate.borrow_and_update() {
+                gate.changed().await.expect("门闩发送端存活");
+            }
+        }
+        self.uploads.lock().expect("锁").push((
+            job_id.to_string(),
+            name.to_string(),
+            path.to_path_buf(),
+        ));
+        Ok(())
+    }
+
+    async fn download(
+        &self,
+        _job_id: &str,
+        source_job: &str,
+        name: &str,
+        dest: &Path,
+    ) -> Result<(), sisyphus_agent::artifacts::ArtifactError> {
+        self.downloads
+            .lock()
+            .expect("锁")
+            .push((_job_id.into(), source_job.into(), name.into(), dest.into()));
+        match &*self.download_result.lock().expect("锁") {
+            Ok(bytes) => {
+                std::fs::create_dir_all(dest.parent().expect("父目录")).expect("建目录");
+                std::fs::write(dest, bytes).expect("写字节");
+                Ok(())
+            }
+            Err(e) => Err(sisyphus_agent::artifacts::ArtifactError::Rejected {
+                status: 404,
+                message: e.to_string(),
+            }),
+        }
+    }
+}
+
+/// 装配带注入产物缝的组合根并 spawn `Agent::run`（spawn_agent 同款 + fake io）。
+#[allow(clippy::type_complexity)]
+fn spawn_agent_artifacts(
+    data_dir: &Path,
+    server_url: String,
+    io: std::sync::Arc<dyn sisyphus_agent::artifacts::ArtifactIo>,
+) -> (watch::Sender<bool>, Workspace, tokio::task::JoinHandle<()>) {
+    let cfg = config::Config::load(
+        &Overrides {
+            server_url: Some(server_url.clone()),
+            data_dir: Some(data_dir.to_path_buf()),
+            ..Overrides::default()
+        },
+        &Overrides::default(),
+    )
+    .expect("配置");
+    let ws_root = cfg.workspaces_dir();
+    let sampler = Arc::new(sisyphus_agent::workspace::WorkspaceSampler::new(
+        ws_root.clone(),
+    ));
+    let ws_state = Workspace::new(ws_root).with_usage(sampler.clone());
+    let cache_state =
+        sisyphus_agent::cache::Cache::new(cfg.cache_dir(), cfg.cache_capacity_bytes());
+    let agent = Agent::with_channel_config(
+        cfg,
+        channel_cfg(server_url, Some("sisa_abc"), data_dir),
+        ws_state.clone(),
+        sampler,
+        cache_state,
+    )
+    .with_artifact_io(io);
+    let ws = agent.workspace_state();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let task = tokio::spawn(agent.run(shutdown_rx));
+    (shutdown_tx, ws, task)
+}
+
+/// 带产物上传/下载声明的 JobSpec（单 shell 步骤）。
+fn artifact_spec(
+    job_id: &str,
+    command: &str,
+    uploads: Vec<sisyphus_proto::agent::ArtifactUpload>,
+    downloads: Vec<sisyphus_proto::agent::ArtifactDownload>,
+) -> ChannelMessage {
+    ChannelMessage {
+        kind: Some(Kind::JobSpec(Box::new(JobSpec {
+            job_id: job_id.to_string(),
+            pipeline_name: "pipe".into(),
+            job_name: "job".into(),
+            build_number: 1,
+            attempt: 0,
+            log_limit_bytes: 0,
+            steps: vec![JobStep {
+                name: "step-0".into(),
+                seq: 0,
+                kind: Some(StepKind::Shell(ShellStep {
+                    command: command.into(),
+                })),
+            }],
+            env: HashMap::new(),
+            exec_env: None,
+            timeout_minutes: 0,
+            uploads,
+            downloads,
+            caches: vec![],
+            secrets: vec![],
+            scm_credential: None,
+            labels: vec![],
+            retry_count: 0,
+            allow_failure: false,
+        }))),
+    }
+}
+
+/// AC（票 #74）：任务成功后按声明上传；**上传中不释放槽位**——终态上报
+/// 晚于上传完成（Server 只认终态释放槽位，时序即语义，ADR-0008）。
+/// fake 上传挂起期间断言无终态；放行后上传记录在案、终态 succeeded。
+#[tokio::test]
+async fn artifact_upload_holds_slot_until_upload_completes() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+
+    // 门闩式 fake：上传挂起到 tx=true。
+    let (gate_tx, gate_rx) = watch::channel(false);
+    let io = FakeArtifactIo::gated(gate_rx);
+    let (shutdown_tx, ws, agent_task) =
+        spawn_agent_artifacts(dir.path(), format!("http://{addr}"), io.clone());
+
+    // 工作区内预置产物源文件（步骤产出等价物）。
+    let ws_dir = ws.resolve("pipe", "job").expect("工作区");
+    std::fs::create_dir_all(ws_dir.join("out")).expect("建目录");
+    std::fs::write(ws_dir.join("out/dist.bin"), b"dist-bytes").expect("写产物");
+
+    send_downlink(
+        &state,
+        artifact_spec(
+            "job-up",
+            "echo built",
+            vec![sisyphus_proto::agent::ArtifactUpload {
+                name: "dist.bin".into(),
+                path: "out/dist.bin".into(),
+            }],
+            vec![],
+        ),
+    )
+    .await;
+    await_ack(&state, "job-up", true).await;
+
+    // 步骤成功、上传已挂起：等 running 出现后断言终态未到（上传中不释放）。
+    wait_until(|| async {
+        state
+            .statuses()
+            .iter()
+            .any(|s| s.job_id == "job-up" && s.phase() == JobPhase::JobRunning)
+    })
+    .await;
+    // 给编排一点时间走到上传（若终态先于上传到达，下面的断言会抓到）。
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        terminal_status(&state, "job-up").is_none(),
+        "上传挂起期间不得上报终态（槽位占用到上传完成，ADR-0008）"
+    );
+
+    // 放行上传 → 上传记录 + 终态 succeeded。
+    gate_tx.send(true).expect("放行");
+    let terminal = await_terminal(&state, "job-up").await;
+    assert_eq!(terminal.phase(), JobPhase::JobSucceeded);
+    let recorded = io.uploads.lock().expect("锁").clone();
+    assert_eq!(recorded.len(), 1, "按声明上传一次");
+    assert_eq!(recorded[0].1, "dist.bin");
+    assert_eq!(recorded[0].2, ws_dir.join("out/dist.bin"));
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// AC（票 #74）：任务开始前按声明拉取依赖产物——步骤执行时文件已就位
+/// （下载在步骤前、落盘到声明的工作区相对路径）。
+#[tokio::test]
+async fn artifact_downloads_landed_before_steps_run() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+
+    let io = FakeArtifactIo::new();
+    *io.download_result.lock().unwrap() = Ok(b"dep-bytes-123".to_vec());
+    let (shutdown_tx, ws, agent_task) =
+        spawn_agent_artifacts(dir.path(), format!("http://{addr}"), io.clone());
+
+    // 步骤读取依赖产物内容并回显（文件就位才能通过）。
+    let read_cmd = if cfg!(unix) {
+        "cat deps/in/app.tar"
+    } else {
+        "type deps\\in\\app.tar"
+    };
+    send_downlink(
+        &state,
+        artifact_spec(
+            "job-dep",
+            read_cmd,
+            vec![],
+            vec![sisyphus_proto::agent::ArtifactDownload {
+                job_id: "job-a".into(),
+                name: "app.tar".into(),
+                path: "deps/in/app.tar".into(),
+            }],
+        ),
+    )
+    .await;
+
+    let terminal = await_terminal(&state, "job-dep").await;
+    assert_eq!(
+        terminal.phase(),
+        JobPhase::JobSucceeded,
+        "步骤执行时依赖文件已就位：{}",
+        terminal.detail
+    );
+    assert!(
+        String::from_utf8_lossy(&output_bytes(&state, "job-dep")).contains("dep-bytes-123"),
+        "步骤读到的是拉取落盘的依赖产物字节"
+    );
+    // 下载调用记录：来源任务名 + 产物名 + 落盘路径。
+    let recorded = io.downloads.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].1, "job-a");
+    assert_eq!(recorded[0].2, "app.tar");
+    let ws_dir = ws.resolve("pipe", "job").expect("工作区");
+    assert_eq!(recorded[0].3, ws_dir.join("deps/in/app.tar"));
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// AC（票 #74）：「依赖产物尚不存在」的清晰报错——下载失败任务立刻
+/// failed、detail 带服务端消息；不跑任何步骤。
+#[tokio::test]
+async fn artifact_download_failure_fails_job_with_clear_detail() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+
+    let io = FakeArtifactIo::new();
+    *io.download_result.lock().unwrap() = Err(sisyphus_agent::artifacts::ArtifactError::Rejected {
+        status: 404,
+        message: "依赖产物尚不存在：任务 job-a 的产物 app.tar 未上传".into(),
+    });
+    let (shutdown_tx, _ws, agent_task) =
+        spawn_agent_artifacts(dir.path(), format!("http://{addr}"), io);
+
+    send_downlink(
+        &state,
+        artifact_spec(
+            "job-miss",
+            "echo should-not-run",
+            vec![],
+            vec![sisyphus_proto::agent::ArtifactDownload {
+                job_id: "job-a".into(),
+                name: "app.tar".into(),
+                path: "deps/app.tar".into(),
+            }],
+        ),
+    )
+    .await;
+
+    let terminal = await_terminal(&state, "job-miss").await;
+    assert_eq!(terminal.phase(), JobPhase::JobFailed);
+    assert!(
+        terminal.detail.contains("依赖产物尚不存在"),
+        "detail 带服务端清晰消息：{}",
+        terminal.detail
+    );
+    assert!(
+        terminal.detail.contains("app.tar"),
+        "detail 点名产物：{}",
+        terminal.detail
+    );
+    // 步骤未执行（下载前置失败）。
+    assert!(
+        !String::from_utf8_lossy(&output_bytes(&state, "job-miss")).contains("should-not-run"),
+        "下载失败不跑步骤"
+    );
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// AC（票 #74）：上传失败不静默——任务上报 failed、detail 点名产物；
+/// 成功路径已由前两条用例覆盖。
+#[tokio::test]
+async fn artifact_upload_missing_source_fails_job_naming_artifact() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+
+    // 不预置源文件：上传阶段「源路径不存在」→ failed。
+    let io = FakeArtifactIo::new();
+    let (shutdown_tx, _ws, agent_task) =
+        spawn_agent_artifacts(dir.path(), format!("http://{addr}"), io);
+
+    send_downlink(
+        &state,
+        artifact_spec(
+            "job-noart",
+            "echo done",
+            vec![sisyphus_proto::agent::ArtifactUpload {
+                name: "ghost.bin".into(),
+                path: "out/ghost.bin".into(),
+            }],
+            vec![],
+        ),
+    )
+    .await;
+
+    let terminal = await_terminal(&state, "job-noart").await;
+    assert_eq!(terminal.phase(), JobPhase::JobFailed);
+    assert!(
+        terminal.detail.contains("ghost.bin"),
+        "上传失败 detail 点名产物：{}",
+        terminal.detail
+    );
+
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}

@@ -9,16 +9,19 @@
 // - 触发/取消/重跑入口：触发带参数覆盖/分支/commit（`POST .../builds`）、
 //   `POST .../builds/{number}/cancel`、`POST .../builds/{number}/rerun` 含
 //   from_scratch / from_failed 两模式；操作结果 202 受理 / 409 拒绝正确反馈。
-// - 产物区：产物下载端点未交付（B4 纯前端契约）→ 按任务声明展示 + 下载占位
-//   （Spec B4 缺端点纪律：退化态 + 显式标注）。
+// - 产物区（票 #74 解禁）：任务声明 × 已上传产物比对——已上传接下载链接
+//   （大小/校验和提示、cookie 会话随同源导航自动携带）；未上传展示占位
+//   （构建进行中/任务未成功）。
 
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 
+import { artifactsApi } from '@/api/client'
 import { describeActionError } from '@/api/errors'
 import { useBuildDetailStore } from '@/stores/buildDetail'
 import {
+  formatBytes,
   formatDateTime,
   formatDuration,
   isLiveStatus,
@@ -74,6 +77,16 @@ function toggleLog(job: JobViewDto): void {
 
 function isLogOpen(job: JobViewDto): boolean {
   return openLogs.value.has(logKey(job))
+}
+
+/** 产物下载 URL（相对路径——cookie 会话随同源 `<a href>` 自动携带，票 #74）。 */
+function artifactDownloadUrl(name: string): string {
+  return artifactsApi.downloadUrl(
+    project.value,
+    pipeline.value,
+    buildNumber.value,
+    name,
+  )
 }
 
 /** 触发对话框表单：从 pipeline 定义参数声明派生（ADR-0006 参数化）。 */
@@ -383,23 +396,39 @@ function triggerKey(trigger: BuildDetailResponse['trigger']): string {
               </span>
             </div>
 
-            <!-- 产物区（任务级声明展示）：下载端点未交付 → 下载占位。 -->
+            <!-- 产物区（票 #74 解禁）：任务声明 × 已上传产物比对——已上传接下载
+                 链接（大小/校验和提示，cookie 会话随同源导航自动携带）；未上传
+                 展示占位（构建进行中/任务未成功）。 -->
             <div
               v-if="store.jobArtifactUploads(stage.index, job.name).length > 0"
               class="job-artifacts"
             >
               <span class="job-artifacts-label">{{ t('buildDetail.artifacts') }}:</span>
-              <span
+              <template
                 v-for="(art, i) in store.jobArtifactUploads(stage.index, job.name)"
                 :key="`${art.name}-${i}`"
-                class="artifact-chip"
-                :title="art.path"
               >
-                {{ art.name }}
-                <span class="artifact-placeholder">
-                  {{ t('buildDetail.artifactPlaceholder') }}
+                <a
+                  v-if="store.uploadedArtifact(art.name)"
+                  class="artifact-chip artifact-link"
+                  :href="artifactDownloadUrl(art.name)"
+                  :title="`${art.path}\n${store.uploadedArtifact(art.name)!.sha256}`"
+                  :download="art.name"
+                >
+                  {{ art.name }}
+                  <span class="artifact-size">{{ formatBytes(store.uploadedArtifact(art.name)!.size) }}</span>
+                </a>
+                <span
+                  v-else
+                  class="artifact-chip"
+                  :title="art.path"
+                >
+                  {{ art.name }}
+                  <span class="artifact-placeholder">
+                    {{ t('buildDetail.artifactPlaceholder') }}
+                  </span>
                 </span>
-              </span>
+              </template>
             </div>
 
             <!-- 日志入口：展开/收起该任务的 SSE 日志流（步骤折叠/ANSI/截断/重连）。 -->

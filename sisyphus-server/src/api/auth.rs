@@ -483,7 +483,9 @@ async fn active_user_or_reject(
 /// 解析 Bearer 凭据（RFC 7235，scheme 大小写不敏感）：Authorization 头为
 /// Bearer scheme 时返回凭据串（可为任意串——查不到行即 401，不在此区分
 /// 形态好坏）；其它 scheme / 头缺失返回 `None`（回落 cookie 面）。
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
+/// `pub(crate)`：产物 Agent 面（[`super::artifacts`] 的 agent token 认证）
+/// 共用同一解析。
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, credentials) = value.split_once(' ')?;
     scheme

@@ -55,6 +55,7 @@ async fn harness() -> Harness {
     .expect("测试主密钥");
     let state = AppState::new(
         pool.clone(),
+        dir.path().to_path_buf(),
         false,
         master_key,
         sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES,

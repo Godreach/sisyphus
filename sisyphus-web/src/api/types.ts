@@ -329,6 +329,27 @@ export interface BuildDetailResponse {
   stages: StageViewDto[]
 }
 
+// 产物（后端 `api/artifacts.rs`，票 #74 / B5-T2，ADR-0004/0007）。
+// ---------------------------------------------------------------------------
+
+/** 产物条目（构建产物列表）。 */
+export interface ArtifactResponse {
+  /** 产物名（任务级声明的上传名）。 */
+  name: string
+  /** 字节数。 */
+  size: number
+  /** SHA-256 校验和（十六进制小写）。 */
+  sha256: string
+  /** 上传时刻（Unix 毫秒）。 */
+  created_at: number
+}
+
+/** 构建产物列表响应。 */
+export interface BuildArtifactsResponse {
+  /** 构建全部产物（按名排序）。 */
+  items: ArtifactResponse[]
+}
+
 // 成员 / 用户目录 DTO（后端 `api/members.rs`、`api/users.rs`，ADR-0014）。
 // 本批（B4-T3）供项目详情成员管理与概览/项目页消费。
 // ---------------------------------------------------------------------------

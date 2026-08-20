@@ -107,12 +107,14 @@ describe('BuildDetailView（阶段/任务卡 + 触发/取消/重跑 + SSE 日志
   let wrapper: VueWrapper
   const fetchMock = vi.fn()
 
-  /** 按 URL 分支分发 fetch 响应（详情 / 定义 / 动作）。
-   *  注意判定顺序：/rerun、/cancel 在前（它们也含 /builds/），详情其次，
-   *  触发（POST .../builds 无号）最后落到 action 分支。 */
+  /** 按 URL 分支分发 fetch 响应（详情 / 定义 / 产物 / 动作）。
+   *  注意判定顺序：/rerun、/cancel 在前（它们也含 /builds/），产物其次
+   *  （.../builds/N/artifacts），详情再次，触发（POST .../builds 无号）最后
+   *  落到 action 分支。 */
   function mockApi(handlers: {
     detail?: (n: number) => Record<string, unknown>
     definition?: () => Record<string, unknown>
+    artifacts?: () => Record<string, unknown>
     action?: (url: string, init: RequestInit) => Record<string, unknown>
   }): void {
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
@@ -121,6 +123,9 @@ describe('BuildDetailView（阶段/任务卡 + 触发/取消/重跑 + SSE 日志
         return Promise.resolve(
           jsonResponse(202, handlers.action?.(url, init ?? {}) ?? { number: 7, build_id: 1, attempt: 2, status: 'running' }),
         )
+      }
+      if (url.includes('/artifacts')) {
+        return Promise.resolve(jsonResponse(200, handlers.artifacts?.() ?? { items: [] }))
       }
       if (url.includes('/builds/')) {
         const num = Number(url.match(/\/builds\/(\d+)/)?.[1] ?? 7)
@@ -200,6 +205,34 @@ describe('BuildDetailView（阶段/任务卡 + 触发/取消/重跑 + SSE 日志
     // 产物区：按任务声明展示 + 下载占位（缺端点退化态）。
     expect(wrapper.text()).toContain('bundle')
     expect(wrapper.text()).toContain('下载占位')
+  })
+
+  it('产物区（票 #74）：已上传接下载链接（大小/sha 提示），未上传展示占位', async () => {
+    mockApi({
+      artifacts: () => ({
+        items: [
+          {
+            name: 'bundle',
+            size: 4096,
+            sha256: 'ab12'.repeat(16),
+            created_at: 1_700_000_000_000,
+          },
+        ],
+      }),
+    })
+    mountView()
+    await vi.waitFor(() => expect(wrapper.find('a.artifact-link').exists()).toBe(true))
+
+    // 声明 bundle 已上传 → 下载链接 + 大小；不再展示占位。
+    const link = wrapper.get('a.artifact-link')
+    expect(link.text()).toContain('bundle')
+    expect(link.text()).toContain('4.0 KB')
+    expect(link.attributes('href')).toBe(
+      'api/v1/projects/demo/pipelines/release/builds/7/artifacts/bundle',
+    )
+    expect(link.attributes('download')).toBe('bundle')
+    expect(link.attributes('title')).toContain('ab12')
+    expect(wrapper.text()).not.toContain('下载占位')
   })
 
   it('排队等待态定义缺失时显式标注退化', async () => {

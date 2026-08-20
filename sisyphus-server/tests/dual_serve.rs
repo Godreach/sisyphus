@@ -25,6 +25,7 @@ async fn rest_and_grpc_serve_side_by_side() {
     .expect("测试主密钥");
     let state = api::AppState::new(
         pool,
+        dir.path().to_path_buf(),
         false,
         master_key,
         sisyphus_server::config::DEFAULT_POLL_INTERVAL_MINUTES,
