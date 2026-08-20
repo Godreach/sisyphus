@@ -56,7 +56,9 @@ const triggerParams = ref<Record<string, string>>({})
 const triggerBranch = ref('')
 const triggerCommit = ref('')
 const triggerError = ref('')
-const actionBusy = ref<'trigger' | 'cancel' | 'rerun' | null>(null)
+const deleteOpen = ref(false)
+const deleteError = ref('')
+const actionBusy = ref<'trigger' | 'cancel' | 'rerun' | 'delete' | null>(null)
 const actionMessage = ref('')
 const actionError = ref('')
 
@@ -176,6 +178,31 @@ async function rerunBuild(mode: RerunBuildRequest['mode']): Promise<void> {
     }
   } catch (err) {
     actionError.value = describeActionError(err)
+  } finally {
+    actionBusy.value = null
+  }
+}
+
+/** 打开删除确认对话（运行中/排队已禁用按钮，此处为兜底语义）。 */
+function openDelete(): void {
+  deleteError.value = ''
+  deleteOpen.value = true
+}
+
+/** 确认删除：项目 admin 档全删该构建的日志与产物（记录保留，ADR-0013）；
+ *  204 后跳回构建列表。运行中/排队后端 409 拒绝在此反馈。 */
+async function submitDelete(): Promise<void> {
+  deleteError.value = ''
+  actionBusy.value = 'delete'
+  try {
+    await store.remove(project.value, pipeline.value, buildNumber.value)
+    deleteOpen.value = false
+    await router.push({
+      name: 'build-list',
+      params: { name: project.value, pipeline: pipeline.value },
+    })
+  } catch (err) {
+    deleteError.value = describeActionError(err)
   } finally {
     actionBusy.value = null
   }
@@ -323,6 +350,16 @@ function triggerKey(trigger: BuildDetailResponse['trigger']): string {
         :disabled="actionBusy !== null"
       >
         {{ t('buildDetail.rerunFromFailed') }}
+      </button>
+      <!-- 手动删构建（票 #78，ADR-0013）：项目 admin 档；运行中/排队禁用 +
+            后端 409 兜底。确认对话后 204 即跳回构建列表。 -->
+      <button
+        type="button"
+        class="btn btn-danger"
+        @click="openDelete"
+        :disabled="actionBusy !== null || isLiveStatus(build.status)"
+      >
+        {{ t('buildDetail.delete') }}
       </button>
       <span v-if="actionBusy" class="build-action-busy">
         {{ t('buildDetail.submitting') }}
@@ -500,6 +537,26 @@ function triggerKey(trigger: BuildDetailResponse['trigger']): string {
           </button>
           <button type="submit" class="btn btn-primary" :disabled="actionBusy !== null">
             {{ t('buildDetail.trigger') }}
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <!-- 删除确认对话（票 #78）：全删日志与产物、构建记录保留。 -->
+    <div v-if="deleteOpen" class="modal-backdrop" @click.self="deleteOpen = false">
+      <form class="modal" @submit.prevent="submitDelete">
+        <h2>{{ t('buildDetail.deleteTitle') }}</h2>
+        <p class="build-muted">{{ t('buildDetail.deleteConfirm', { number: build.number }) }}</p>
+        <p class="build-muted">{{ t('buildDetail.deleteKeepRecord') }}</p>
+
+        <p v-if="deleteError" class="build-error" role="alert">{{ deleteError }}</p>
+
+        <div class="modal-actions">
+          <button type="button" class="btn" @click="deleteOpen = false" :disabled="actionBusy !== null">
+            {{ t('buildDetail.cancel') }}
+          </button>
+          <button type="submit" class="btn btn-danger" :disabled="actionBusy !== null">
+            {{ actionBusy === 'delete' ? t('buildDetail.submitting') : t('buildDetail.delete') }}
           </button>
         </div>
       </form>

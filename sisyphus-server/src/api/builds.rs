@@ -33,7 +33,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use super::AppState;
 use super::error::{ApiError, ErrorBody, ValidationIssue, parse_body};
-use super::policy::{RequireRunner, RequireViewer};
+use super::policy::{RequireAdmin, RequireRunner, RequireViewer};
 use crate::engine::{ParameterOverride, StartBuildInput, TriggerDetail};
 use crate::store::builds::{BuildRepo, BuildRow, BuildStatus, TriggerSource};
 use crate::store::jobs::{JobRepo, JobStatus};
@@ -564,6 +564,49 @@ pub async fn detail(
         elapsed_ms,
         stages,
     }))
+}
+
+/// 手动删构建（项目 admin 档，票 #78，ADR-0013）：立即全删该构建的日志
+/// chunk 与产物（文件 + 元数据）、回收空产物目录；构建记录（状态、号、
+/// 时长）与任务行永久保留。运行中/排队构建不可删（409 可读错误）——终态
+/// 才可删（ADR-0008：在途任务占槽，删数据会让在跑任务失去日志/产物落点）。
+#[utoipa::path(
+    delete,
+    path = "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}",
+    tag = "builds",
+    params(
+        ("name" = String, Path, description = "项目名"),
+        ("pipeline" = String, Path, description = "pipeline 名"),
+        ("number" = i64, Path, description = "构建号"),
+    ),
+    responses(
+        (status = 204, description = "已删除该构建的日志与产物（构建记录保留）"),
+        (status = 401, description = "未认证", body = ErrorBody),
+        (status = 403, description = "viewer/runner 档不足（删构建需项目 admin 档）", body = ErrorBody),
+        (status = 404, description = "项目不存在/不可见，或构建号不存在", body = ErrorBody),
+        (status = 409, description = "运行中/排队构建不可删", body = ErrorBody),
+    )
+)]
+pub async fn remove(
+    State(state): State<AppState>,
+    RequireAdmin(access): RequireAdmin,
+    Path((_project, pipeline, number)): Path<(String, String, i64)>,
+) -> Result<StatusCode, ApiError> {
+    let build = load_build(&state, &access.project.id, &pipeline, number).await?;
+    if !build.status.is_terminal() {
+        return Err(ApiError::conflict(format!(
+            "构建 #{number} 运行中/排队中，不可删除（终态才可删，ADR-0013）"
+        )));
+    }
+    // 数据裁剪（日志 + 产物文件 + 元数据 + 空目录回收；builds/jobs 记录保留）。
+    let artifacts_root = state
+        .artifacts
+        .root()
+        .to_path_buf();
+    crate::store::delete_build_data(&state.pool, &artifacts_root, build.id)
+        .await
+        .map_err(|e| ApiError::internal("构建数据清理", &e))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------

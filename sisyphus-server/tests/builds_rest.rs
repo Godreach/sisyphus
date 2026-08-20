@@ -12,9 +12,10 @@ use axum::response::Response;
 
 mod common;
 
-use common::{TestApp, body_json, cookie_of, drive_build, req_with_cookie};
+use common::{TestApp, body_json, body_text, cookie_of, drive_build, req_with_cookie};
 use sisyphus_server::engine::TriggerDetail;
 use sisyphus_server::store::builds::{BuildRepo, BuildStatus};
+use sisyphus_server::store::jobs::JobRepo;
 
 /// 测试用户共用密码（与 authorization.rs 同形）。
 const USER_PASSWORD: &str = "user-password-1";
@@ -600,5 +601,126 @@ async fn detail_shows_stages_and_missing_secret_records_name() {
 
     // 不存在构建号 → 404。
     let resp = detail(&app, &bob, "build", 999).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ===========================================================================
+// 删除（手动删构建，票 #78，ADR-0013）
+// ===========================================================================
+
+async fn delete_build(app: &TestApp, cookie: &str, pipeline: &str, number: i64) -> Response {
+    req_with_cookie(
+        app,
+        "DELETE",
+        &format!("/api/v1/projects/demo/pipelines/{pipeline}/builds/{number}"),
+        None,
+        Some(cookie),
+    )
+    .await
+}
+
+/// AC（票 #78）：手动删构建——项目 admin 档（viewer/runner 403、无角色 404）；
+/// 运行中/排队不可删（409 可读错误）；终态删除 204 + 日志/产物级联删除
+/// （builds/jobs 记录保留，ADR-0013 语义）。
+#[tokio::test]
+async fn delete_build_requires_admin_rejects_live_and_purges_data() {
+    let (app, _admin, alice, bob, carol, dave) = fixture().await;
+    save_definition(&app, &carol, "build", minimal_definition()).await;
+
+    // 排队构建（尚未 drive）：项目 admin 删 → 409（运行中/排队不可删）。
+    let (b_queued, _) = trigger_build(&app, &bob, "build", "{}").await;
+    let resp = delete_build(&app, &carol, "build", 1).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "排队中不可删 409");
+    assert_eq!(body_json(resp).await["code"], "CONFLICT");
+
+    // 运行中构建（drive 组装后 running）：删 → 409。
+    drive_build(&app, b_queued).await;
+    let resp = delete_build(&app, &carol, "build", 1).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "运行中不可删 409");
+
+    // 终态化 + 造日志/产物 → 项目 admin 删 → 204 + 级联删除 + 记录保留。
+    let repo = BuildRepo::new(app.pool.clone());
+    assert!(
+        repo.transition(b_queued, BuildStatus::Succeeded, 2_000)
+            .await
+            .expect("迁移"),
+        "置终态"
+    );
+    // 任务行（drive 已组装）+ 日志 chunk + 产物（磁盘 + 元数据）。
+    let job = JobRepo::new(app.pool.clone())
+        .list_by_build(b_queued)
+        .await
+        .expect("任务清单")
+        .into_iter()
+        .find(|j| j.name == "compile")
+        .expect("compile 任务行已由 drive 组装");
+    sqlx::query(
+        "INSERT INTO logs (build_id, job_id, attempt, start_seq, end_seq, step, stream, data, created_at)
+         VALUES (?, ?, 1, 0, 0, -1, '', X'1f8b', ?)",
+    )
+    .bind(b_queued)
+    .bind(job.id)
+    .bind(2_000)
+    .execute(&app.pool)
+    .await
+    .expect("插日志");
+    // 产物根 = 数据目录 artifacts/（TestApp.web 即数据目录 web/，父目录即数据目录）。
+    let artifacts_root = app.web.parent().expect("数据目录").join("artifacts");
+    let artifact_dir = artifacts_root.join(b_queued.to_string());
+    std::fs::create_dir_all(&artifact_dir).expect("产物目录");
+    std::fs::write(artifact_dir.join("dist.bin"), b"bytes").expect("产物文件");
+    sqlx::query(
+        "INSERT INTO artifacts (build_id, name, path, size, sha256, created_at, retention_until)
+         VALUES (?, 'dist.bin', ?, 5, 'abc', 2_000, ?)",
+    )
+    .bind(b_queued)
+    .bind(format!("{b_queued}/dist.bin"))
+    .bind(2_000i64 + 30i64 * 24 * 60 * 60 * 1000)
+    .execute(&app.pool)
+    .await
+    .expect("插产物元数据");
+
+    let resp = delete_build(&app, &carol, "build", 1).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "终态删除 204");
+    let text = body_text(resp).await;
+    assert!(text.is_empty(), "204 无响应体");
+
+    // 级联删除：日志/产物元数据清、产物目录回收；构建记录 + 任务行保留。
+    let logs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM logs WHERE build_id = ?")
+        .bind(b_queued)
+        .fetch_one(&app.pool)
+        .await
+        .expect("logs 计数");
+    assert_eq!(logs, 0, "日志 chunk 级联删除");
+    let metas: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE build_id = ?")
+        .bind(b_queued)
+        .fetch_one(&app.pool)
+        .await
+        .expect("artifacts 计数");
+    assert_eq!(metas, 0, "产物元数据级联删除");
+    assert!(!artifact_dir.exists(), "产物目录回收");
+    let builds: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM builds WHERE id = ?")
+        .bind(b_queued)
+        .fetch_one(&app.pool)
+        .await
+        .expect("builds 计数");
+    assert_eq!(builds, 1, "构建记录保留（状态/号/时长可查）");
+    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE id = ?")
+        .bind(job.id)
+        .fetch_one(&app.pool)
+        .await
+        .expect("jobs 计数");
+    assert_eq!(jobs, 1, "任务行保留");
+
+    // 授权矩阵：viewer/runner 删 → 403；无角色 → 404（先于状态裁决）。
+    let resp = delete_build(&app, &alice, "build", 999).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "viewer 删 403");
+    let resp = delete_build(&app, &bob, "build", 999).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "runner 删 403");
+    let resp = delete_build(&app, &dave, "build", 999).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "无角色删 404");
+
+    // 不存在构建号 → 404（项目 admin）。
+    let resp = delete_build(&app, &carol, "build", 999).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

@@ -2584,6 +2584,88 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "builds"
+        ],
+        "summary": "手动删构建（项目 admin 档，票 #78，ADR-0013）：立即全删该构建的日志\nchunk 与产物（文件 + 元数据）、回收空产物目录；构建记录（状态、号、\n时长）与任务行永久保留。运行中/排队构建不可删（409 可读错误）——终态\n才可删（ADR-0008：在途任务占槽，删数据会让在跑任务失去日志/产物落点）。",
+        "operationId": "remove",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "description": "构建号",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "已删除该构建的日志与产物（构建记录保留）"
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "viewer/runner 档不足（删构建需项目 admin 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见，或构建号不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "运行中/排队构建不可删",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/artifacts": {

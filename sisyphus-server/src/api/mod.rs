@@ -152,6 +152,10 @@ pub struct AppState {
     /// 默认 5，ADR-0016）：新建 poll 触发器未显式给节奏时取此值，进触发器
     /// spec（票 B2c-T6）。
     pub poll_interval_minutes: i64,
+    /// 日志与产物共享的 per-build 保留期天数（config `[retention]
+    /// retention_days`，默认 30，ADR-0013）：产物元数据 record 的
+    /// `retention_until` 与每日清理扫描共用此值（票 #78）。
+    pub retention_days: i64,
 }
 
 impl AppState {
@@ -169,6 +173,7 @@ impl AppState {
         registration_enabled: bool,
         master_key: MasterKey,
         poll_interval_minutes: i64,
+        retention_days: i64,
     ) -> Result<Self, crate::store::StoreError> {
         let bus = EventBus::new();
         Ok(Self {
@@ -187,7 +192,7 @@ impl AppState {
             audit: AuditRepo::new(pool.clone()),
             logs: SqliteLogStore::open(&pool).await?,
             artifacts: LocalDiskArtifactStore::new(data_dir.join(crate::config::ARTIFACTS_DIR)),
-            artifact_meta: SqliteArtifactMetaRepo::new(pool.clone()),
+            artifact_meta: SqliteArtifactMetaRepo::new(pool.clone(), retention_days),
             upgrade_packages: LocalDiskUpgradePackageStore::new(
                 data_dir.join(crate::config::UPGRADE_PACKAGES_DIR),
             ),
@@ -199,6 +204,7 @@ impl AppState {
             login_limiter: LoginRateLimiter::new(),
             registration_enabled,
             poll_interval_minutes,
+            retention_days,
         })
     }
 }
@@ -287,7 +293,7 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         )
         .route(
             "/projects/{name}/pipelines/{pipeline}/builds/{number}",
-            get(builds::detail),
+            get(builds::detail).delete(builds::remove),
         )
         .route(
             "/projects/{name}/pipelines/{pipeline}/builds/{number}/cancel",

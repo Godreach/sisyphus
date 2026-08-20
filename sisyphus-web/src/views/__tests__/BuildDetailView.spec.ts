@@ -354,6 +354,52 @@ describe('BuildDetailView（阶段/任务卡 + 触发/取消/重跑 + SSE 日志
     await vi.waitFor(() => expect(wrapper.text()).toContain('无法从失败重跑'))
   })
 
+  it('删除构建（票 #78）：终态可删、确认对话后发 DELETE、204 后跳回构建列表', async () => {
+    mockApi({
+      detail: () => buildDetailBody({ status: 'failed', finished_at: 1_700_000_010_000 }),
+    })
+    mountView()
+    await vi.waitFor(() => expect(wrapper.findAll('.stage-card')).toHaveLength(2))
+
+    // 终态构建：删除按钮可用（运行中/排队禁用由 isLiveStatus 反向控制）。
+    const deleteBtn = wrapper.findAll('.build-actions button').find((b) => b.text() === '删除构建')
+    expect(deleteBtn).toBeDefined()
+    expect(deleteBtn?.attributes('disabled')).toBeUndefined()
+
+    // 打开确认对话 → 取消返回（不发请求）。
+    await deleteBtn?.trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('确定删除构建 #7'))
+    await wrapper.findAll('.modal button')[0]?.trigger('click')
+    expect(wrapper.find('.modal').exists()).toBe(false)
+    expect(
+      fetchMock.mock.calls.some((c) => String(c[0]).includes('/builds/7') && (c[1] as RequestInit).method === 'DELETE'),
+    ).toBe(false)
+
+    // 再次打开并确认 → DELETE 204 → 跳回构建列表。
+    const pushSpy = vi.spyOn(router, 'push')
+    await wrapper.findAll('.build-actions button').find((b) => b.text() === '删除构建')?.trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('.modal').exists()).toBe(true))
+    await wrapper.get('.modal').trigger('submit')
+    await vi.waitFor(() => expect(pushSpy).toHaveBeenCalled())
+
+    const delCall = fetchMock.mock.calls.find(
+      (c) => String(c[0]).includes('/builds/7') && (c[1] as RequestInit).method === 'DELETE',
+    ) as [string, RequestInit] | undefined
+    expect(delCall).toBeDefined()
+    expect(delCall?.[0]).toContain('/api/v1/projects/demo/pipelines/release/builds/7')
+    expect(pushSpy.mock.calls[0]?.[0]).toMatchObject({ name: 'build-list' })
+  })
+
+  it('删除构建（票 #78）：运行中构建禁用删除按钮', async () => {
+    mockApi({})
+    mountView()
+    await vi.waitFor(() => expect(wrapper.findAll('.stage-card')).toHaveLength(2))
+
+    // 运行中（默认 detail 即 running）：删除按钮禁用。
+    const deleteBtn = wrapper.findAll('.build-actions button').find((b) => b.text() === '删除构建')
+    expect(deleteBtn?.attributes('disabled')).toBeDefined()
+  })
+
   it('SSE 日志：查看日志展开流，输出块合流渲染、步骤折叠/展开', async () => {
     mockApi({})
     mountView()

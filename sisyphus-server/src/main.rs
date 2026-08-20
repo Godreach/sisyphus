@@ -38,6 +38,10 @@ struct Args {
     /// 可改到独立卷；相对路径按相对数据目录解析）
     #[arg(long)]
     master_key_path: Option<String>,
+    /// 日志/产物 per-build 保留期天数（CLI 覆盖层，默认 30，ADR-0013：每日
+    /// 扫描清理过期构建数据，构建记录永久保留）
+    #[arg(long)]
+    retention_days: Option<i64>,
 }
 
 impl From<&Args> for Overrides {
@@ -49,6 +53,7 @@ impl From<&Args> for Overrides {
             log_format: args.log_format.clone(),
             registration_enabled: args.registration_enabled.map(|b| b.to_string()),
             master_key_path: args.master_key_path.clone(),
+            retention_days: args.retention_days.map(|n| n.to_string()),
         }
     }
 }
@@ -100,6 +105,7 @@ async fn main() {
         config.registration_enabled,
         master_key,
         config.poll_interval_minutes,
+        config.retention_days,
     )
     .await
     {
@@ -164,6 +170,19 @@ async fn main() {
             .await;
     });
 
+    // 保留策略每日清理（票 #78，ADR-0013）：日志与产物共享 per-build 保留期
+    // （config `[retention] retention_days`，默认 30 天），低频后台任务清理
+    // 过期构建的日志 chunk 与产物文件 + 元数据（空目录回收）；构建记录永久
+    // 保留。删产物不碰 backups/（与迁移备份协同，ADR-0010）。与 trigger/心跳
+    // 扫描同生命周期（server 进程即清理进程，单实例纪律）。
+    let cleanup_pool = pool.clone();
+    let cleanup_artifacts = config.data_dir.join(sisyphus_server::config::ARTIFACTS_DIR);
+    let cleanup_retention = config.retention_days;
+    let cleanup_task = tokio::spawn(async move {
+        sisyphus_server::store::run_daily_cleanup(cleanup_pool, cleanup_artifacts, cleanup_retention)
+            .await;
+    });
+
     // 双端口先绑定再 serve（ADR-0005 端口合并策略推迟，各自独立监听）：
     // 任一端口被占即启动失败，不带病运行半个服务。
     let rest_addr: std::net::SocketAddr = config.rest_addr.parse().expect("配置层已校验监听地址");
@@ -218,6 +237,7 @@ async fn main() {
     sweep.abort();
     sched_task.abort();
     trigger_task.abort();
+    cleanup_task.abort();
 }
 
 /// tracing 基础初始化（ADR-0019）：RUST_LOG 整体胜出，否则用配置级别

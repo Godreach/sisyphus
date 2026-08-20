@@ -173,6 +173,16 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
     return accepted
   }
 
+  /** 手动删构建（项目 admin 档，ADR-0013）：全删该构建的日志与产物、构建
+   *  记录保留；运行中/排队 409。成功 204 后由调用侧跳转构建列表。 */
+  async function remove(
+    project: string,
+    pipeline: string,
+    number: number,
+  ): Promise<void> {
+    await buildsApi.remove(project, pipeline, number)
+  }
+
   /** 组件卸载清理：停止轮询、清态（下次进入重新加载）。 */
   function dispose(): void {
     if (timer) {
@@ -200,6 +210,7 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
     trigger,
     cancel,
     rerun,
+    remove,
     dispose,
   }
 })

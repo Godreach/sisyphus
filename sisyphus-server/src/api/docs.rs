@@ -65,6 +65,7 @@ use super::users;
         builds::rerun,
         builds::list,
         builds::detail,
+        builds::remove,
         logs::stream,
         logs::download,
         artifacts::agent_upload,

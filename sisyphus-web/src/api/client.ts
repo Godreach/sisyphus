@@ -295,6 +295,13 @@ export const buildsApi = {
     http.get<BuildDetailResponse>(
       `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}`,
     ),
+
+  /** 手动删构建（项目 admin 档，ADR-0013）：立即全删该构建的日志与产物
+   *  （构建记录保留）；运行中/排队 409。成功 204。 */
+  remove: (project: string, pipeline: string, number: number) =>
+    http.del<void>(
+      `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}`,
+    ),
 }
 
 /** 产物端点（后端 `api/artifacts.rs`，票 #74 / B5-T2，ADR-0004/0007）：构建

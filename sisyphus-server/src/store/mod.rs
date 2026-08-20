@@ -12,6 +12,7 @@ pub mod agents;
 pub mod artifacts;
 pub mod audit;
 pub mod builds;
+pub mod cleanup;
 pub mod jobs;
 pub mod logs;
 pub mod members;
@@ -33,9 +34,9 @@ mod traits;
 
 pub use agents::{AgentVersion, PendingUpgrade};
 pub use artifacts::{
-    ARTIFACT_NAME_MAX, ARTIFACT_RETENTION_DAYS, LocalDiskArtifactStore, SqliteArtifactMetaRepo,
-    validate_artifact_name,
+    ARTIFACT_NAME_MAX, LocalDiskArtifactStore, SqliteArtifactMetaRepo, validate_artifact_name,
 };
+pub use cleanup::{CleanupReport, CLEANUP_INTERVAL, delete_build_data, run_daily_cleanup, sweep};
 pub use logs::SqliteLogStore;
 pub use scm_credentials::ScmCredentialRepo;
 pub use smtp_config::{SmtpConfigRepo, SmtpTls};

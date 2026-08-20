@@ -30,9 +30,6 @@ use super::traits::{ArtifactMeta, ArtifactMetaRepo, ArtifactStore, ByteStream};
 /// 产物名长度上限（磁盘路径段 + URL 路径段的宽松界）。
 pub const ARTIFACT_NAME_MAX: usize = 128;
 
-/// 产物保留期天数（ADR-0004：与日志共享 per-build 30 天默认；B5-T6 清理）。
-pub const ARTIFACT_RETENTION_DAYS: i64 = 30;
-
 /// 流式读写块大小（64 KiB：与日志 chunk 同量级，大文件往返次数与内存
 /// 占用的折中）。
 const IO_CHUNK: usize = 64 * 1024;
@@ -68,6 +65,11 @@ impl LocalDiskArtifactStore {
     /// 以产物根构造（目录由 config 布局保证存在；此处不重复建）。
     pub fn new(root: PathBuf) -> Self {
         Self { root }
+    }
+
+    /// 产物根目录（保留清理 / 手动删构建的字节裁剪面，与上传下载同根）。
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// 产物的磁盘路径：`<root>/<build_id>/<name>`（调用侧已过名校验）。
@@ -172,6 +174,9 @@ fn now_part_suffix() -> String {
 #[derive(Debug, Clone)]
 pub struct SqliteArtifactMetaRepo {
     pool: SqlitePool,
+    /// 保留期天数（config `[retention]` 合并后的全局值，默认 30，ADR-0013；
+    /// 上传完成记行的 `retention_until = 落库时刻 + 保留期`，每日清理扫描消费）。
+    retention_days: i64,
 }
 
 /// 列表条目（含上传时刻——[`ArtifactMeta`] 缝不含时间列，API 列表面消费）。
@@ -184,9 +189,13 @@ pub struct ArtifactMetaEntry {
 }
 
 impl SqliteArtifactMetaRepo {
-    /// 从既有池装配（表已由迁移建好）。
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    /// 从既有池装配（表已由迁移建好）。`retention_days` 为全局保留期天数
+    /// （config `[retention]` 合并值；与日志共享 per-build 保留期，ADR-0013）。
+    pub fn new(pool: SqlitePool, retention_days: i64) -> Self {
+        Self {
+            pool,
+            retention_days: retention_days.max(1),
+        }
     }
 
     /// 列出一次构建的全部产物（含上传时刻，按名排序）——构建详情页产物
@@ -222,10 +231,10 @@ impl SqliteArtifactMetaRepo {
 impl ArtifactMetaRepo for SqliteArtifactMetaRepo {
     async fn record(&self, meta: &ArtifactMeta) -> Result<(), StoreError> {
         // (build, name) 唯一 + 覆盖语义：重跑/重试同名再传以最新为准（与
-        // 字节层 rename 覆盖同语义）。retention 自落库时刻起 30 天（B5-T6）。
+        // 字节层 rename 覆盖同语义）。retention 自落库时刻起保留期（全局
+        // 配置，默认 30 天，ADR-0013/B5-T6）。
         let now = crate::store::now_ms();
-        let retention_until =
-            now + ARTIFACT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+        let retention_until = now + self.retention_days * 24 * 60 * 60 * 1000;
         sqlx::query(
             "INSERT INTO artifacts (build_id, name, path, size, sha256, created_at, retention_until)
              VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -310,7 +319,7 @@ mod tests {
             .await
             .expect("建构建");
         let store = LocalDiskArtifactStore::new(dir.path().join("artifacts"));
-        let repo = SqliteArtifactMetaRepo::new(pool);
+        let repo = SqliteArtifactMetaRepo::new(pool, crate::config::DEFAULT_RETENTION_DAYS);
         (dir, store, repo)
     }
 

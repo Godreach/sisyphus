@@ -22,6 +22,10 @@ pub const DEFAULT_ORPHAN_GRACE_MINUTES: i64 = 10;
 /// 分钟）。新建 poll 触发器未显式给节奏时取此默认值，进触发器 spec；config
 /// `[triggers]` 可覆盖。
 pub const DEFAULT_POLL_INTERVAL_MINUTES: i64 = 5;
+/// 日志与产物共享的 per-build 保留期默认值（天，ADR-0013/0004：默认 30
+/// 天，Server 全局配置，config `[retention]` 可覆盖；每日低频扫描清理
+/// 过期构建的日志 chunk 与产物，构建记录永久保留，B5-T6）。
+pub const DEFAULT_RETENTION_DAYS: i64 = 30;
 
 /// 数据目录内的配置文件名。
 pub const CONFIG_FILE_NAME: &str = "config.toml";
@@ -74,6 +78,9 @@ pub struct Config {
     /// poll 触发器轮询节奏默认分钟（ADR-0016：项目级默认 5 分钟；新建 poll
     /// 触发器未显式给节奏时取此值，进触发器 spec）。
     pub poll_interval_minutes: i64,
+    /// 日志与产物共享的 per-build 保留期天数（ADR-0013/0004：默认 30 天，
+    /// 每日低频扫描清理过期构建的日志 chunk 与产物，构建记录永久保留）。
+    pub retention_days: i64,
 }
 
 /// 同一形态的覆盖层：CLI flag 与 `SISYPHUS_` 环境变量都归约为它。
@@ -91,6 +98,48 @@ pub struct Overrides {
     pub registration_enabled: Option<String>,
     /// 主密钥文件路径覆盖（文本形态；相对路径按相对数据目录解析）。
     pub master_key_path: Option<String>,
+    /// 保留期天数覆盖（文本形态；整数语义在 merge 缝收口，ADR-0013）。
+    pub retention_days: Option<String>,
+}
+
+/// 覆盖层与文件层的保留期天数统一合并：CLI > env > 文件 > 默认（票 #78，
+/// ADR-0013 全链可配——与 orphan/poll 不同，保留期按 Spec 明确进优先级链）。
+/// CLI/env 层是文本（整数语义在此收口）、文件层是原生 toml 整数，两层
+/// 皆须 >= 1——非法取值启动失败（不静默取默认：运维旋钮拼错必须暴露）。
+fn merge_retention_days(
+    cli: &Option<String>,
+    env: &Option<String>,
+    file: Option<i64>,
+) -> Result<i64, ConfigError> {
+    if let Some(days) = file
+        && days < 1
+    {
+        return Err(ConfigError::InvalidLogValue(format!(
+            "保留期天数须 >= 1，得到：{days}"
+        )));
+    }
+    match cli
+        .clone()
+        .or_else(|| env.clone())
+        .map(|s| parse_days(&s))
+        .transpose()?
+    {
+        Some(days) => Ok(days),
+        None => Ok(file.unwrap_or(DEFAULT_RETENTION_DAYS)),
+    }
+}
+
+/// 覆盖层文本的天数解析：正整数（>= 1）；非法取值报错（防手误静默失效）。
+fn parse_days(value: &str) -> Result<i64, ConfigError> {
+    match value.trim().parse::<i64>() {
+        Ok(days) if days >= 1 => Ok(days),
+        Ok(_) => Err(ConfigError::InvalidLogValue(format!(
+            "保留期天数须 >= 1，得到：{value}"
+        ))),
+        Err(_) => Err(ConfigError::InvalidLogValue(format!(
+            "保留期天数非法：{value}（期望正整数）"
+        ))),
+    }
 }
 
 /// config.toml 文件层。
@@ -112,6 +161,9 @@ pub struct FileConfig {
     /// `[triggers]` 段（ADR-0016：触发器节奏默认）。
     #[serde(default)]
     pub triggers: TriggersFile,
+    /// `[retention]` 段（ADR-0013：日志与产物共享 per-build 保留期）。
+    #[serde(default)]
+    pub retention: RetentionFile,
 }
 
 /// `[server]` 段。
@@ -162,6 +214,17 @@ pub struct SchedulerFile {
 pub struct TriggersFile {
     /// poll 触发器轮询节奏默认分钟（项目级默认 5 分钟，ADR-0016 票 #14）。
     pub poll_interval_minutes: Option<i64>,
+}
+
+/// `[retention]` 段（ADR-0013，票 #78：日志与产物共享 per-build 保留期）。
+/// 优先级链 CLI > env > 文件 > 默认（Spec 明确进链；merge 在
+/// [`merge_retention_days`] 收口）。
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetentionFile {
+    /// per-build 保留期天数（默认 30 天；每日低频扫描清理过期构建的日志
+    /// chunk 与产物文件 + 元数据，构建记录永久保留）。
+    pub retention_days: Option<i64>,
 }
 
 /// 配置加载/合并错误。
@@ -236,6 +299,12 @@ orphan_grace_minutes = 10
 # poll 触发器轮询节奏默认分钟（项目级默认 5 分钟，ADR-0016）：新建 poll 触发器
 # 未显式给节奏时取此值，进触发器 spec；cron 触发器按各自表达式节奏，不取此值。
 poll_interval_minutes = 5
+
+[retention]
+# 日志与产物共享的 per-build 保留期天数（默认 30 天，ADR-0013）：每日低频扫描
+# 清理过期构建的日志 chunk 与产物文件 + 元数据（含空目录回收）；构建记录
+# （状态/号/时长）永久保留。删产物不碰 backups/ 迁移备份目录。
+retention_days = 30
 "#
 }
 
@@ -278,6 +347,7 @@ impl Overrides {
             log_format: get("SISYPHUS_LOG_FORMAT"),
             registration_enabled: get("SISYPHUS_REGISTRATION_ENABLED"),
             master_key_path: get("SISYPHUS_MASTER_KEY_PATH"),
+            retention_days: get("SISYPHUS_RETENTION_DAYS"),
         }
     }
 }
@@ -366,6 +436,15 @@ pub fn merge(
         .unwrap_or(DEFAULT_POLL_INTERVAL_MINUTES)
         .max(1);
 
+    // 保留期天数：CLI > env > 文件 > 默认（票 #78，Spec 明确进优先级链，
+    // ADR-0013 默认 30 天）。CLI/env 层是文本、文件层是原生 toml 整数，
+    // 整数语义在 [`merge_retention_days`] 统一收口；非法取值启动失败。
+    let retention_days = merge_retention_days(
+        &cli.retention_days,
+        &env.retention_days,
+        file.retention.retention_days,
+    )?;
+
     Ok(Config {
         data_dir,
         rest_addr,
@@ -376,6 +455,7 @@ pub fn merge(
         master_key_path,
         orphan_grace_minutes,
         poll_interval_minutes,
+        retention_days,
     })
 }
 
@@ -434,6 +514,95 @@ mod tests {
             cfg.poll_interval_minutes, DEFAULT_POLL_INTERVAL_MINUTES,
             "poll 节奏默认 5 分钟（ADR-0016）"
         );
+        assert_eq!(
+            cfg.retention_days, DEFAULT_RETENTION_DAYS,
+            "日志/产物保留期默认 30 天（ADR-0013）"
+        );
+    }
+
+    /// 票 #78：`[retention] retention_days` 文件层可配（与日志/产物共享
+    /// per-build 保留期，默认 30 天）；CLI > env > 文件 > 默认全链可配
+    /// （Spec 明确进优先级链）；非法取值启动失败；未知字段拒绝。
+    #[test]
+    fn retention_days_merges_priority_chain_and_validates() {
+        let file = FileConfig {
+            retention: RetentionFile {
+                retention_days: Some(14),
+            },
+            ..FileConfig::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file,
+        )
+        .expect("文件层保留期");
+        assert_eq!(cfg.retention_days, 14);
+
+        // CLI > env > 文件。
+        let cli = Overrides {
+            retention_days: Some("60".into()),
+            ..Overrides::default()
+        };
+        let env = Overrides {
+            retention_days: Some("45".into()),
+            ..Overrides::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &cli,
+            &env,
+            &file,
+        )
+        .expect("CLI 层");
+        assert_eq!(cfg.retention_days, 60, "CLI 压过 env 与文件");
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &env,
+            &file,
+        )
+        .expect("env 层");
+        assert_eq!(cfg.retention_days, 45, "env 压过文件");
+
+        // 文件层非法取值（<=0）→ 报错不静默（运维旋钮拼错必须暴露）。
+        let file_zero = FileConfig {
+            retention: RetentionFile {
+                retention_days: Some(0),
+            },
+            ..FileConfig::default()
+        };
+        assert!(matches!(
+            merge(
+                PathBuf::from("/tmp/data"),
+                &Overrides::default(),
+                &Overrides::default(),
+                &file_zero
+            ),
+            Err(ConfigError::InvalidLogValue(_))
+        ));
+
+        // CLI/env 层非法文本 → 报错。
+        let bad = Overrides {
+            retention_days: Some("abc".into()),
+            ..Overrides::default()
+        };
+        assert!(matches!(
+            merge(
+                PathBuf::from("/tmp/data"),
+                &bad,
+                &Overrides::default(),
+                &FileConfig::default()
+            ),
+            Err(ConfigError::InvalidLogValue(_))
+        ));
+
+        // 未知字段拒绝（deny_unknown_fields）。
+        assert!(matches!(
+            parse_toml("[retention]\nretention_days_x = 5\n"),
+            Err(ConfigError::InvalidToml(_))
+        ));
     }
 
     #[test]
@@ -466,6 +635,7 @@ mod tests {
             },
             scheduler: SchedulerFile::default(),
             triggers: TriggersFile::default(),
+            retention: RetentionFile::default(),
         };
 
         let cfg =
@@ -638,6 +808,10 @@ mod tests {
         assert_eq!(
             cfg.poll_interval_minutes, DEFAULT_POLL_INTERVAL_MINUTES,
             "样例值与内置默认一致（poll 节奏）"
+        );
+        assert_eq!(
+            cfg.retention_days, DEFAULT_RETENTION_DAYS,
+            "样例值与内置默认一致（保留期）"
         );
 
         // 带注释：样例要能当作文档读。
