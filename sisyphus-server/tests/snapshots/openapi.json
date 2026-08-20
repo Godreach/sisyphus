@@ -5739,6 +5739,23 @@
           }
         }
       },
+      "TargetArch": {
+        "type": "string",
+        "description": "升级包目标架构（ADR-0010：x86_64/aarch64）。与 [`TargetOs`] 同纪律。",
+        "enum": [
+          "x86_64",
+          "aarch64"
+        ]
+      },
+      "TargetOs": {
+        "type": "string",
+        "description": "升级包目标 OS（ADR-0010 发布矩阵子集：Linux/macOS/Windows）。落库为小写\n文本（`linux`/`macos`/`windows`），serde 同形——`#[serde(rename_all =\n\"lowercase\")]` 与 DB TEXT 列往返一致。typed 取代裸 `String`：解析期一次\n校验，下游无字符串 typo 风险（Primitive Obsession 收口）。",
+        "enum": [
+          "linux",
+          "macos",
+          "windows"
+        ]
+      },
       "TokenResponse": {
         "type": "object",
         "description": "PAT 列表项（无值形态：名 / 创建时间 / 过期——令牌值任何端点不再出现）。",
@@ -5955,12 +5972,12 @@
             "minimum": 0
           },
           "target_arch": {
-            "type": "string",
-            "description": "目标架构（x86_64/aarch64）。"
+            "$ref": "#/components/schemas/TargetArch",
+            "description": "目标架构。"
           },
           "target_os": {
-            "type": "string",
-            "description": "目标 OS（linux/macos/windows）。"
+            "$ref": "#/components/schemas/TargetOs",
+            "description": "目标 OS。"
           },
           "version": {
             "$ref": "#/components/schemas/VersionDto",

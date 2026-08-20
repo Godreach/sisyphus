@@ -30,7 +30,7 @@ use super::agents::VersionDto;
 use crate::store::agents::AgentVersion;
 use crate::store::audit::AuditEvent;
 use crate::store::now_ms;
-use crate::store::upgrade_packages::validate_package_name;
+use crate::store::upgrade_packages::{TargetArch, TargetOs, validate_package_name};
 
 /// 升级包视图（与 [`crate::store::upgrade_packages::UpgradePackageMeta`] 同构）。
 #[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
@@ -39,10 +39,10 @@ pub struct UpgradePackageResponse {
     pub package_name: String,
     /// 解析自文件名的版本。
     pub version: VersionDto,
-    /// 目标 OS（linux/macos/windows）。
-    pub target_os: String,
-    /// 目标架构（x86_64/aarch64）。
-    pub target_arch: String,
+    /// 目标 OS。
+    pub target_os: crate::store::upgrade_packages::TargetOs,
+    /// 目标架构。
+    pub target_arch: crate::store::upgrade_packages::TargetArch,
     /// 字节数。
     pub size: u64,
     /// SHA-256 校验和（十六进制小写）。
@@ -311,8 +311,11 @@ fn filename_from_headers(headers: &HeaderMap) -> Result<String, ApiError> {
 }
 
 /// 按 ADR-0010 文件名规范解析 `sisyphus-agent-<ver>-<os>-<arch>[.tar.gz|.zip|.tar]`
-/// → (版本, 目标 OS, 目标架构)。不可解析 → 422。
-pub(crate) fn parse_package_filename(name: &str) -> Result<(AgentVersion, String, String), ApiError> {
+/// → (版本, 目标 OS, 目标架构)。目标三元组取值域校验收在 `TargetOs`/`TargetArch`
+/// 的 `parse`（typed，免裸 String 下游 typo）。不可解析 → 422。
+pub(crate) fn parse_package_filename(
+    name: &str,
+) -> Result<(AgentVersion, TargetOs, TargetArch), ApiError> {
     const PREFIX: &str = "sisyphus-agent-";
     let stem = name
         .strip_prefix(PREFIX)
@@ -326,14 +329,12 @@ pub(crate) fn parse_package_filename(name: &str) -> Result<(AgentVersion, String
     let version_str = parts
         .next()
         .ok_or_else(|| filename_issue("包名缺版本段"))?;
-    let target_os = parts
+    let target_os_str = parts
         .next()
-        .ok_or_else(|| filename_issue("包名缺目标 OS 段"))?
-        .to_string();
-    let target_arch = parts
+        .ok_or_else(|| filename_issue("包名缺目标 OS 段"))?;
+    let target_arch_str = parts
         .next()
-        .ok_or_else(|| filename_issue("包名缺目标架构段"))?
-        .to_string();
+        .ok_or_else(|| filename_issue("包名缺目标架构段"))?;
     if parts.next().is_some() {
         return Err(filename_issue("包名段数过多（期望 version-os-arch）"));
     }
@@ -357,13 +358,11 @@ pub(crate) fn parse_package_filename(name: &str) -> Result<(AgentVersion, String
     if nums.next().is_some() {
         return Err(filename_issue("版本段数过多（期望 major.minor.patch）"));
     }
-    // 目标三元组取值域（ADR-0010 发布矩阵）。
-    if !matches!(target_os.as_str(), "linux" | "macos" | "windows") {
-        return Err(filename_issue("目标 OS 须为 linux/macos/windows"));
-    }
-    if !matches!(target_arch.as_str(), "x86_64" | "aarch64") {
-        return Err(filename_issue("目标架构须为 x86_64/aarch64"));
-    }
+    // 目标三元组取值域（ADR-0010 发布矩阵）——parse 失败转 422。
+    let target_os = TargetOs::parse(target_os_str)
+        .map_err(|_| filename_issue("目标 OS 须为 linux/macos/windows"))?;
+    let target_arch = TargetArch::parse(target_arch_str)
+        .map_err(|_| filename_issue("目标架构须为 x86_64/aarch64"))?;
     Ok((
         AgentVersion {
             major,
@@ -403,17 +402,18 @@ mod tests {
 
     #[test]
     fn parses_tar_gz_zip_and_tar_extensions() {
+        use crate::store::upgrade_packages::{TargetArch, TargetOs};
         let (v, os, arch) = parse_package_filename("sisyphus-agent-1.0.0-linux-x86_64.tar.gz")
             .expect("tar.gz");
         assert_eq!(v, AgentVersion { major: 1, minor: 0, patch: 0 });
-        assert_eq!(os, "linux");
-        assert_eq!(arch, "x86_64");
+        assert_eq!(os, TargetOs::Linux);
+        assert_eq!(arch, TargetArch::X86_64);
 
         let (v, os, arch) = parse_package_filename("sisyphus-agent-0.9.5-macos-aarch64.zip")
             .expect("zip");
         assert_eq!(v, AgentVersion { major: 0, minor: 9, patch: 5 });
-        assert_eq!(os, "macos");
-        assert_eq!(arch, "aarch64");
+        assert_eq!(os, TargetOs::Macos);
+        assert_eq!(arch, TargetArch::Aarch64);
 
         let (v, _, _) = parse_package_filename("sisyphus-agent-1.2.3-windows-x86_64.tar")
             .expect("tar");

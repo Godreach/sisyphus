@@ -22,6 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -66,6 +67,91 @@ pub struct UpgradePackageBytes {
     pub sha256: String,
 }
 
+/// 升级包目标 OS（ADR-0010 发布矩阵子集：Linux/macOS/Windows）。落库为小写
+/// 文本（`linux`/`macos`/`windows`），serde 同形——`#[serde(rename_all =
+/// "lowercase")]` 与 DB TEXT 列往返一致。typed 取代裸 `String`：解析期一次
+/// 校验，下游无字符串 typo 风险（Primitive Obsession 收口）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetOs {
+    /// Linux。
+    Linux,
+    /// macOS。
+    Macos,
+    /// Windows。
+    Windows,
+}
+
+impl TargetOs {
+    /// 落库/查询文本。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Linux => "linux",
+            Self::Macos => "macos",
+            Self::Windows => "windows",
+        }
+    }
+
+    /// 从落库文本解析（未知值视为库损坏——取值域由解析期保证）。
+    pub fn parse(s: &str) -> Result<Self, StoreError> {
+        match s {
+            "linux" => Ok(Self::Linux),
+            "macos" => Ok(Self::Macos),
+            "windows" => Ok(Self::Windows),
+            other => Err(StoreError::Db(sqlx::Error::ColumnDecode {
+                index: "target_os".into(),
+                source: format!("未知 target_os：{other}").into(),
+            })),
+        }
+    }
+}
+
+impl std::fmt::Display for TargetOs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 升级包目标架构（ADR-0010：x86_64/aarch64）。与 [`TargetOs`] 同纪律。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetArch {
+    /// x86_64。
+    #[serde(rename = "x86_64")]
+    X86_64,
+    /// aarch64。
+    #[serde(rename = "aarch64")]
+    Aarch64,
+}
+
+impl TargetArch {
+    /// 落库/查询文本。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::Aarch64 => "aarch64",
+        }
+    }
+
+    /// 从落库文本解析（未知值视为库损坏）。
+    pub fn parse(s: &str) -> Result<Self, StoreError> {
+        match s {
+            "x86_64" => Ok(Self::X86_64),
+            "aarch64" => Ok(Self::Aarch64),
+            other => Err(StoreError::Db(sqlx::Error::ColumnDecode {
+                index: "target_arch".into(),
+                source: format!("未知 target_arch：{other}").into(),
+            })),
+        }
+    }
+}
+
+impl std::fmt::Display for TargetArch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// 升级包元数据行（`upgrade_packages` 表一行的 Rust 形态）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpgradePackageMeta {
@@ -73,10 +159,10 @@ pub struct UpgradePackageMeta {
     pub package_name: String,
     /// 解析自文件名的版本（JSON 落库）。
     pub version: AgentVersion,
-    /// 目标 OS（linux/macos/windows）。
-    pub target_os: String,
-    /// 目标架构（x86_64/aarch64）。
-    pub target_arch: String,
+    /// 目标 OS。
+    pub target_os: TargetOs,
+    /// 目标架构。
+    pub target_arch: TargetArch,
     /// 字节数。
     pub size: u64,
     /// SHA-256 校验和（十六进制小写）。
@@ -227,8 +313,8 @@ impl UpgradePackageRepo {
         )
         .bind(&meta.package_name)
         .bind(version_json)
-        .bind(&meta.target_os)
-        .bind(&meta.target_arch)
+        .bind(meta.target_os.as_str())
+        .bind(meta.target_arch.as_str())
         .bind(meta.size as i64)
         .bind(&meta.sha256)
         .bind(meta.created_at)
@@ -272,7 +358,8 @@ impl UpgradePackageRepo {
     }
 }
 
-/// 元组行 → [`UpgradePackageMeta`]（`version` JSON 列解析；脏 JSON 视为库损坏）。
+/// 元组行 → [`UpgradePackageMeta`]（`version` JSON 列解析、target_os/arch 落库
+/// 文本解析；脏数据视为库损坏）。
 fn map_meta(
     (package_name, version_json, target_os, target_arch, size, sha256, created_at): (
         String,
@@ -289,8 +376,8 @@ fn map_meta(
     Ok(UpgradePackageMeta {
         package_name,
         version,
-        target_os,
-        target_arch,
+        target_os: TargetOs::parse(&target_os)?,
+        target_arch: TargetArch::parse(&target_arch)?,
         size: size as u64,
         sha256,
         created_at,
@@ -343,8 +430,8 @@ mod tests {
                 minor: 0,
                 patch: 0,
             },
-            target_os: "linux".into(),
-            target_arch: "x86_64".into(),
+            target_os: TargetOs::Linux,
+            target_arch: TargetArch::X86_64,
             size: bytes.size,
             sha256: bytes.sha256.clone(),
             created_at,
