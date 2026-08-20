@@ -51,6 +51,54 @@ export interface CreateProjectRequest {
   scm_type: ScmTypeDto
   scm_url: string
   default_branch?: string | null
+  /** 可选 SCM 用户名（与 password 一并加密落库，供 poll/测试连接探测用；B5-T3）。 */
+  scm_username?: string | null
+  /** 可选 SCM 密码/token（加密落库；永不上命令行/URL，任何端点不回显）。 */
+  scm_password?: string | null
+}
+
+// ---------------------------------------------------------------------------
+// SCM 探测 / 测试连接 / 分支枚举 / 凭据管理 DTO（后端 `api/scm.rs`，票 B5-T3，
+// ADR-0016）。创建期测试连接/分支枚举为 ad-hoc（凭据经请求体递送、不落库）；
+// 既有项目测试连接/凭据设置走存储凭据。
+// ---------------------------------------------------------------------------
+
+/** 创建期测试连接请求（ad-hoc 凭据不落库）。 */
+export interface ScmProbeRequest {
+  scm_type: ScmTypeDto
+  scm_url: string
+  username?: string | null
+  password?: string | null
+}
+
+/** 测试连接响应：当前 head（git sha / svn revision）；空仓库为 null。 */
+export interface ScmProbeResponse {
+  head: string | null
+}
+
+/** 分支枚举请求（git only；创建期默认分支预填）。 */
+export interface ScmBranchesRequest {
+  scm_url: string
+  username?: string | null
+  password?: string | null
+}
+
+/** 一个分支（名 + head sha）。 */
+export interface ScmBranch {
+  name: string
+  head: string
+}
+
+/** 分支枚举响应：分支清单 + 默认分支（远端 HEAD 指向）。 */
+export interface ScmBranchesResponse {
+  branches: ScmBranch[]
+  default_branch: string | null
+}
+
+/** SCM 凭据设置请求（PUT 整份替换；username + password 皆空 = 清凭据）。 */
+export interface ScmCredentialRequest {
+  username?: string | null
+  password?: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -415,10 +463,11 @@ export const AUDIT_EVENTS = [
   'agent_disabled',
   'agent_enabled',
   'agent_registered',
+  'scm_credential_set',
 ] as const
 
 /** 审计事件类型（由 `AUDIT_EVENTS` 派生；后端 `AuditEvent::as_str()` 契约值，
- *  与 store 层同源，18 种）。 */
+ *  与 store 层同源，19 种）。 */
 export type AuditEventDto = (typeof AUDIT_EVENTS)[number]
 
 /** 审计查询参数（全部可选，AND 组合；分页 limit/offset，时间倒序由后端保证）。

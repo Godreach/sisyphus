@@ -917,4 +917,254 @@ mod tests {
         };
         assert_eq!(PollSpec::parse(&spec.to_json()).unwrap(), spec);
     }
+
+    // ---- 真实探测集成（本地裸仓库 fixture，AC1/AC2/AC6）----
+    //
+    // 用 SystemScmProbe（真实 git ls-remote）+ 本地裸仓库验证：poll 对新提交
+    // 真实触发并创建构建全链路（AC1/AC6），探测失败走既有 trigger 逻辑记历史
+    // 不禁用（AC2）。git 不可用时跳过（CI 自带 git）。
+
+    use crate::scm::{ScmBins, SystemScmProbe};
+    use crate::store::scm_credentials::ScmCredentialRepo;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command as StdCommand;
+
+    /// git 是否可用（真实探测集成的前置；CI 自带 git，本地极少缺）。
+    fn git_available() -> bool {
+        StdCommand::new("git")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    }
+
+    /// 创建 src（非裸，main 一个提交）+ bare（src 的裸克隆），返回
+    /// (src, bare, initial sha)。后续 [`advance_main`] 在 src 提交并 push 到 bare。
+    fn real_bare_repo(parent: &Path) -> (PathBuf, PathBuf, String) {
+        let src = parent.join("src");
+        fs::create_dir_all(&src).expect("建 src");
+        let git = |args: &[&str]| {
+            let out = StdCommand::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {:?}：{}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+        git(&["init", "--quiet"]);
+        git(&["symbolic-ref", "HEAD", "refs/heads/main"]);
+        git(&["config", "user.email", "test@sisyphus.local"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        fs::write(src.join("hello.txt"), "v1\n").expect("写文件");
+        git(&["add", "hello.txt"]);
+        git(&["commit", "--quiet", "-m", "v1"]);
+        let sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+            .expect("utf8")
+            .trim()
+            .to_string();
+        let bare = parent.join("bare");
+        StdCommand::new("git")
+            .args([
+                "clone",
+                "--bare",
+                "--quiet",
+                &src.to_string_lossy(),
+                &bare.to_string_lossy(),
+            ])
+            .output()
+            .expect("clone --bare");
+        (src, bare, sha)
+    }
+
+    /// 在 src 提交 v2 并 push 到 bare（推进 bare 的 main head），返回新 sha。
+    fn advance_main(src: &Path, bare: &Path) -> String {
+        fs::write(src.join("hello.txt"), "v2\n").expect("改文件");
+        let git = |args: &[&str]| {
+            let out = StdCommand::new("git")
+                .args(args)
+                .current_dir(src)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {:?}：{}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+        git(&["add", "hello.txt"]);
+        git(&["commit", "--quiet", "-m", "v2"]);
+        let sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+            .expect("utf8")
+            .trim()
+            .to_string();
+        // push src main → bare（本地裸仓库，免认证）。
+        let push = StdCommand::new("git")
+            .args(["push", "--quiet", &bare.to_string_lossy(), "main"])
+            .current_dir(src)
+            .output()
+            .expect("push");
+        assert!(
+            push.status.success(),
+            "push 失败：{}",
+            String::from_utf8_lossy(&push.stderr)
+        );
+        sha
+    }
+
+    /// 真实探测 fixture：迁移库 + 项目 demo（git，scm_url 给定）+ release 定义 +
+    /// poll 触发器 + SystemScmProbe（真实 git ls-remote）。返回 (pool, trigger, poll)。
+    async fn real_poll_fixture(scm_url: String) -> (SqlitePool, TriggerEngine, TriggerRow) {
+        let dir = tempfile::tempdir().expect("临时目录");
+        crate::config::Config::load(
+            dir.path().to_path_buf(),
+            crate::config::Overrides::default(),
+            crate::config::Overrides::default(),
+        )
+        .expect("目录布局");
+        let pool = crate::store::bootstrap(dir.path())
+            .await
+            .expect("bootstrap");
+        ProjectRepo::new(pool.clone())
+            .create(NewProject {
+                name: "demo".into(),
+                scm_type: ScmType::Git,
+                scm_url,
+                default_branch: Some("main".into()),
+            })
+            .await
+            .expect("建项目");
+        PipelineRepo::new(pool.clone())
+            .save("demo", "release", &pipeline(), "tester")
+            .await
+            .expect("保存定义");
+        let master_key = MasterKey::generate();
+        let engine = Engine::new(pool.clone(), master_key, EventBus::new());
+        let probe = Arc::new(SystemScmProbe::new(
+            ScmCredentialRepo::new(pool.clone()),
+            master_key,
+            ScmBins::default(),
+        )) as Arc<dyn ScmProbe>;
+        let trigger = TriggerEngine::new(engine, pool.clone(), probe);
+        let poll = TriggerRepo::new(pool.clone())
+            .create(TriggerInput {
+                project_id: 1,
+                pipeline_name: "release".into(),
+                kind: TriggerKind::Poll,
+                spec: PollSpec {
+                    interval_minutes: 5,
+                }
+                .to_json(),
+                enabled: true,
+            })
+            .await
+            .expect("建 poll");
+        LEAK_DIR.lock().expect("leak slot").push(dir);
+        (pool, trigger, poll)
+    }
+
+    /// AC1/AC6：真实探测下 poll 对新提交触发并创建构建（commit 钉到新提交）。
+    #[tokio::test]
+    async fn real_poll_triggers_on_new_commit_and_creates_build() {
+        if !git_available() {
+            eprintln!("skip: git 不可用");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("临时目录");
+        let (src, bare, initial_sha) = real_bare_repo(dir.path());
+        let (pool, trigger, poll) = real_poll_fixture(bare.to_string_lossy().into_owned()).await;
+        let repo = TriggerRepo::new(pool.clone());
+        let t0 = T0;
+        let step = 5 * MIN;
+
+        // 首探：记基线 initial_sha，不触发。
+        let r = trigger.tick(t0).await.expect("首探");
+        assert_eq!(r.poll_baseline, 1);
+        assert!(builds(&pool).await.is_empty());
+        assert_eq!(
+            repo.get(poll.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .baseline_commit
+                .as_deref(),
+            Some(initial_sha.as_str())
+        );
+
+        // 新提交：推进 bare 的 main。
+        let new_sha = advance_main(&src, &bare);
+        assert_ne!(new_sha, initial_sha);
+
+        // 到期再探 → 新提交 → 触发构建，commit 钉到新提交、基线更新。
+        let r = trigger.tick(t0 + step).await.expect("新提交");
+        assert_eq!(r.poll_fired, 1, "新提交触发一次");
+        assert_eq!(builds(&pool).await, vec![1]);
+        let build = BuildRepo::new(pool.clone())
+            .get_by_number(1, "release", 1)
+            .await
+            .expect("查")
+            .expect("应存在");
+        assert_eq!(build.trigger, TriggerSource::Poll);
+        let detail: TriggerDetail = serde_json::from_str(&build.trigger_detail).expect("解析");
+        assert_eq!(
+            detail.commit.as_deref(),
+            Some(new_sha.as_str()),
+            "poll 上下文钉轮询提交"
+        );
+        assert_eq!(
+            repo.get(poll.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .baseline_commit
+                .as_deref(),
+            Some(new_sha.as_str()),
+            "基线更新到新提交"
+        );
+        let _ = dir;
+    }
+
+    /// AC2：真实探测失败走既有 trigger 逻辑——记 last_probe_error、按节奏重试、
+    /// 不自动禁用（基线不动）。
+    #[tokio::test]
+    async fn real_poll_probe_failure_records_history_without_disabling() {
+        if !git_available() {
+            eprintln!("skip: git 不可用");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("临时目录");
+        let bad_url = dir
+            .path()
+            .join("no-such-repo")
+            .to_string_lossy()
+            .into_owned();
+        let (pool, trigger, poll) = real_poll_fixture(bad_url).await;
+        let repo = TriggerRepo::new(pool.clone());
+
+        let r = trigger.tick(T0).await.expect("探测失败");
+        assert_eq!(r.probe_errors, 1, "探测失败记 probe_errors");
+        assert!(builds(&pool).await.is_empty(), "失败不触发");
+        let row = repo.get(poll.id).await.unwrap().unwrap();
+        assert!(
+            row.last_probe_error.is_some(),
+            "记 last_probe_error：{:?}",
+            row.last_probe_error
+        );
+        assert!(row.enabled, "探测失败不自动禁用");
+        assert!(
+            row.baseline_commit.is_none(),
+            "失败不记基线 → 下次节奏对新提交重试"
+        );
+        let _ = dir;
+    }
 }

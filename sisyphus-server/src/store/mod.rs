@@ -17,6 +17,7 @@ pub mod logs;
 pub mod members;
 pub mod pipelines;
 pub mod projects;
+pub mod scm_credentials;
 pub mod secrets;
 pub mod sessions;
 pub mod tokens;
@@ -33,6 +34,7 @@ pub use artifacts::{
     validate_artifact_name,
 };
 pub use logs::SqliteLogStore;
+pub use scm_credentials::ScmCredentialRepo;
 pub use traits::{
     ArtifactMeta, ArtifactMetaRepo, ArtifactStore, ByteStream, LogChunk, LogLocation, LogStore,
 };
@@ -272,6 +274,7 @@ mod tests {
             "triggers",
             "logs",
             "artifacts",
+            "project_scm_credentials",
         ] {
             assert!(
                 tables.iter().any(|t| t == expected),
@@ -325,6 +328,7 @@ mod tests {
             "DROP TABLE triggers",
             "DROP TABLE logs",
             "DROP TABLE artifacts",
+            "DROP TABLE project_scm_credentials",
         ] {
             sqlx::raw_sql(stmt)
                 .execute(&pool)

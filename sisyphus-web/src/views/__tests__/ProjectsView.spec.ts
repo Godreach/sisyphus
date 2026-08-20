@@ -146,19 +146,67 @@ describe('ProjectsView 项目列表 + 新建', () => {
     wrapper.unmount()
   })
 
-  it('测试连接按钮禁用（端点未交付）+ 提示；保存不依赖该动作', async () => {
-    fetchMock.mockResolvedValue(jsonResponse(200, []))
+  it('测试连接按钮已解禁：点击调 scm-probe + scm-branches，预填默认分支、展示 head', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, [])) // 列表
+      .mockResolvedValueOnce(jsonResponse(200, { head: 'abc123' })) // scm-probe
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          branches: [{ name: 'main', head: 'abc123' }],
+          default_branch: 'main',
+        }),
+      ) // scm-branches
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.text()).toContain('暂无项目'))
 
     await wrapper.get('button[name="project-new"]').trigger('click')
-    const testBtn = wrapper.get('button.btn-secondary')
-    expect((testBtn.element as HTMLButtonElement).disabled).toBe(true)
-    expect(wrapper.text()).toContain('测试连接不阻塞保存')
-
-    // 点击禁用按钮不发请求（无 fetch 调用新增）。
+    const testBtn = wrapper.get('button[name="project-test-connection"]')
+    expect((testBtn.element as HTMLButtonElement).disabled).toBe(false)
+    await wrapper.get('input[name="project-url"]').setValue('https://x/repo.git')
     await testBtn.trigger('click')
-    expect(fetchMock).toHaveBeenCalledTimes(1) // 只有列表加载那次
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain('连接成功'))
+    const urls = fetchMock.mock.calls.map((c) => (c as [string])[0])
+    expect(urls).toContain('/api/v1/projects/scm-probe')
+    expect(urls).toContain('/api/v1/projects/scm-branches')
+    // 默认分支预填。
+    expect(
+      (wrapper.get('input[name="project-branch"]').element as HTMLInputElement).value,
+    ).toBe('main')
+    wrapper.unmount()
+  })
+
+  it('保存带 SCM 凭据：POST /projects 含 scm_username/scm_password', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, [])) // 列表
+    const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.text()).toContain('暂无项目'))
+
+    await wrapper.get('button[name="project-new"]').trigger('click')
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(201, project(5, 'credproj', 'git', 'https://x/c.git')),
+    )
+    await wrapper.get('input[name="project-name"]').setValue('credproj')
+    await wrapper.get('input[name="project-url"]').setValue('https://x/c.git')
+    await wrapper.get('input[name="project-scm-username"]').setValue('alice')
+    await wrapper.get('input[name="project-scm-password"]').setValue('hunter2-pw')
+    await wrapper.get('button[name="project-save"]').trigger('click')
+
+    await vi.waitFor(() => {
+      const post = fetchMock.mock.calls.find(
+        (c) =>
+          (c as [string, RequestInit])[1]?.method === 'POST' &&
+          (c as [string])[0] === '/api/v1/projects',
+      )
+      expect(post).toBeTruthy()
+      const [, init] = post as unknown as [string, RequestInit]
+      expect(JSON.parse(init.body as string)).toMatchObject({
+        name: 'credproj',
+        scm_type: 'git',
+        scm_url: 'https://x/c.git',
+        scm_username: 'alice',
+        scm_password: 'hunter2-pw',
+      })
+    })
     wrapper.unmount()
   })
 

@@ -577,7 +577,8 @@
                 "agent_created",
                 "agent_disabled",
                 "agent_enabled",
-                "agent_registered"
+                "agent_registered",
+                "scm_credential_set"
               ]
             }
           },
@@ -1160,6 +1161,148 @@
           },
           "422": {
             "description": "输入校验失败（错误清单整组透传）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/scm-branches": {
+      "post": {
+        "tags": [
+          "scm"
+        ],
+        "summary": "分支枚举（创建期，全局 admin，git only）：ls-remote --heads 列分支 +\n--symref HEAD 解析默认分支，供新建项目默认分支预填。",
+        "operationId": "scm_branches",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScmBranchesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "分支清单 + 默认分支",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScmBranchesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非全局管理员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "探测失败（URL/凭据问题）或 URL 空",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "缺 git 二进制",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/scm-probe": {
+      "post": {
+        "tags": [
+          "scm"
+        ],
+        "summary": "测试连接（创建期，全局 admin，ad-hoc 凭据不落库）：ls-remote/info 探测\n返回当前 head；失败可读错误（凭据错误不回显凭据），不阻塞保存。",
+        "operationId": "scm_probe",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScmProbeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "探测成功，返回当前 head",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScmProbeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "非全局管理员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "探测失败（URL/凭据问题，可读错误；凭据不回显）或 URL 空",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "缺 git/svn 二进制（server 前置未满足，清晰报错）",
             "content": {
               "application/json": {
                 "schema": {
@@ -2741,6 +2884,71 @@
         }
       }
     },
+    "/api/v1/projects/{name}/scm-credential": {
+      "put": {
+        "tags": [
+          "scm"
+        ],
+        "summary": "设置/清空 SCM 凭据（项目 admin）：username + password 加密落库（PUT 整份\n替换；皆空 = 清），审计 `scm_credential_set`。密码经 XChaCha20-Poly1305\n加密（复用机密同套，ADR-0015），永不可读回。",
+        "operationId": "put_scm_credential",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScmCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "已写入/清空：加密落库，任何端点不回显值"
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（需项目 admin 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{name}/secrets": {
       "get": {
         "tags": [
@@ -2941,6 +3149,88 @@
           },
           "404": {
             "description": "项目不存在或不可见，或机密名不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}/test-connection": {
+      "post": {
+        "tags": [
+          "scm"
+        ],
+        "summary": "测试连接（既有项目，项目 admin，存储凭据）：解密项目 SCM 凭据探测 head\n（项目设置「测试连接」，ADR-0016）。",
+        "operationId": "test_connection",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "探测成功，返回当前 head",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScmProbeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（需项目 admin 档）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在/不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "探测失败（URL/凭据问题；凭据不回显）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "缺 git/svn 二进制或凭据解密失败",
             "content": {
               "application/json": {
                 "schema": {
@@ -3774,6 +4064,13 @@
             "type": "string",
             "description": "项目名（唯一）。"
           },
+          "scm_password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "可选 SCM 密码/token（加密落库；永不上命令行/URL）。"
+          },
           "scm_type": {
             "$ref": "#/components/schemas/ScmTypeDto",
             "description": "仓库类型。"
@@ -3781,6 +4078,13 @@
           "scm_url": {
             "type": "string",
             "description": "仓库 URL。"
+          },
+          "scm_username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "可选 SCM 用户名（与 password 一并加密落库，供 poll/测试连接探测用；\nB5-T3，ADR-0015/0016）。值只写不读，任何端点不回显。"
           }
         }
       },
@@ -4477,6 +4781,139 @@
           }
         }
       },
+      "ScmBranch": {
+        "type": "object",
+        "description": "一个分支（名 + head sha）。",
+        "required": [
+          "name",
+          "head"
+        ],
+        "properties": {
+          "head": {
+            "type": "string",
+            "description": "分支 head commit sha。"
+          },
+          "name": {
+            "type": "string",
+            "description": "分支名。"
+          }
+        }
+      },
+      "ScmBranchesRequest": {
+        "type": "object",
+        "description": "分支枚举请求（git only；创建期默认分支预填）。",
+        "required": [
+          "scm_url"
+        ],
+        "properties": {
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "可选密码/token。"
+          },
+          "scm_url": {
+            "type": "string",
+            "description": "git 仓库 URL。"
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "可选用户名。"
+          }
+        }
+      },
+      "ScmBranchesResponse": {
+        "type": "object",
+        "description": "分支枚举响应：分支清单 + 默认分支（远端 HEAD 指向的分支）。",
+        "required": [
+          "branches"
+        ],
+        "properties": {
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScmBranch"
+            },
+            "description": "全部分支（`ls-remote --heads`）。"
+          },
+          "default_branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "默认分支（`--symref HEAD` 解析；detached HEAD 为 null）。"
+          }
+        }
+      },
+      "ScmCredentialRequest": {
+        "type": "object",
+        "description": "SCM 凭据设置请求（PUT 整份替换语义；username + password 皆空 = 清凭据）。",
+        "properties": {
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "密码/token（机密；空 = 不设密码。username + password 皆空 = 清凭据）。"
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "用户名（非机密；空 = 不设用户名）。"
+          }
+        }
+      },
+      "ScmProbeRequest": {
+        "type": "object",
+        "description": "创建期探测请求（测试连接，ad-hoc 凭据不落库）。",
+        "required": [
+          "scm_type",
+          "scm_url"
+        ],
+        "properties": {
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "可选密码/token（与 username 一同递送，不落库；永不上命令行/URL）。"
+          },
+          "scm_type": {
+            "$ref": "#/components/schemas/ScmTypeDto",
+            "description": "仓库类型（git / svn）。"
+          },
+          "scm_url": {
+            "type": "string",
+            "description": "仓库 URL。"
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "可选用户名（与 password 一同递送，不落库）。"
+          }
+        }
+      },
+      "ScmProbeResponse": {
+        "type": "object",
+        "description": "测试连接响应：当前 head（git sha / svn revision）；空仓库为 null。",
+        "properties": {
+          "head": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "当前 head（git commit sha / svn revision）；空仓库为 null。"
+          }
+        }
+      },
       "ScmTypeDto": {
         "type": "string",
         "description": "仓库类型（API 形态；`git` / `svn`）。",
@@ -4766,6 +5203,10 @@
     {
       "name": "projects",
       "description": "项目管理（v1：list / create / get；成员三档角色分配，票 B2b-T5）"
+    },
+    {
+      "name": "scm",
+      "description": "SCM 探测 / 测试连接 / 分支枚举 / 凭据管理（票 B5-T3，ADR-0016：git ls-remote / svn info + ASKPASS 凭据递送，凭据不回显）"
     },
     {
       "name": "secrets",

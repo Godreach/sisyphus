@@ -58,12 +58,15 @@ pub enum AuditEvent {
     /// 换新并吊销旧值；actor 记 Agent 名，detail 记构建机名，注册码/token
     /// 值永不落审计）。
     AgentRegistered,
+    /// 设置/清空项目 SCM 凭据（B5-T3，ADR-0015：凭据变更属安全事件；detail
+    /// 只记 set/clear 动作，永不记用户名/密码值——值形态在审计路径不存在）。
+    ScmCredentialSet,
 }
 
 impl AuditEvent {
     /// 全部事件类型（契约单点：`as_str` 映射 + [`Self::parse`] 识别 +
     /// OpenAPI enum 生成的共同来源——新增事件类型只改这里与 [`Self::as_str`]）。
-    pub const ALL: [AuditEvent; 18] = [
+    pub const ALL: [AuditEvent; 19] = [
         Self::LoginSuccess,
         Self::LoginFailure,
         Self::Logout,
@@ -82,6 +85,7 @@ impl AuditEvent {
         Self::AgentDisabled,
         Self::AgentEnabled,
         Self::AgentRegistered,
+        Self::ScmCredentialSet,
     ];
 
     /// 落库 / 查询过滤文本（契约值；filter 参数按此匹配）。
@@ -105,6 +109,7 @@ impl AuditEvent {
             Self::AgentDisabled => "agent_disabled",
             Self::AgentEnabled => "agent_enabled",
             Self::AgentRegistered => "agent_registered",
+            Self::ScmCredentialSet => "scm_credential_set",
         }
     }
 

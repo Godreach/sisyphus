@@ -58,6 +58,13 @@ pub struct CreateProjectRequest {
     pub scm_url: String,
     /// git 默认分支（可空；svn 项目不适用）。
     pub default_branch: Option<String>,
+    /// 可选 SCM 用户名（与 password 一并加密落库，供 poll/测试连接探测用；
+    /// B5-T3，ADR-0015/0016）。值只写不读，任何端点不回显。
+    #[serde(default)]
+    pub scm_username: Option<String>,
+    /// 可选 SCM 密码/token（加密落库；永不上命令行/URL）。
+    #[serde(default)]
+    pub scm_password: Option<String>,
 }
 
 /// 项目视图（list / create / get 共用）。
@@ -143,6 +150,15 @@ pub async fn create(
         return Err(ApiError::validation("项目输入校验失败", issues));
     }
 
+    // SCM 凭据（可选，B5-T3）：先取出（加密落库在项目创建后，凭 project.id）。
+    // 用户名 trim、密码原样（密码可含首尾空白）；空串视为不设。
+    let scm_username = req
+        .scm_username
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let scm_password = req.scm_password.filter(|s| !s.is_empty());
+
     let project = state
         .projects
         .create(NewProject {
@@ -167,6 +183,36 @@ pub async fn create(
             None,
         )
         .await?;
+    // SCM 凭据落库（加密，复用机密同套 ADR-0015）+ 审计 set（永不记值）。
+    let scm_ciphertext = match scm_password.as_deref() {
+        Some(p) => Some(
+            crate::secrets::encrypt(&state.master_key, p.as_bytes())
+                .map_err(|e| ApiError::internal("scm credential encrypt", &e))?,
+        ),
+        None => None,
+    };
+    if scm_username.is_some() || scm_ciphertext.is_some() {
+        state
+            .scm_credentials
+            .set(
+                project.id,
+                scm_username.as_deref(),
+                scm_ciphertext.as_deref(),
+                &auth.username,
+                crate::store::now_ms(),
+            )
+            .await?;
+        state
+            .audit
+            .insert(
+                crate::store::now_ms(),
+                &auth.username,
+                crate::store::audit::AuditEvent::ScmCredentialSet,
+                Some(&project.name),
+                Some(&serde_json::json!({ "action": "set" }).to_string()),
+            )
+            .await?;
+    }
     Ok((StatusCode::CREATED, Json(project.into())))
 }
 

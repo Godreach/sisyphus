@@ -35,6 +35,7 @@ pub mod members;
 pub mod pipelines;
 pub mod policy;
 pub mod projects;
+pub mod scm;
 pub mod secrets;
 pub mod tokens;
 pub mod triggers;
@@ -66,6 +67,7 @@ use crate::store::audit::AuditRepo;
 use crate::store::members::MemberRepo;
 use crate::store::pipelines::PipelineRepo;
 use crate::store::projects::ProjectRepo;
+use crate::store::scm_credentials::ScmCredentialRepo;
 use crate::store::secrets::SecretRepo;
 use crate::store::sessions::SessionRepo;
 use crate::store::tokens::PatRepo;
@@ -93,6 +95,9 @@ pub struct AppState {
     pub members: MemberRepo,
     /// 项目机密 repo（票 B2b-T6：建/覆写/列名/删，值只写不读）。
     pub secrets: SecretRepo,
+    /// 项目 SCM 凭据 repo（票 B5-T3，ADR-0015/0016：加密落库 + 探测路径解密；
+    /// create/项目设置可存取，poll 与测试连接解密后经 ASKPASS/递送探测）。
+    pub scm_credentials: ScmCredentialRepo,
     /// Agent 注册面 repo（票 B2c-T3：建条目/启停/编辑/在线维护/标签匹配；
     /// REST 面与 gRPC 通道认证面共用）。
     pub agents: AgentRepo,
@@ -157,13 +162,12 @@ impl AppState {
             pats: PatRepo::new(pool.clone()),
             members: MemberRepo::new(pool.clone()),
             secrets: SecretRepo::new(pool.clone()),
+            scm_credentials: ScmCredentialRepo::new(pool.clone()),
             agents: AgentRepo::new(pool.clone()),
             triggers: TriggerRepo::new(pool.clone()),
             audit: AuditRepo::new(pool.clone()),
             logs: SqliteLogStore::open(&pool).await?,
-            artifacts: LocalDiskArtifactStore::new(
-                data_dir.join(crate::config::ARTIFACTS_DIR),
-            ),
+            artifacts: LocalDiskArtifactStore::new(data_dir.join(crate::config::ARTIFACTS_DIR)),
             artifact_meta: SqliteArtifactMetaRepo::new(pool.clone()),
             engine: Engine::new(pool.clone(), master_key, bus.clone()),
             bus,
@@ -222,7 +226,20 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route("/users/{name}", patch(users::patch))
         .route("/users/{name}/password", put(users::reset_password))
         .route("/projects", get(projects::list).post(projects::create))
+        // SCM 探测（创建期，ad-hoc 凭据不落库，全局 admin）：测试连接 + 分支枚举预填
+        // （B5-T3，ADR-0016）。静态段置于 `/projects/{name}` 之前，免被动态段捕获。
+        .route("/projects/scm-probe", post(scm::scm_probe))
+        .route("/projects/scm-branches", post(scm::scm_branches))
         .route("/projects/{name}", get(projects::get_one))
+        // 既有项目 SCM 面（项目 admin）：测试连接（存储凭据）+ 凭据设置（加密落库）。
+        .route(
+            "/projects/{name}/test-connection",
+            post(scm::test_connection),
+        )
+        .route(
+            "/projects/{name}/scm-credential",
+            put(scm::put_scm_credential),
+        )
         .route(
             "/projects/{name}/members",
             get(members::list).put(members::replace),

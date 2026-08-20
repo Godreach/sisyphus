@@ -138,14 +138,17 @@ async fn main() {
 
     // 触发器装配（票 B2c-T6，ADR-0016）：触发引擎共享 engine + 事件总线，
     // 后台周期扫表（cron 按表达式命中触发、poll 按节奏轮询）。探测经 scm
-    // trait 缝隔离——本批挂 [`scm::UnimplementedProbe`]（poll 记
-    // last_probe_error、按节奏重试，真实 git/svn 探测随 scm 批次换入），
-    // cron 不经探测照常工作。与 server 进程同生命周期（单实例纪律）。
+    // trait 缝隔离——B5-T3 换入 [`scm::SystemScmProbe`]（真实 `git ls-remote` /
+    // `svn info`，凭据解密后经 ASKPASS/递送、缺二进制清晰报错、错误不回显
+    // 凭据），cron 不经探测照常工作。与 server 进程同生命周期（单实例纪律）。
     let trigger_engine = sisyphus_server::trigger::TriggerEngine::new(
         state.engine.clone(),
         pool.clone(),
-        Arc::new(sisyphus_server::scm::UnimplementedProbe)
-            as Arc<dyn sisyphus_server::scm::ScmProbe>,
+        Arc::new(sisyphus_server::scm::SystemScmProbe::new(
+            state.scm_credentials.clone(),
+            state.master_key,
+            sisyphus_server::scm::ScmBins::default(),
+        )) as Arc<dyn sisyphus_server::scm::ScmProbe>,
     );
     let trigger_task = tokio::spawn(async move {
         trigger_engine

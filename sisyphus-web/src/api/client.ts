@@ -30,6 +30,11 @@ import type {
   ResetPasswordRequest,
   RerunBuildRequest,
   SaveDefinitionResponse,
+  ScmBranchesRequest,
+  ScmBranchesResponse,
+  ScmCredentialRequest,
+  ScmProbeRequest,
+  ScmProbeResponse,
   SecretNameResponse,
   TokenResponse,
   TriggerBuildRequest,
@@ -82,9 +87,27 @@ export const projectsApi = {
   /** 项目详情（viewer 档）。 */
   get: (name: string) => http.get<ProjectResponse>(`projects/${encodeURIComponent(name)}`),
 
-  /** 建项目（git/svn + 仓库 URL + 可选默认分支）。 */
+  /** 建项目（git/svn + 仓库 URL + 可选默认分支 + 可选 SCM 凭据）。 */
   create: (req: CreateProjectRequest) =>
     http.post<ProjectResponse>('projects', { json: req }),
+
+  /** 测试连接（创建期，全局 admin，ad-hoc 凭据不落库）：ls-remote/info 探测
+   *  返回当前 head；不阻塞保存，失败可读错误（凭据不回显，B5-T3）。 */
+  scmProbe: (req: ScmProbeRequest) =>
+    http.post<ScmProbeResponse>('projects/scm-probe', { json: req }),
+
+  /** 分支枚举（git，创建期预填默认分支）：ls-remote --heads + --symref HEAD
+   *  解析默认分支，供新建项目默认分支预填（ADR-0016）。 */
+  scmBranches: (req: ScmBranchesRequest) =>
+    http.post<ScmBranchesResponse>('projects/scm-branches', { json: req }),
+
+  /** 既有项目测试连接（项目 admin，存储凭据）：解密项目 SCM 凭据探测 head。 */
+  testConnection: (name: string) =>
+    http.post<ScmProbeResponse>(`projects/${encodeURIComponent(name)}/test-connection`),
+
+  /** 设置/清空 SCM 凭据（项目 admin，加密落库；username + password 皆空 = 清）。 */
+  putScmCredential: (name: string, req: ScmCredentialRequest) =>
+    http.put<void>(`projects/${encodeURIComponent(name)}/scm-credential`, { json: req }),
 
   /** 查看项目成员（项目 admin 档）。 */
   listMembers: (name: string) =>

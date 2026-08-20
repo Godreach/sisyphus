@@ -14,6 +14,7 @@ use super::logs;
 use super::members;
 use super::pipelines;
 use super::projects;
+use super::scm;
 use super::secrets;
 use super::tokens;
 use super::triggers;
@@ -46,6 +47,10 @@ use super::users;
         projects::list,
         projects::create,
         projects::get_one,
+        scm::scm_probe,
+        scm::scm_branches,
+        scm::test_connection,
+        scm::put_scm_credential,
         members::list,
         members::replace,
         secrets::list_secrets,
@@ -93,6 +98,12 @@ use super::users;
         projects::ScmTypeDto,
         projects::CreateProjectRequest,
         projects::ProjectResponse,
+        scm::ScmProbeRequest,
+        scm::ScmProbeResponse,
+        scm::ScmBranchesRequest,
+        scm::ScmBranchesResponse,
+        scm::ScmBranch,
+        scm::ScmCredentialRequest,
         members::RoleDto,
         members::MemberAssignment,
         members::MemberResponse,
@@ -141,6 +152,7 @@ use super::users;
         (name = "infra", description = "探针与基础设施端点"),
         (name = "auth", description = "认证与会话（setup wizard / register / login / logout / me / 自助改密）与 PAT（Bearer 通道，票 B2b-T3）"),
         (name = "projects", description = "项目管理（v1：list / create / get；成员三档角色分配，票 B2b-T5）"),
+        (name = "scm", description = "SCM 探测 / 测试连接 / 分支枚举 / 凭据管理（票 B5-T3，ADR-0016：git ls-remote / svn info + ASKPASS 凭据递送，凭据不回显）"),
         (name = "secrets", description = "项目机密（票 B2b-T6：值只写不读——建/覆写、仅名清单、删；viewer/runner 连名不可见，项目 admin 档）"),
         (name = "pipelines", description = "Pipeline 定义读写（model 校验 + revision 语义）"),
         (name = "builds", description = "构建生命周期（票 B2c-T5：手动触发 / 取消 / 重跑 / 列表 / 详情；runner 档触发/取消/重跑、viewer 档列表/详情）"),
