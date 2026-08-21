@@ -137,3 +137,41 @@ jobs:
 
       - name: headless 冒烟 12 页主路径
         run: npm run smoke
+
+  # 6 目标原生构建验证（票 B5-T10 / #82，ADR-0022）：PR 级、仅 build（无 test/
+  # clippy——已由 build-and-test 覆盖），取「轻者」（PR 级早反馈而非 nightly）。
+  # 6 目标全用原生 runner（非 cross）：server 有 C 依赖（ring via lettre→rustls
+  # + libsqlite3-sys）、agent 也有 C 依赖（aws-lc-sys via reqwest→rustls→
+  # aws-lc-rs），ADR-0022 明确本地 Windows→Linux 交叉编译被 C 工具链阻断，
+  # 6 目标原生构建由 CI 验证。仓库为 public → 6 个原生 runner 全免费可用。
+  # sisyphus-web/dist/ 已提交 git（rust-embed 编译期内嵌），server 构建无需 npm。
+  # 仅 pull_request 触发——避免与 tag push 时 release.yml 的构建矩阵重复跑。
+  # 注：本 matrix.target 与 release.yml 的 build-matrix 同源（6 目标原生 runner）；
+  # 加目标时两处同改——release.yml 为发布产物权威，此处为 CI 验证镜像。
+  cross-compile-matrix:
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [server, agent]
+        target:
+          - { runner: ubuntu-latest,   os: linux,   arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, os: linux,   arch: aarch64 }
+          - { runner: macos-13,         os: macos,   arch: x86_64 }
+          - { runner: macos-14,         os: macos,   arch: aarch64 }
+          - { runner: windows-latest,   os: windows, arch: x86_64 }
+          - { runner: windows-11-arm,   os: windows, arch: aarch64 }
+    runs-on: ${{ matrix.target.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-${{ matrix.crate }}-${{ matrix.target.runner }}
+
+      - name: Build（release，原生）
+        run: cargo build --release -p sisyphus-${{ matrix.crate }}
+

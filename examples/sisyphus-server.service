@@ -1,0 +1,45 @@
+# sisyphus-server systemd unit 模板（票 B5-T10 / #82，ADR-0010 服务化示例）。
+#
+# v1 仅文档示例，不做内置服务安装子命令（ADR-0010 边界：服务参数集稳定后再评估）。
+#
+# 用法：
+#   sudo install -m 0644 sisyphus-server.service /etc/systemd/system/
+#   sudo useradd --system --create-home --home-dir /var/lib/sisyphus --shell /usr/sbin/nologin sisyphus
+#   sudo mkdir -p /var/lib/sisyphus && sudo chown sisyphus:sisyphus /var/lib/sisyphus
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now sisyphus-server
+#
+# 二进制路径按实际解压位置改 ExecStart；数据目录默认 /var/lib/sisyphus（内含
+# sisyphus.db + artifacts/ + master.key，首启自动生成 config.toml + master.key）。
+# gRPC 默认 bind 127.0.0.1:50051（loopback）——远端 Agent 需经环境变量
+# SISYPHUS_GRPC_ADDR=0.0.0.0:50051 覆盖（见 Environment）。
+#
+# 升级顺序（ADR-0010）：Server 先升、Agent 后升；升级 = 替换二进制重启，启动
+# 自动跑前向迁移并迁移前自动备份 db（<data-dir>/backups/）。N-1 兼容窗口。
+
+[Unit]
+Description=sisyphus CI Server
+Documentation=https://github.com/Godreach/sisyphus
+After=network.target
+
+[Service]
+Type=simple
+User=sisyphus
+Group=sisyphus
+# 二进制路径——按实际解压位置改：
+ExecStart=/usr/local/bin/sisyphus-server --data-dir /var/lib/sisyphus
+# 远端 Agent 经 gRPC 连接时取消注释（覆盖 loopback 默认 127.0.0.1:50051）：
+#Environment=SISYPHUS_GRPC_ADDR=0.0.0.0:50051
+Environment=SISYPHUS_LOG_LEVEL=info
+Environment=SISYPHUS_LOG_FORMAT=json
+Restart=on-failure
+RestartSec=5s
+# 数据目录权限：
+ReadWritePaths=/var/lib/sisyphus
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

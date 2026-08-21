@@ -1,0 +1,211 @@
+name: release
+
+# 发布工程（票 B5-T10 / #82，ADR-0010）：打 `v*` tag 触发 6 目标原生构建
+# 矩阵 → 12 个压缩包（server/agent × 6 目标）+ sha256sums.txt 附 GitHub Release
+# → ghcr 官方 Docker 镜像（仅 Server，双架构 manifest）。
+#
+# 6 目标全用原生 runner（非 cross）：server 有 C 依赖（ring via lettre→rustls
+# + libsqlite3-sys bundled）、agent 也有 C 依赖（aws-lc-sys via reqwest→rustls
+# →aws-lc-rs），ADR-0022 明确本地 Windows→Linux 交叉编译被 C 工具链阻断，
+# 6 目标原生构建由本 workflow 验证。仓库为 public → 6 个原生 runner 全免费：
+# ubuntu-latest(x86_64) / ubuntu-24.04-arm(aarch64) / macos-13(x86_64) /
+# macos-14(aarch64) / windows-latest(x86_64) / windows-11-arm(aarch64 preview)。
+#
+# sisyphus-web/dist/ 已提交 git（rust-embed 编译期内嵌），故 server 构建无需
+# npm 步骤——直接 cargo build --release 即内嵌前端产物。
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write    # GH Release 附件
+  packages: write    # ghcr 镜像推送
+
+jobs:
+  # 12 产物构建：{server,agent} × 6 原生目标。fail-fast: false——单个目标红
+  # （如 windows-11-arm preview 抖动）不连坐其余 11 个。
+  # 注：本 matrix.target 与 ci.yml 的 cross-compile-matrix 同源（6 目标原生
+  # runner，此处多 ext 字段供打包）；加目标时两处同改——本文件为发布产物权威。
+  build-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [server, agent]
+        target:
+          - { runner: ubuntu-latest,   os: linux,   arch: x86_64,  ext: tar.gz }
+          - { runner: ubuntu-24.04-arm, os: linux,   arch: aarch64, ext: tar.gz }
+          - { runner: macos-13,         os: macos,   arch: x86_64,  ext: tar.gz }
+          - { runner: macos-14,         os: macos,   arch: aarch64, ext: tar.gz }
+          - { runner: windows-latest,   os: windows, arch: x86_64,  ext: zip }
+          - { runner: windows-11-arm,   os: windows, arch: aarch64, ext: zip }
+    runs-on: ${{ matrix.target.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.crate }}-${{ matrix.target.runner }}
+
+      # 原生构建——runner 架构与目标一致，无需 --target / cross（C 依赖用
+      # 原生工具链直接编译）。dist/ 已提交，server 内嵌前端无需 npm。
+      - name: Build（release）
+        run: cargo build --release -p sisyphus-${{ matrix.crate }}
+
+      # 版本号取 tag 去 v 前缀，与 workspace.package.version 对齐。
+      - name: 解析版本号
+        id: ver
+        shell: bash
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          pkg="sisyphus-${{ matrix.crate }}-${ver}-${{ matrix.target.os }}-${{ matrix.target.arch }}"
+          echo "pkgname=$pkg" >> "$GITHUB_OUTPUT"
+
+      - name: 打包（unix tar.gz）
+        if: matrix.target.ext == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="target/release/sisyphus-${{ matrix.crate }}"
+          pkg="${{ steps.ver.outputs.pkgname }}"
+          # 装进以包名命名的目录——解压即得同级可执行文件 + README 指针。
+          mkdir -p "$pkg"
+          cp "$src" "$pkg/"
+          cp README.md "$pkg/" 2>/dev/null || true
+          cp LICENSE "$pkg/" 2>/dev/null || true
+          tar czf "$pkg.tar.gz" "$pkg"
+          echo "artifact=$pkg.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: 打包（windows zip）
+        if: matrix.target.ext == 'zip'
+        shell: pwsh
+        run: |
+          $pkg = "${{ steps.ver.outputs.pkgname }}"
+          $src = "target\release\sisyphus-${{ matrix.crate }}.exe"
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          Copy-Item $src -Destination $pkg
+          if (Test-Path README.md) { Copy-Item README.md -Destination $pkg }
+          if (Test-Path LICENSE)   { Copy-Item LICENSE   -Destination $pkg }
+          Compress-Archive -Path $pkg -DestinationPath "$pkg.zip"
+          "artifact=$pkg.zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.pkgname }}
+          path: ${{ steps.ver.outputs.pkgname }}.${{ matrix.target.ext }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # 汇 12 产物 + sha256sums.txt，附 GitHub Release。
+  release-assets:
+    needs: build-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: sisyphus-*
+          merge-multiple: true
+
+      - name: 生成 sha256sums.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          # 单行 sha256 + 文件名，与 GNU sha256sum 一致——用户 `sha256sum -c sha256sums.txt` 可校。
+          sha256sum sisyphus-* | sort -k2 > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: 附 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/sisyphus-*
+            artifacts/sha256sums.txt
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  # ghcr 官方 Docker 镜像（仅 Server，双架构）。非 buildx QEMU——双原生 runner
+  # 各建单架构镜像，再 manifest 合并：避 aws-lc-sys+ring+libsqlite3-sys 的 C
+  # 编译在 QEMU 仿真下 20-40 分钟慢构建。
+  docker-amd64:
+    needs: build-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解析版本号
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: 登录 ghcr
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: 构建 amd64 镜像
+        run: |
+          docker build --platform linux/amd64 \
+            -t ghcr.io/godreach/sisyphus-server:${{ steps.ver.outputs.version }}-amd64 \
+            .
+          docker push ghcr.io/godreach/sisyphus-server:${{ steps.ver.outputs.version }}-amd64
+
+  docker-arm64:
+    needs: build-matrix
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解析版本号
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: 登录 ghcr
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: 构建 arm64 镜像（原生 runner，无 QEMU）
+        run: |
+          docker build --platform linux/arm64 \
+            -t ghcr.io/godreach/sisyphus-server:${{ steps.ver.outputs.version }}-arm64 \
+            .
+          docker push ghcr.io/godreach/sisyphus-server:${{ steps.ver.outputs.version }}-arm64
+
+  # 合并双架构为多架构 manifest，打 :<version> 与 :latest。
+  docker-manifest:
+    needs: [docker-amd64, docker-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 解析版本号
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: 登录 ghcr
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: 合并多架构 manifest
+        run: |
+          set -euo pipefail
+          ver="${{ steps.ver.outputs.version }}"
+          # 开启 docker manifest 实验性（buildx 时代默认可用，保险起见置 DOCKER_CLI_EXPERIMENTAL）。
+          export DOCKER_CLI_EXPERIMENTAL=enabled
+          for tag in "$ver" latest; do
+            docker manifest create "ghcr.io/godreach/sisyphus-server:$tag" \
+              "ghcr.io/godreach/sisyphus-server:$ver-amd64" \
+              "ghcr.io/godreach/sisyphus-server:$ver-arm64"
+            docker manifest annotate "ghcr.io/godreach/sisyphus-server:$tag" \
+              "ghcr.io/godreach/sisyphus-server:$ver-arm64" --os linux --arch arm64
+            docker manifest push "ghcr.io/godreach/sisyphus-server:$tag"
+          done

@@ -1,3 +1,10 @@
 # 钉 .githooks/ 下脚本行尾为 LF——防 Windows autocrlf 把脚本转 CRLF 致
 # `#!/usr/bin/env bash\r` 找不到解释器（本地 git bash 与 ubuntu CI 同坑）。
 .githooks/* eol=lf
+
+# 发布工程产物（票 B5-T10）：systemd unit / Dockerfile / compose 钉 LF——
+# 防 Windows checkout 行尾 CRLF 让 systemd 拒 unit / Docker 解析异常 / compose
+# 跨平台行为漂移（与 .githooks 同坑）。
+*.service eol=lf
+Dockerfile eol=lf
+examples/docker-compose.yml eol=lf

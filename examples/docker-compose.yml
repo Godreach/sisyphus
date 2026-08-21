@@ -1,0 +1,34 @@
+# sisyphus-server Docker Compose 示例（票 B5-T10 / #82，ADR-0010）。
+#
+# 官方镜像仅 Server：ghcr.io/godreach/sisyphus-server，多架构 manifest
+# （linux/amd64 + linux/arm64），debian-slim 基底，非 root，/data 卷，
+# EXPOSE 8080（REST）+ 50051（gRPC）。
+#
+# 端口策略（ADR-0005）：REST 8080 默认 bind 0.0.0.0 → 直接发布即可；
+# gRPC 50051 默认 bind 127.0.0.1（loopback）——容器内对远端 Agent 不可达，
+# 需经 SISYPHUS_GRPC_ADDR=0.0.0.0:50051 覆盖并发布端口（下方已注释示例）。
+# 仅 REST + 本地 Agent / 不经 gRPC 拉远端 Agent 的部署可保持 50051 不发布。
+#
+# 首个管理员用 admin create（headless，ADR-0010 / 票 #80）：
+#   docker compose run --rm -i server admin create --password-stdin admin <<< 'pw'
+# 再 `docker compose up -d` 常驻。
+
+services:
+  server:
+    image: ghcr.io/godreach/sisyphus-server:latest
+    container_name: sisyphus-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"        # REST API + Web UI
+      # 远端 Agent 经 gRPC 连接时取消注释，并确保下方 SISYPHUS_GRPC_ADDR 覆盖：
+      # - "50051:50051"
+    environment:
+      # gRPC 通道对远端 Agent 开放时覆盖 loopback 默认：
+      # SISYPHUS_GRPC_ADDR: "0.0.0.0:50051"
+      # 日志级别/格式（CLI 覆盖层，ADR-0010/0019）：
+      SISYPHUS_LOG_LEVEL: "info"
+      SISYPHUS_LOG_FORMAT: "json"
+      # /metrics 端点鉴权（默认开；仅可信内网可关，ADR-0019）：
+      # SISYPHUS_METRICS_AUTH: "false"
+    volumes:
+      - ./data:/data        # 数据目录（sisyphus.db + artifacts/ + master.key）
