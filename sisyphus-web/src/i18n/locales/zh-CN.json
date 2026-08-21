@@ -2,7 +2,9 @@
   "app": {
     "name": "sisyphus",
     "pageUnderConstruction": "本页正在建设中，将由后续批次实现。",
-    "langSwitch": "EN"
+    "langSwitch": "EN",
+    "openMenu": "打开菜单",
+    "langLabel": "语言"
   },
   "auth": {
     "login": "登录",

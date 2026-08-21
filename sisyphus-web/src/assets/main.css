@@ -87,15 +87,13 @@ h3 {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
-.lang-switch {
-  border: 1px solid var(--sisy-color-border);
-  background: var(--sisy-color-surface);
-  border-radius: var(--sisy-radius);
-  padding: 4px 12px;
-  cursor: pointer;
-  color: var(--sisy-color-text);
+.footer-user {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 /* 通用页头 / 按钮 / 提示 / 错误（项目页与概览页共用）。 */
@@ -2622,4 +2620,30 @@ h3 {
   border-radius: var(--sisy-radius);
   font-size: 13px;
   background: var(--sisy-color-surface);
+}
+
+/* 窄屏顶部栏（#87）。 */
+.app-topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--sisy-color-border);
+  background: var(--sisy-color-surface);
+}
+
+.app-topbar-title {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+/* 768px - 1024px 过渡区间：内容区不溢出（#87）。 */
+@media (min-width: 768px) and (max-width: 1024px) {
+  .app-main {
+    padding: 16px;
+  }
+
+  .app-footer {
+    padding: 10px 16px;
+  }
 }
