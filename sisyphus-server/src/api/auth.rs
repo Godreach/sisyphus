@@ -496,7 +496,7 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<String> {
 
 /// 建号面的输入校验（setup / register / 全局 admin 建号共用）：用户名
 /// 非空 + 字符集/长度，密码最小长度 8（无复杂度规则，ADR-0014）。
-pub(super) fn validate_new_account(username: &str, password: &str) -> Result<(), ApiError> {
+pub(crate) fn validate_new_account(username: &str, password: &str) -> Result<(), ApiError> {
     let mut issues = Vec::new();
     if let Some(issue) = username_issue(username) {
         issues.push(issue);

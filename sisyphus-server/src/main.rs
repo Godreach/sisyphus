@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use sisyphus_server::config::{Config, LogFormat, Overrides};
 use sisyphus_server::{api, grpc, sched, store};
@@ -46,6 +46,40 @@ struct Args {
     /// 抓取可关，仅限可信内网）
     #[arg(long)]
     metrics_auth: Option<bool>,
+    /// 子命令（无子命令 = 默认 serve 行为，ADR-0010）。`admin create` 是
+    /// headless 引导等价（票 B5-T8，setup wizard 的 CLI 形态）。
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// 子命令（票 B5-T8，ADR-0010 headless 引导）。
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// 建立首个全局管理员（headless 引导，setup wizard 等价）。
+    Admin(AdminArgs),
+}
+
+/// `admin` 子命令的参数（承载 `admin` 下的 sub-subcommand，当前仅 `create`）。
+#[derive(Parser, Debug)]
+struct AdminArgs {
+    /// `admin` 下的子命令（当前仅 `create`：建首个全局管理员）。
+    #[command(subcommand)]
+    admin_command: AdminCommand,
+}
+
+/// `admin <子命令>` 的子命令集（当前仅 `create`）。
+#[derive(Subcommand, Debug)]
+enum AdminCommand {
+    /// 建立首个全局管理员。用户表非空则拒（实例已初始化）；密码经 stdin
+    /// 读取（`--password-stdin` 或交互 prompt），不走 argv 明文。
+    Create {
+        /// 管理员用户名（1-64 位字母/数字/`_`/`.`/`-`）。
+        username: String,
+        /// 从 stdin 读密码（一行，不含换行）；不给则交互 prompt 输入。
+        /// 密码永不经 argv（防 shell history / 进程列表泄露）。
+        #[arg(long)]
+        password_stdin: bool,
+    },
 }
 
 impl From<&Args> for Overrides {
@@ -65,7 +99,18 @@ impl From<&Args> for Overrides {
 
 #[tokio::main]
 async fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    // 子命令分发（票 B5-T8，ADR-0010 headless 引导）：`admin create` 走建号
+    // 路径后退出，不起 server；无子命令走既有 serve 路径。借 match 判分支，
+    // take() 移出 admin 参数（避免 `args` 部分移动后 serve 路径仍需 `&args`）。
+    if args.command.is_some() {
+        let Some(Command::Admin(admin)) = args.command.take() else {
+            unreachable!("已判 is_some");
+        };
+        run_admin_create(&args, admin).await;
+        return;
+    }
 
     let config = match Config::load(
         args.data_dir.clone(),
@@ -266,5 +311,91 @@ fn init_tracing(config: &Config) {
                 .with_env_filter(filter)
                 .init();
         }
+    }
+}
+
+/// `admin create` 子命令（票 B5-T8，ADR-0010 headless 引导）：建首个全局
+/// 管理员后退出，不起 server。bootstrap 路径与 serve 同（Config::load 建目录
+/// 布局 → store::bootstrap 开池+迁移 → ensure_master_key），但只取 pool，不建
+/// AppState/router/grpc/scheduler。建号逻辑收敛在
+/// [`sisyphus_server::admin::create_admin`]（可测库函数，setup wizard 等价）。
+///
+/// 密码永不经 argv：`--password-stdin` 走 stdin 一行；否则交互 prompt 经 stdin
+/// 读一行（v1 文本读，TTY 不回显留 follow-up——文档明示 `--password-stdin`
+/// 优先）。失败按 [`AdminCreateError`] 人读消息 exit 1。
+async fn run_admin_create(args: &Args, admin: AdminArgs) {
+    let AdminCommand::Create { username, password_stdin } = admin.admin_command;
+
+    let config = match Config::load(
+        args.data_dir.clone(),
+        Overrides::default(),
+        Overrides::from_env(),
+    ) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("配置加载失败：{e}");
+            std::process::exit(2);
+        }
+    };
+    init_tracing(&config);
+
+    let pool = match store::bootstrap(&config.data_dir).await {
+        Ok(pool) => pool,
+        Err(e) => {
+            tracing::error!("存储初始化失败：{e}");
+            eprintln!("存储初始化失败：{e}");
+            std::process::exit(2);
+        }
+    };
+    // 主密钥文件（与 serve 同装配）：冷部署先物化密钥，server 后续首启不复换钥。
+    if let Err(e) = sisyphus_server::secrets::ensure_master_key(&config.master_key_path) {
+        tracing::error!(path = %config.master_key_path.display(), "主密钥初始化失败：{e}");
+        eprintln!("主密钥初始化失败：{e}");
+        std::process::exit(2);
+    }
+
+    // 密码经 stdin（不走 argv 明文）。
+    let password = match read_password(password_stdin) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("读取密码失败：{e}");
+            std::process::exit(2);
+        }
+    };
+
+    match sisyphus_server::admin::create_admin(&pool, &username, &password).await {
+        Ok(user) => {
+            println!("全局管理员 {} 已创建（is_admin={}）", user.username, user.is_admin);
+            println!("引导完成：用户表非空，web setup wizard 不再进入。");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("admin create 失败：{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// 读密码：`--password-stdin` 走 stdin 一行；否则交互 prompt（打印提示到
+/// stderr，从 stdin 读一行）。两种都经 stdin 文本读——密码永不上 argv。
+/// v1 不做 TTY 不回显（跨平台 noecho 需终端模式切换，留 follow-up；文档
+/// 明示 `--password-stdin` 优先用于脚本/pipe）。
+fn read_password(password_stdin: bool) -> Result<String, String> {
+    use std::io::{BufRead, BufReader, Write};
+    if password_stdin {
+        let mut line = String::new();
+        BufReader::new(std::io::stdin())
+            .read_line(&mut line)
+            .map_err(|e| format!("stdin 读失败：{e}"))?;
+        Ok(line.trim_end_matches(['\r', '\n']).to_string())
+    } else {
+        eprint!("输入管理员密码（最小 8 位，不回显）：");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        BufReader::new(std::io::stdin())
+            .read_line(&mut line)
+            .map_err(|e| format!("stdin 读失败：{e}"))?;
+        eprintln!();
+        Ok(line.trim_end_matches(['\r', '\n']).to_string())
     }
 }

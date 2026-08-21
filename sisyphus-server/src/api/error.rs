@@ -144,6 +144,12 @@ impl ApiError {
     pub fn status_code(&self) -> StatusCode {
         self.status
     }
+
+    /// 人读错误信息（CLI 复用 HTTP 校验逻辑后经此取可读消息，避免重复校验
+    /// 代码——票 #80，admin create headless 等价）。
+    pub(crate) fn message(&self) -> &str {
+        &self.body.message
+    }
 }
 
 impl IntoResponse for ApiError {

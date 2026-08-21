@@ -57,6 +57,19 @@ gRPC 通道（proto = Agent/Server 唯一共享契约；Server 下发已解析�
 - GitHub Releases：6 目标 × server/agent 分开压缩包 + sha256 校验和；官方 Docker 镜像仅 Server（双架构、非 root、`/data` 卷）。
 - Server 与 Agent 同版本号成对发布；升级顺序 Server 先升，兼容窗口 N-1。
 - 单一 `--data-dir`（内含 SQLite 与产物存储），首次启动生成带注释的 `config.toml`；启动自动前向迁移，迁移前自动备份 db。
+- **首个管理员（headless 引导，ADR-0010 / 票 #80）**：无浏览器/无 TTY 的 Docker 或 headless 部署，用 `admin create` 子命令建首个全局管理员（setup wizard 的 CLI 等价），跑过即视为引导完成（用户表非空 → web wizard 不再进入）。密码永不上 argv——经 stdin 读取：
+
+  ```bash
+  # 二进制（解压 release 包后；--password-stdin 从 stdin 读一行，密码不出现在进程列表/shell history）
+  sisyphus-server --data-dir ./data admin create --password-stdin admin <<< 'your-admin-password'
+  # Docker（镜像名随发布工程 B5-T10 落定；此处为预期形态）
+  docker run --rm -i -v ./data:/data ghcr.io/godreach/sisyphus-server \
+    admin create --password-stdin admin <<< 'your-admin-password'
+  # 或交互 prompt（终端输入，v1 不回显留 follow-up）
+  sisyphus-server --data-dir ./data admin create admin
+  ```
+
+  建号后再起 server 即可登录；再建管理员走 web 全局 admin 端点（`POST /api/v1/users`），`admin create` 仅建首个（用户表非空即拒）。
 - **机密存储的防护边界（ADR-0015）**：机密值以主密钥文件（`<data-dir>/master.key`，首启自动生成、0600，路径可经 config `[auth] master_key_path` 改到独立卷）+ XChaCha20-Poly1305 加密落库。该机制防「DB 文件/备份单独泄露」（库/备份脱离数据目录读不出明文）；**数据目录整体失守（含密钥文件）无解**，同机 root 亦不防——密钥文件须留在可信卷上。跨公网部署必须 TLS（v1 会话 cookie 不设 Secure，理由同上）。
 
 ## 开发

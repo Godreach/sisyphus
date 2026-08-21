@@ -7,6 +7,7 @@
 //! 集成测试与二进制走同一组合根：REST 端点经 `tower::ServiceExt::oneshot`
 //! 进程内驱动 [`api::router`]，不起 socket、不 spawn 进程（Spec B2a）。
 
+pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod config;
