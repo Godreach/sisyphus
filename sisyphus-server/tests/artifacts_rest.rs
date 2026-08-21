@@ -9,9 +9,10 @@
 
 mod common;
 
+use axum::body::Body as HttpBody;
 use common::{DEFAULT_PEER, custom_req};
 use http_body_util::BodyExt;
-use axum::body::Body as HttpBody;
+use sha2::{Digest, Sha256};
 use sisyphus_model::pipeline::{Job, Pipeline, Revision, Stage};
 use sisyphus_model::validate::BuildSnapshot;
 use sisyphus_server::auth::{TokenFamily, generate_register_code, generate_token, token_hash};
@@ -20,7 +21,6 @@ use sisyphus_server::store::builds::{BuildRepo, BuildRow, StartBuild, TriggerSou
 use sisyphus_server::store::jobs::{JobRepo, NewJob};
 use sisyphus_server::store::projects::{NewProject, ProjectRepo, ScmType};
 use sisyphus_server::{api, store};
-use sha2::{Digest, Sha256};
 
 struct Harness {
     _dir: tempfile::TempDir,
@@ -196,12 +196,7 @@ async fn agent_upload(
         .extension(axum::extract::ConnectInfo(DEFAULT_PEER))
         .body(HttpBody::from(bytes.to_vec()))
         .expect("构造请求");
-    h.app
-        .router
-        .clone()
-        .oneshot(req)
-        .await
-        .expect("oneshot")
+    h.app.router.clone().oneshot(req).await.expect("oneshot")
 }
 
 /// 依赖拉取请求（query 形态的产物名走路径段）。
@@ -261,16 +256,25 @@ async fn artifact_roundtrip_upload_dep_download_bytes_identical() {
     let resp = agent_download(&h, h.job_b, "build", "dist.tar", &h.agent_token).await;
     assert_eq!(resp.status(), 200, "依赖拉取应 200");
     assert_eq!(
-        resp.headers().get("content-length").and_then(|v| v.to_str().ok()),
+        resp.headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()),
         Some("21000"),
         "响应头带大小"
     );
     assert_eq!(
-        resp.headers().get("x-sisyphus-sha256").and_then(|v| v.to_str().ok()),
+        resp.headers()
+            .get("x-sisyphus-sha256")
+            .and_then(|v| v.to_str().ok()),
         Some(sha256_hex(&bytes).as_str()),
         "响应头带校验和"
     );
-    let got = resp.into_body().collect().await.expect("collect").to_bytes();
+    let got = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
     assert_eq!(&got[..], &bytes[..], "依赖拉取字节一致");
 
     // 构建详情页：产物列表 + 单产物下载。
@@ -288,10 +292,17 @@ async fn artifact_roundtrip_upload_dep_download_bytes_identical() {
     let resp = viewer_get(&h, &format!("{list_path}/dist.tar")).await;
     assert_eq!(resp.status(), 200);
     assert_eq!(
-        resp.headers().get("x-sisyphus-sha256").and_then(|v| v.to_str().ok()),
+        resp.headers()
+            .get("x-sisyphus-sha256")
+            .and_then(|v| v.to_str().ok()),
         Some(sha256_hex(&bytes).as_str())
     );
-    let got = resp.into_body().collect().await.expect("collect").to_bytes();
+    let got = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
     assert_eq!(&got[..], &bytes[..], "页面下载字节一致");
 }
 
@@ -369,7 +380,12 @@ async fn agent_download_missing_artifact_reports_clear_error() {
     let resp = agent_download(&h, h.job_b, "no-such-job", "dist.tar", &h.agent_token).await;
     assert_eq!(resp.status(), 404);
     let body = common::body_json(resp).await;
-    assert!(body["message"].as_str().unwrap_or_default().contains("no-such-job"));
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no-such-job")
+    );
 
     // 拉取任务行不存在。
     let resp = agent_download(&h, 9999, "build", "dist.tar", &h.agent_token).await;

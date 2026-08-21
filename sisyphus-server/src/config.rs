@@ -591,13 +591,7 @@ mod tests {
             retention_days: Some("45".into()),
             ..Overrides::default()
         };
-        let cfg = merge(
-            PathBuf::from("/tmp/data"),
-            &cli,
-            &env,
-            &file,
-        )
-        .expect("CLI 层");
+        let cfg = merge(PathBuf::from("/tmp/data"), &cli, &env, &file).expect("CLI 层");
         assert_eq!(cfg.retention_days, 60, "CLI 压过 env 与文件");
         let cfg = merge(
             PathBuf::from("/tmp/data"),
@@ -995,13 +989,7 @@ mod tests {
             metrics_auth: Some("false".into()),
             ..Overrides::default()
         };
-        let cfg = merge(
-            PathBuf::from("/tmp/data"),
-            &cli,
-            &env,
-            &file,
-        )
-        .expect("CLI 层");
+        let cfg = merge(PathBuf::from("/tmp/data"), &cli, &env, &file).expect("CLI 层");
         assert!(cfg.metrics_auth, "CLI true 压过 env 与文件");
         let cfg = merge(
             PathBuf::from("/tmp/data"),
@@ -1013,12 +1001,7 @@ mod tests {
         assert!(!cfg.metrics_auth, "env false 压过文件");
 
         // env 层常见布尔拼写全收（复用 parse_bool 语义）。
-        for (text, expected) in [
-            ("true", true),
-            ("1", true),
-            ("yes", true),
-            ("off", false),
-        ] {
+        for (text, expected) in [("true", true), ("1", true), ("yes", true), ("off", false)] {
             let env = Overrides {
                 metrics_auth: Some(text.into()),
                 ..Overrides::default()

@@ -30,7 +30,9 @@ use sisyphus_proto::agent::{
     OutputChunk, StepEvent, Stream, UpgradePhase, UpgradeStatus, Version,
     agent_channel_client::AgentChannelClient, channel_message::Kind, log_event::Kind as EventKind,
 };
-use sisyphus_server::notify::{MailMessage, MailSendError, MailSender, SmtpConnection, spawn_notifier};
+use sisyphus_server::notify::{
+    MailMessage, MailSendError, MailSender, SmtpConnection, spawn_notifier,
+};
 use sisyphus_server::scm::{FakeProbe, ScmProbe};
 use sisyphus_server::store::builds::{BuildRepo, BuildStatus, TriggerSource};
 use sisyphus_server::trigger::TriggerEngine;
@@ -41,7 +43,9 @@ use tonic::metadata::MetadataValue;
 
 mod common;
 
-use common::{DEFAULT_PEER, TestApp, body_json, body_text, custom_req, req_with_cookie, test_app_from_state};
+use common::{
+    DEFAULT_PEER, TestApp, body_json, body_text, custom_req, req_with_cookie, test_app_from_state,
+};
 
 // ---------------------------------------------------------------------------
 // 版本与工具
@@ -478,7 +482,12 @@ async fn ack(tx: &mpsc::Sender<ChannelMessage>, job_id: &str) {
 }
 
 /// 发 JobStatus（指定阶段 + 退出码）。
-async fn report(tx: &mpsc::Sender<ChannelMessage>, job_id: &str, phase: JobPhase, exit_code: Option<i32>) {
+async fn report(
+    tx: &mpsc::Sender<ChannelMessage>,
+    job_id: &str,
+    phase: JobPhase,
+    exit_code: Option<i32>,
+) {
     tx.send(ChannelMessage {
         kind: Some(Kind::JobStatus(ProtoJobStatus {
             job_id: job_id.into(),
@@ -508,7 +517,12 @@ async fn upgrade_phase(tx: &mpsc::Sender<ChannelMessage>, phase: UpgradePhase) {
 // ---------------------------------------------------------------------------
 
 /// admin 上传升级包（raw octet body + X-Sisyphus-Filename 头）。
-async fn upload_pkg(app: &TestApp, cookie: &str, filename: &str, bytes: &str) -> axum::http::Response<axum::body::Body> {
+async fn upload_pkg(
+    app: &TestApp,
+    cookie: &str,
+    filename: &str,
+    bytes: &str,
+) -> axum::http::Response<axum::body::Body> {
     custom_req(
         app,
         "POST",
@@ -537,7 +551,11 @@ async fn put_smtp_config(app: &TestApp, cookie: &str) {
         Some(cookie),
     )
     .await;
-    assert_eq!(resp.status(), axum::http::StatusCode::OK, "PUT SMTP 配置应 200");
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::OK,
+        "PUT SMTP 配置应 200"
+    );
 }
 
 /// 建 PAT（/metrics Bearer 鉴权面），返回明文 token。
@@ -550,7 +568,11 @@ async fn create_pat(app: &TestApp, cookie: &str) -> String {
         Some(cookie),
     )
     .await;
-    assert_eq!(resp.status(), axum::http::StatusCode::CREATED, "建 PAT 应 201");
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::CREATED,
+        "建 PAT 应 201"
+    );
     body_json(resp).await["token"]
         .as_str()
         .expect("token")
@@ -577,7 +599,9 @@ async fn metrics_get(app: &TestApp, pat: &str) -> String {
 fn metric_value(text: &str, prefix: &str) -> Option<u64> {
     text.lines().find_map(|line| {
         let (name, value) = line.split_once(' ')?;
-        name.starts_with(prefix).then(|| value.parse().ok()).flatten()
+        name.starts_with(prefix)
+            .then(|| value.parse().ok())
+            .flatten()
     })
 }
 
@@ -625,7 +649,15 @@ fn pipeline() -> Pipeline {
 }
 
 /// 建项目 + Agent + 连接 fake Agent（主链路共享前置），返回 (cookie, token, stream, tx)。
-async fn seed_and_connect(h: &Harness, scm_url: &str) -> (String, String, tonic::Streaming<ChannelMessage>, mpsc::Sender<ChannelMessage>) {
+async fn seed_and_connect(
+    h: &Harness,
+    scm_url: &str,
+) -> (
+    String,
+    String,
+    tonic::Streaming<ChannelMessage>,
+    mpsc::Sender<ChannelMessage>,
+) {
     let admin = common::setup_and_login(&h.app).await;
     // 建项目（git，scm_url 指本地裸仓库）。
     let resp = req_with_cookie(
@@ -670,7 +702,9 @@ async fn seed_and_connect(h: &Harness, scm_url: &str) -> (String, String, tonic:
         .expect("token")
         .to_string();
     // 连 fake Agent（workspace 版本 1.0.0：可派发，构建执行面用）。
-    let (mut stream, tx) = connect_fake_agent(h.grpc_addr, &token, v_current()).await.expect("连接");
+    let (mut stream, tx) = connect_fake_agent(h.grpc_addr, &token, v_current())
+        .await
+        .expect("连接");
     let first = stream.message().await.expect("recv").expect("msg");
     assert!(matches!(first.kind, Some(Kind::Handshake(_))), "握手回执");
     (admin, token, stream, tx)
@@ -723,7 +757,13 @@ async fn seed_only(h: &Harness, scm_url: &str) -> (String, String) {
 }
 
 /// Agent 上传产物（二进制 body，agent token 鉴权）。job_id 为 JobSpec.job_id（job 行 id 字符串）。
-async fn agent_upload(app: &TestApp, token: &str, job_id: &str, name: &str, bytes: &[u8]) -> axum::http::Response<axum::body::Body> {
+async fn agent_upload(
+    app: &TestApp,
+    token: &str,
+    job_id: &str,
+    name: &str,
+    bytes: &[u8],
+) -> axum::http::Response<axum::body::Body> {
     use tower::ServiceExt;
     let req = axum::http::Request::builder()
         .method("POST")
@@ -782,7 +822,10 @@ async fn b5_full_chain_trigger_to_metrics() {
         .iter()
         .map(|b| b["name"].as_str().unwrap().to_string())
         .collect();
-    assert!(names.contains(&"main".to_string()) && names.contains(&"dev".to_string()), "分支枚举含 main/dev：{names:?}");
+    assert!(
+        names.contains(&"main".to_string()) && names.contains(&"dev".to_string()),
+        "分支枚举含 main/dev：{names:?}"
+    );
     assert_eq!(body["default_branch"], "main", "默认分支 main");
 
     // 4. SMTP 配置 + notifier 订阅（先于终态事件，不漏）。
@@ -808,16 +851,43 @@ async fn b5_full_chain_trigger_to_metrics() {
     assert_eq!(spec.job_name, "compile");
     assert_eq!(spec.attempt, 1);
     assert_eq!(spec.build_number, 1);
-    assert_eq!(spec.env.get("PIPELINE_ENV").map(String::as_str), Some("from-pipeline"), "env 经真实通道到达");
+    assert_eq!(
+        spec.env.get("PIPELINE_ENV").map(String::as_str),
+        Some("from-pipeline"),
+        "env 经真实通道到达"
+    );
 
     // 7. 执行期：fake Agent 发日志（output + step_start/end）落库 + ack。
     ack(&tx, &spec.job_id).await;
     let job_id = spec.job_id.clone();
     let attempt = spec.attempt;
-    tx.send(log_batch(&job_id, attempt, output(0, Stream::Stdout, b"preparing\n"), 0)).await.unwrap();
-    tx.send(log_batch(&job_id, attempt, step_start(1, 0, "echo ${SISY_BUILD_NUMBER}"), 1)).await.unwrap();
-    tx.send(log_batch(&job_id, attempt, output(2, Stream::Stdout, b"1\n"), 2)).await.unwrap();
-    tx.send(log_batch(&job_id, attempt, step_end(3, 0, Some(0)), 3)).await.unwrap();
+    tx.send(log_batch(
+        &job_id,
+        attempt,
+        output(0, Stream::Stdout, b"preparing\n"),
+        0,
+    ))
+    .await
+    .unwrap();
+    tx.send(log_batch(
+        &job_id,
+        attempt,
+        step_start(1, 0, "echo ${SISY_BUILD_NUMBER}"),
+        1,
+    ))
+    .await
+    .unwrap();
+    tx.send(log_batch(
+        &job_id,
+        attempt,
+        output(2, Stream::Stdout, b"1\n"),
+        2,
+    ))
+    .await
+    .unwrap();
+    tx.send(log_batch(&job_id, attempt, step_end(3, 0, Some(0)), 3))
+        .await
+        .unwrap();
 
     // 8. 产物上传（agent token，job_id=JobSpec.job_id）。
     let artifact_bytes = b"dist-payload-\xDE\xAD\xBE\xEF".repeat(100);
@@ -845,10 +915,15 @@ async fn b5_full_chain_trigger_to_metrics() {
     .await;
     // 历史回放有序：output(0) → step_start(1) → output(2) → step_end(3)。
     let out0 = text.find("event: output\nid: 0").expect("output seq 0");
-    let start1 = text.find("event: step_start\nid: 1").expect("step_start seq 1");
+    let start1 = text
+        .find("event: step_start\nid: 1")
+        .expect("step_start seq 1");
     let out2 = text.find("event: output\nid: 2").expect("output seq 2");
     let end3 = text.find("event: step_end\nid: 3").expect("step_end seq 3");
-    assert!(out0 < start1 && start1 < out2 && out2 < end3, "SSE 到达序交织：{text}");
+    assert!(
+        out0 < start1 && start1 < out2 && out2 < end3,
+        "SSE 到达序交织：{text}"
+    );
     // job_end 帧已到；后续流应关流（终态关流语义）。
     let mut tail = text;
     let ended = !continue_sse_until(&mut sse_stream, &mut tail, |_| false).await;
@@ -868,21 +943,50 @@ async fn b5_full_chain_trigger_to_metrics() {
     .await;
     assert_eq!(resp.status(), 200, "Last-Event-ID 续传应 200");
     let (resume, _) = read_sse_until(resp, |t| t.contains("event: job_end")).await;
-    assert!(!resume.contains("id: 0"), "Last-Event-ID=1 起从 seq 2 续传：{resume}");
-    assert!(resume.contains("id: 2") && resume.contains("id: 3"), "含 2/3：{resume}");
+    assert!(
+        !resume.contains("id: 0"),
+        "Last-Event-ID=1 起从 seq 2 续传：{resume}"
+    );
+    assert!(
+        resume.contains("id: 2") && resume.contains("id: 3"),
+        "含 2/3：{resume}"
+    );
 
     // 11. 构建详情页：产物列表 + 单产物下载字节一致（viewer 面）。
     let list_path = "/api/v1/projects/demo/pipelines/release/builds/1/artifacts";
     let resp = req_with_cookie(&h.app, "GET", list_path, None, Some(&admin)).await;
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
-    assert_eq!(body["items"].as_array().map(Vec::len), Some(1), "产物列表 1 项");
+    assert_eq!(
+        body["items"].as_array().map(Vec::len),
+        Some(1),
+        "产物列表 1 项"
+    );
     assert_eq!(body["items"][0]["name"], "dist.tar");
     assert_eq!(body["items"][0]["sha256"], expect_sha);
-    let resp = req_with_cookie(&h.app, "GET", &format!("{list_path}/dist.tar"), None, Some(&admin)).await;
+    let resp = req_with_cookie(
+        &h.app,
+        "GET",
+        &format!("{list_path}/dist.tar"),
+        None,
+        Some(&admin),
+    )
+    .await;
     assert_eq!(resp.status(), 200, "页面下载 200");
-    assert_eq!(resp.headers().get("x-sisyphus-sha256").unwrap().to_str().unwrap(), expect_sha);
-    let got = resp.into_body().collect().await.expect("collect").to_bytes();
+    assert_eq!(
+        resp.headers()
+            .get("x-sisyphus-sha256")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        expect_sha
+    );
+    let got = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
     assert_eq!(&got[..], &artifact_bytes[..], "页面下载字节一致");
 
     // 12. 通知送达（fake SMTP）：邮件含 构建号/pipeline/项目/成功状态/触发者。
@@ -893,7 +997,10 @@ async fn b5_full_chain_trigger_to_metrics() {
     assert!(msg.body.contains("成功"), "成功状态：{}", msg.body);
     assert!(msg.body.contains("admin"), "含触发者：{}", msg.body);
     assert_eq!(msg.from, "ci@example.com");
-    assert_eq!(msg.to, vec!["dev@example.com".to_string(), "ops@example.com".to_string()]);
+    assert_eq!(
+        msg.to,
+        vec!["dev@example.com".to_string(), "ops@example.com".to_string()]
+    );
 
     // 13. poll 触发（票 #81 AC：手动 + poll 各一次）：建 poll 触发器 → 基线 → 新 commit → tick 火灾。
     let resp = req_with_cookie(
@@ -904,7 +1011,11 @@ async fn b5_full_chain_trigger_to_metrics() {
         Some(&admin),
     )
     .await;
-    assert_eq!(resp.status(), axum::http::StatusCode::CREATED, "建 poll 触发器应 201");
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::CREATED,
+        "建 poll 触发器应 201"
+    );
     // 首探：记基线（head=A），不触发。
     h.probe.push_head(Some("commit-a"));
     let report0 = h.trigger.tick(1_700_000_000_000).await.expect("tick 0");
@@ -922,14 +1033,22 @@ async fn b5_full_chain_trigger_to_metrics() {
     report(&tx, &spec2.job_id, JobPhase::JobSucceeded, Some(0)).await;
     wait_until(|| async { build_status(&h, 2).await == BuildStatus::Succeeded }).await;
     // 断言触发源为 poll。
-    assert_eq!(build_trigger(&h, 2).await, TriggerSource::Poll, "构建 2 触发源为 poll");
+    assert_eq!(
+        build_trigger(&h, 2).await,
+        TriggerSource::Poll,
+        "构建 2 触发源为 poll"
+    );
 
     // 14. 单台 Agent 升级往返（票 #81 AC）：上传包 → 指令 → 排空 → 下载校验 → 版本更新。
     // 用第二台 Agent `upgrader-1`（0.9.0，N-1 窗口内、非目标版本）做升级往返——
     // linux-1 已在目标版本 1.0.0，升级它会 409（已在目标）；另起一台不干扰构建链路。
     let pkg = "sisyphus-agent-1.0.0-linux-x86_64.tar.gz";
     let up = upload_pkg(&h.app, &admin, pkg, "new-binary-bytes").await;
-    assert_eq!(up.status(), axum::http::StatusCode::CREATED, "上传升级包 201");
+    assert_eq!(
+        up.status(),
+        axum::http::StatusCode::CREATED,
+        "上传升级包 201"
+    );
     let pkg_sha = body_json(up).await["sha256"].as_str().unwrap().to_string();
     // 建 upgrader-1（0.9.0）+ 连接。
     let resp = req_with_cookie(
@@ -940,12 +1059,28 @@ async fn b5_full_chain_trigger_to_metrics() {
         Some(&admin),
     )
     .await;
-    assert_eq!(resp.status(), axum::http::StatusCode::CREATED, "建 upgrader-1");
-    let token_up = body_json(resp).await["token"].as_str().expect("token").to_string();
-    let (mut stream_up, tx_up) = connect_fake_agent(h.grpc_addr, &token_up, v_below()).await.expect("upgrader 连接");
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::CREATED,
+        "建 upgrader-1"
+    );
+    let token_up = body_json(resp).await["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+    let (mut stream_up, tx_up) = connect_fake_agent(h.grpc_addr, &token_up, v_below())
+        .await
+        .expect("upgrader 连接");
     let _first_up = stream_up.message().await.expect("recv").expect("msg");
     wait_until(|| async {
-        h.app.state.agents.get_by_name("upgrader-1").await.unwrap().unwrap().online
+        h.app
+            .state
+            .agents
+            .get_by_name("upgrader-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .online
     })
     .await;
     // 单台升级（REST）→ fake Agent 收 UpgradeCommand。
@@ -957,32 +1092,73 @@ async fn b5_full_chain_trigger_to_metrics() {
         Some(&admin),
     )
     .await;
-    assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED, "升级指令 202");
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::ACCEPTED,
+        "升级指令 202"
+    );
     let cmd = collect_one_upgrade(&mut stream_up).await;
     assert_eq!(cmd.package_name, pkg);
     assert_eq!(cmd.sha256, pkg_sha);
-    assert_eq!(cmd.download_url, format!("/api/v1/agent/upgrade-packages/{pkg}"));
+    assert_eq!(
+        cmd.download_url,
+        format!("/api/v1/agent/upgrade-packages/{pkg}")
+    );
     // 下载校验（agent token）→ sha256 头匹配。
-    let dl = custom_req(&h.app, "GET", &cmd.download_url, None, None, &[("authorization", format!("Bearer {token_up}"))], DEFAULT_PEER).await;
+    let dl = custom_req(
+        &h.app,
+        "GET",
+        &cmd.download_url,
+        None,
+        None,
+        &[("authorization", format!("Bearer {token_up}"))],
+        DEFAULT_PEER,
+    )
+    .await;
     assert_eq!(dl.status(), axum::http::StatusCode::OK);
-    assert_eq!(dl.headers().get("x-sisyphus-sha256").unwrap().to_str().unwrap(), pkg_sha);
+    assert_eq!(
+        dl.headers()
+            .get("x-sisyphus-sha256")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        pkg_sha
+    );
     // 报 DRAINING → DOWNLOADING → SWAPPING → RESTARTING。
     upgrade_phase(&tx_up, UpgradePhase::UpgradeDraining).await;
     upgrade_phase(&tx_up, UpgradePhase::UpgradeDownloading).await;
     upgrade_phase(&tx_up, UpgradePhase::UpgradeSwapping).await;
     upgrade_phase(&tx_up, UpgradePhase::UpgradeRestarting).await;
     wait_until(|| async {
-        h.app.state.agents.get_by_name("upgrader-1").await.unwrap().unwrap().upgrade_phase.as_deref() == Some("restarting")
+        h.app
+            .state
+            .agents
+            .get_by_name("upgrader-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .upgrade_phase
+            .as_deref()
+            == Some("restarting")
     })
     .await;
     // fake「重启」：断开旧连接，以新版本 1.0.0 重连 → server 清升级态 + 落新版本。
     drop(tx_up);
     drop(stream_up);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let (mut stream_up2, tx_up2) = connect_fake_agent(h.grpc_addr, &token_up, v_current()).await.expect("upgrader 新版本重连");
+    let (mut stream_up2, tx_up2) = connect_fake_agent(h.grpc_addr, &token_up, v_current())
+        .await
+        .expect("upgrader 新版本重连");
     let _first_up2 = stream_up2.message().await.expect("recv").expect("msg");
     wait_until(|| async {
-        let row = h.app.state.agents.get_by_name("upgrader-1").await.unwrap().unwrap();
+        let row = h
+            .app
+            .state
+            .agents
+            .get_by_name("upgrader-1")
+            .await
+            .unwrap()
+            .unwrap();
         row.upgrade_phase.is_none() && row.pending_upgrade.is_none()
     })
     .await;
@@ -994,7 +1170,12 @@ async fn b5_full_chain_trigger_to_metrics() {
     // 故断言 >= 2（本次构建被计入）而非恰等 2。
     wait_until(|| async {
         let text = metrics_get(&h.app, &pat).await;
-        metric_value(&text, "sisyphus_builds_terminal_total{result=\"succeeded\"}").unwrap_or(0) >= 2
+        metric_value(
+            &text,
+            "sisyphus_builds_terminal_total{result=\"succeeded\"}",
+        )
+        .unwrap_or(0)
+            >= 2
     })
     .await;
     let text = metrics_get(&h.app, &pat).await;
@@ -1003,7 +1184,12 @@ async fn b5_full_chain_trigger_to_metrics() {
         "构建时长直方图（bucket）出现：\n{text}"
     );
     assert!(
-        metric_value(&text, "sisyphus_builds_terminal_total{result=\"succeeded\"}").unwrap_or(0) >= 2,
+        metric_value(
+            &text,
+            "sisyphus_builds_terminal_total{result=\"succeeded\"}"
+        )
+        .unwrap_or(0)
+            >= 2,
         "本次两次成功构建应计入终态计数：\n{text}"
     );
     assert!(
@@ -1015,26 +1201,64 @@ async fn b5_full_chain_trigger_to_metrics() {
     // 先坐实两台 Agent 都在线（升级重连后 upgrader-1 须已注册在线），再断言
     // 概览 agents_online 真值——避免与重连异步的竞态。
     wait_until(|| async {
-        let a = h.app.state.agents.get_by_name("linux-1").await.unwrap().unwrap().online;
-        let b = h.app.state.agents.get_by_name("upgrader-1").await.unwrap().unwrap().online;
+        let a = h
+            .app
+            .state
+            .agents
+            .get_by_name("linux-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .online;
+        let b = h
+            .app
+            .state
+            .agents
+            .get_by_name("upgrader-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .online;
         a && b
     })
     .await;
     wait_until(|| async {
         let resp = req_with_cookie(&h.app, "GET", "/api/v1/overview", None, Some(&admin)).await;
-        body_json(resp).await["builds_terminal"]["succeeded"].as_u64().unwrap_or(0) >= 2
+        body_json(resp).await["builds_terminal"]["succeeded"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 2
     })
     .await;
     let resp = req_with_cookie(&h.app, "GET", "/api/v1/overview", None, Some(&admin)).await;
     let v = body_json(resp).await;
-    assert_eq!(v["agents_online"].as_u64(), Some(2), "概览 Agent 在线数真值（两台）");
+    assert_eq!(
+        v["agents_online"].as_u64(),
+        Some(2),
+        "概览 Agent 在线数真值（两台）"
+    );
     assert_eq!(v["agents_total"].as_u64(), Some(2));
     assert_eq!(v["queue_depth"].as_u64(), Some(0), "队列已清空");
-    assert_eq!(v["builds_terminal"]["succeeded"].as_u64(), Some(2), "概览终态计数真值");
-    assert_eq!(v["alerts"]["has_offline_agent"].as_bool(), Some(false), "无离线 Agent 警示");
-    assert_eq!(v["alerts"]["has_no_match"].as_bool(), Some(false), "无匹配任务警示归零");
+    assert_eq!(
+        v["builds_terminal"]["succeeded"].as_u64(),
+        Some(2),
+        "概览终态计数真值"
+    );
+    assert_eq!(
+        v["alerts"]["has_offline_agent"].as_bool(),
+        Some(false),
+        "无离线 Agent 警示"
+    );
+    assert_eq!(
+        v["alerts"]["has_no_match"].as_bool(),
+        Some(false),
+        "无匹配任务警示归零"
+    );
     let recent = v["recent_builds"].as_array().expect("recent");
-    assert!(recent.iter().any(|b| b["status"] == "succeeded"), "最近构建含成功条目");
+    assert!(
+        recent.iter().any(|b| b["status"] == "succeeded"),
+        "最近构建含成功条目"
+    );
 
     let _ = repo_dir;
     // 保活两台 Agent 的连接到用例结束（drop 即离线，概览 agents_online 失真）。
@@ -1137,7 +1361,12 @@ async fn cancel_queued_build_drains_pending_and_marks_cancelled() {
     // /metrics：终态计数 result=cancelled +1。
     wait_until(|| async {
         let text = metrics_get(&h.app, &pat).await;
-        metric_value(&text, "sisyphus_builds_terminal_total{result=\"cancelled\"}").unwrap_or(0) >= 1
+        metric_value(
+            &text,
+            "sisyphus_builds_terminal_total{result=\"cancelled\"}",
+        )
+        .unwrap_or(0)
+            >= 1
     })
     .await;
     h.grpc_handle.abort();
@@ -1179,7 +1408,11 @@ async fn cancel_running_build_dispatches_cancel_to_agent() {
 
     // fake Agent 收 CancelBuild（经通道下发，build_id + job_id 命中）。
     let cancel = collect_one_cancel(&mut stream).await;
-    assert_eq!(cancel.build_id, build_id.to_string(), "CancelBuild 命中构建");
+    assert_eq!(
+        cancel.build_id,
+        build_id.to_string(),
+        "CancelBuild 命中构建"
+    );
     assert_eq!(cancel.job_id, spec.job_id, "CancelBuild 命中在途任务");
 
     wait_until(|| async { build_status(&h, 1).await == BuildStatus::Cancelled }).await;
@@ -1220,12 +1453,25 @@ async fn fail_fast_cascades_sibling_job_on_failure() {
     wait_until(|| async { build_status(&h, 1).await == BuildStatus::Failed }).await;
 
     // 构建详情：compile failed、package cancelled（级联）。
-    let resp = req_with_cookie(&h.app, "GET", "/api/v1/projects/demo/pipelines/release/builds/1", None, Some(&admin)).await;
+    let resp = req_with_cookie(
+        &h.app,
+        "GET",
+        "/api/v1/projects/demo/pipelines/release/builds/1",
+        None,
+        Some(&admin),
+    )
+    .await;
     let body = body_json(resp).await;
     assert_eq!(body["status"], "failed", "构建 failed");
     let jobs = body["stages"][0]["jobs"].as_array().expect("jobs");
-    let compile = jobs.iter().find(|j| j["name"] == "compile").expect("compile 行");
-    let package = jobs.iter().find(|j| j["name"] == "package").expect("package 行");
+    let compile = jobs
+        .iter()
+        .find(|j| j["name"] == "compile")
+        .expect("compile 行");
+    let package = jobs
+        .iter()
+        .find(|j| j["name"] == "package")
+        .expect("package 行");
     assert_eq!(compile["status"], "failed", "compile failed");
     assert_eq!(package["status"], "cancelled", "package 级联 cancelled");
 
@@ -1267,17 +1513,29 @@ async fn timeout_phase_marks_build_failed_and_metrics() {
     wait_until(|| async { build_status(&h, 1).await == BuildStatus::Failed }).await;
 
     // 构建详情：任务 timeout（detail 记名）、构建 failed。
-    let resp = req_with_cookie(&h.app, "GET", "/api/v1/projects/demo/pipelines/release/builds/1", None, Some(&admin)).await;
+    let resp = req_with_cookie(
+        &h.app,
+        "GET",
+        "/api/v1/projects/demo/pipelines/release/builds/1",
+        None,
+        Some(&admin),
+    )
+    .await;
     let body = body_json(resp).await;
     assert_eq!(body["status"], "failed", "超时构建 failed");
     let job = body["stages"][0]["jobs"].as_array().expect("jobs")[0].clone();
-    assert_eq!(job["status"], "timeout", "任务终态 timeout（ADR-0008 同失败类映射）");
+    assert_eq!(
+        job["status"], "timeout",
+        "任务终态 timeout（ADR-0008 同失败类映射）"
+    );
 
     // /metrics：失败类终态计数 +1。
     wait_until(|| async {
         let text = metrics_get(&h.app, &pat).await;
         metric_value(&text, "sisyphus_builds_terminal_total{result=\"failed\"}").unwrap_or(0) >= 1
-            || metric_value(&text, "sisyphus_builds_terminal_total{result=\"timeout\"}").unwrap_or(0) >= 1
+            || metric_value(&text, "sisyphus_builds_terminal_total{result=\"timeout\"}")
+                .unwrap_or(0)
+                >= 1
     })
     .await;
     h.grpc_handle.abort();
@@ -1318,7 +1576,11 @@ async fn rerun_from_scratch_new_number_and_from_failed_attempt_plus_one() {
         Some(&admin),
     )
     .await;
-    assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED, "from_scratch 重跑 202");
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::ACCEPTED,
+        "from_scratch 重跑 202"
+    );
     let body = body_json(resp).await;
     assert_eq!(body["number"], 2, "from_scratch 新号 2");
     assert_eq!(body["attempt"], 1, "from_scratch attempt=1");
@@ -1331,12 +1593,23 @@ async fn rerun_from_scratch_new_number_and_from_failed_attempt_plus_one() {
     wait_until(|| async { build_status(&h, 2).await == BuildStatus::Succeeded }).await;
 
     // 构建详情 2 → succeeded（新号独立终态，构建 1 仍 failed）。
-    let resp = req_with_cookie(&h.app, "GET", "/api/v1/projects/demo/pipelines/release/builds/2", None, Some(&admin)).await;
+    let resp = req_with_cookie(
+        &h.app,
+        "GET",
+        "/api/v1/projects/demo/pipelines/release/builds/2",
+        None,
+        Some(&admin),
+    )
+    .await;
     let body = body_json(resp).await;
     assert_eq!(body["status"], "succeeded", "from_scratch 新构建 succeeded");
     assert_eq!(body["number"], 2);
     // 构建 1 历史 failed 保留。
-    assert_eq!(build_status(&h, 1).await, BuildStatus::Failed, "构建 1 failed 历史保留");
+    assert_eq!(
+        build_status(&h, 1).await,
+        BuildStatus::Failed,
+        "构建 1 failed 历史保留"
+    );
 
     // from_failed：对构建 1（failed）重跑 → 同号 attempt+1（b2c 同款，收口断言）。
     let resp = req_with_cookie(
@@ -1347,7 +1620,11 @@ async fn rerun_from_scratch_new_number_and_from_failed_attempt_plus_one() {
         Some(&admin),
     )
     .await;
-    assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED, "from_failed 重跑 202");
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::ACCEPTED,
+        "from_failed 重跑 202"
+    );
     let body = body_json(resp).await;
     assert_eq!(body["number"], 1, "from_failed 同号延续");
     assert_eq!(body["attempt"], 2, "from_failed attempt+1");
@@ -1360,24 +1637,47 @@ async fn rerun_from_scratch_new_number_and_from_failed_attempt_plus_one() {
     wait_until(|| async { build_status(&h, 1).await == BuildStatus::Succeeded }).await;
 
     // 构建详情 1 → succeeded；attempt 1（failed）与 2（succeeded）并存。
-    let resp = req_with_cookie(&h.app, "GET", "/api/v1/projects/demo/pipelines/release/builds/1", None, Some(&admin)).await;
+    let resp = req_with_cookie(
+        &h.app,
+        "GET",
+        "/api/v1/projects/demo/pipelines/release/builds/1",
+        None,
+        Some(&admin),
+    )
+    .await;
     let body = body_json(resp).await;
     assert_eq!(body["status"], "succeeded", "from_failed 续跑至成功");
     let jobs = body["stages"][0]["jobs"].as_array().expect("jobs");
-    let attempts: Vec<i64> = jobs.iter().map(|j| j["attempt"].as_i64().expect("attempt")).collect();
-    assert!(attempts.contains(&1) && attempts.contains(&2), "attempt 1/2 并存：{attempts:?}");
+    let attempts: Vec<i64> = jobs
+        .iter()
+        .map(|j| j["attempt"].as_i64().expect("attempt"))
+        .collect();
+    assert!(
+        attempts.contains(&1) && attempts.contains(&2),
+        "attempt 1/2 并存：{attempts:?}"
+    );
 
     // /metrics：两条重跑路径各贡献一个 succeeded 终态计数（票 #81 AC：/metrics
     // 在 e2e 结束时含本次构建终态计数）。metrics 为进程级全局，故断言增量 >= 2。
     let pat = create_pat(&h.app, &admin).await;
     wait_until(|| async {
         let text = metrics_get(&h.app, &pat).await;
-        metric_value(&text, "sisyphus_builds_terminal_total{result=\"succeeded\"}").unwrap_or(0) >= 2
+        metric_value(
+            &text,
+            "sisyphus_builds_terminal_total{result=\"succeeded\"}",
+        )
+        .unwrap_or(0)
+            >= 2
     })
     .await;
     let text = metrics_get(&h.app, &pat).await;
     assert!(
-        metric_value(&text, "sisyphus_builds_terminal_total{result=\"succeeded\"}").unwrap_or(0) >= 2,
+        metric_value(
+            &text,
+            "sisyphus_builds_terminal_total{result=\"succeeded\"}"
+        )
+        .unwrap_or(0)
+            >= 2,
         "重跑两条路径的 succeeded 终态计数应计入 /metrics：\n{text}"
     );
 
@@ -1424,7 +1724,14 @@ fn pipeline_two_jobs() -> Pipeline {
 }
 
 /// 建项目 + 存两任务定义 + 建 Agent + 连接 fake Agent（fail-fast 面）。
-async fn seed_and_connect_two_jobs(h: &Harness) -> (String, String, tonic::Streaming<ChannelMessage>, mpsc::Sender<ChannelMessage>) {
+async fn seed_and_connect_two_jobs(
+    h: &Harness,
+) -> (
+    String,
+    String,
+    tonic::Streaming<ChannelMessage>,
+    mpsc::Sender<ChannelMessage>,
+) {
     let admin = common::setup_and_login(&h.app).await;
     let resp = req_with_cookie(
         &h.app,
@@ -1453,9 +1760,14 @@ async fn seed_and_connect_two_jobs(h: &Harness) -> (String, String, tonic::Strea
     )
     .await;
     assert_eq!(resp.status(), axum::http::StatusCode::CREATED, "建 Agent");
-    let token = body_json(resp).await["token"].as_str().expect("token").to_string();
+    let token = body_json(resp).await["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
     // 与主链路构建 Agent 同版本（1.0.0，可派发）；本面不做升级往返，版本无关。
-    let (mut stream, tx) = connect_fake_agent(h.grpc_addr, &token, v_current()).await.expect("连接");
+    let (mut stream, tx) = connect_fake_agent(h.grpc_addr, &token, v_current())
+        .await
+        .expect("连接");
     let first = stream.message().await.expect("recv").expect("msg");
     assert!(matches!(first.kind, Some(Kind::Handshake(_))), "握手回执");
     (admin, token, stream, tx)

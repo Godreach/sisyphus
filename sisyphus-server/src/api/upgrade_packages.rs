@@ -23,10 +23,10 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use super::AppState;
+use super::agents::VersionDto;
 use super::artifacts::AgentAuth;
 use super::error::{ApiError, ErrorBody, ValidationIssue};
 use super::policy::RequireGlobalAdmin;
-use super::agents::VersionDto;
 use crate::store::agents::AgentVersion;
 use crate::store::audit::AuditEvent;
 use crate::store::now_ms;
@@ -79,15 +79,23 @@ pub async fn upload(
     if version.too_old(&server_version) {
         return Err(ApiError::conflict(format!(
             "升级包版本 {}.{}.{} 过旧（低于 N-1 兼容窗口下界，Server 为 {}.{}.{}）",
-            version.major, version.minor, version.patch,
-            server_version.major, server_version.minor, server_version.patch
+            version.major,
+            version.minor,
+            version.patch,
+            server_version.major,
+            server_version.minor,
+            server_version.patch
         )));
     }
     if version.too_new(&server_version) {
         return Err(ApiError::conflict(format!(
             "升级包版本 {}.{}.{} 过新（高于 Server {}.{}.{}，Server 须先升）",
-            version.major, version.minor, version.patch,
-            server_version.major, server_version.minor, server_version.patch
+            version.major,
+            version.minor,
+            version.patch,
+            server_version.major,
+            server_version.minor,
+            server_version.patch
         )));
     }
 
@@ -275,17 +283,15 @@ const FILENAME_HEADER: &str = "x-sisyphus-filename";
 
 /// 从 `X-Sisyphus-Filename` 头取包名（缺头/空 422）。
 fn filename_from_headers(headers: &HeaderMap) -> Result<String, ApiError> {
-    let value = headers
-        .get(FILENAME_HEADER)
-        .ok_or_else(|| {
-            ApiError::validation(
-                "升级包上传校验失败",
-                vec![ValidationIssue {
-                    path: "X-Sisyphus-Filename".into(),
-                    message: "缺 X-Sisyphus-Filename 头（包名）".into(),
-                }],
-            )
-        })?;
+    let value = headers.get(FILENAME_HEADER).ok_or_else(|| {
+        ApiError::validation(
+            "升级包上传校验失败",
+            vec![ValidationIssue {
+                path: "X-Sisyphus-Filename".into(),
+                message: "缺 X-Sisyphus-Filename 头（包名）".into(),
+            }],
+        )
+    })?;
     let name = value
         .to_str()
         .map_err(|_| {
@@ -326,9 +332,7 @@ pub(crate) fn parse_package_filename(
         .or_else(|| stem.strip_suffix(".tar"))
         .unwrap_or_else(|| stem.strip_suffix(".zip").unwrap_or(stem));
     let mut parts = stem.split('-');
-    let version_str = parts
-        .next()
-        .ok_or_else(|| filename_issue("包名缺版本段"))?;
+    let version_str = parts.next().ok_or_else(|| filename_issue("包名缺版本段"))?;
     let target_os_str = parts
         .next()
         .ok_or_else(|| filename_issue("包名缺目标 OS 段"))?;
@@ -403,21 +407,42 @@ mod tests {
     #[test]
     fn parses_tar_gz_zip_and_tar_extensions() {
         use crate::store::upgrade_packages::{TargetArch, TargetOs};
-        let (v, os, arch) = parse_package_filename("sisyphus-agent-1.0.0-linux-x86_64.tar.gz")
-            .expect("tar.gz");
-        assert_eq!(v, AgentVersion { major: 1, minor: 0, patch: 0 });
+        let (v, os, arch) =
+            parse_package_filename("sisyphus-agent-1.0.0-linux-x86_64.tar.gz").expect("tar.gz");
+        assert_eq!(
+            v,
+            AgentVersion {
+                major: 1,
+                minor: 0,
+                patch: 0
+            }
+        );
         assert_eq!(os, TargetOs::Linux);
         assert_eq!(arch, TargetArch::X86_64);
 
-        let (v, os, arch) = parse_package_filename("sisyphus-agent-0.9.5-macos-aarch64.zip")
-            .expect("zip");
-        assert_eq!(v, AgentVersion { major: 0, minor: 9, patch: 5 });
+        let (v, os, arch) =
+            parse_package_filename("sisyphus-agent-0.9.5-macos-aarch64.zip").expect("zip");
+        assert_eq!(
+            v,
+            AgentVersion {
+                major: 0,
+                minor: 9,
+                patch: 5
+            }
+        );
         assert_eq!(os, TargetOs::Macos);
         assert_eq!(arch, TargetArch::Aarch64);
 
-        let (v, _, _) = parse_package_filename("sisyphus-agent-1.2.3-windows-x86_64.tar")
-            .expect("tar");
-        assert_eq!(v, AgentVersion { major: 1, minor: 2, patch: 3 });
+        let (v, _, _) =
+            parse_package_filename("sisyphus-agent-1.2.3-windows-x86_64.tar").expect("tar");
+        assert_eq!(
+            v,
+            AgentVersion {
+                major: 1,
+                minor: 2,
+                patch: 3
+            }
+        );
     }
 
     #[test]

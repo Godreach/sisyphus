@@ -244,8 +244,7 @@ impl Agent {
         // 产物传输缝注入（票 #74）：`with_artifact_io`（run 前）可覆盖组合根
         // 默认装配的 real io——Handle 持可替换位，与 logbuf/workspace 的
         // set_live 同款时机语义（spawn 前注入，之后不再变）。
-        self.runner
-            .set_artifact_io(self.artifact_io.clone());
+        self.runner.set_artifact_io(self.artifact_io.clone());
         let runner_task = tokio::spawn(self.runner.run());
         let workspace_task = tokio::spawn(self.workspace.run());
         let cache_task = tokio::spawn(self.cache.run());

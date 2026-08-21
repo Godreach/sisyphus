@@ -1299,11 +1299,7 @@ mod tests {
         );
 
         // 启动重建（reconstruct）也补发：清 phase（模拟未回执）后重建再补发。
-        t.sched
-            .agents
-            .clear_upgrade_state(agent.id)
-            .await
-            .unwrap();
+        t.sched.agents.clear_upgrade_state(agent.id).await.unwrap();
         t.sched.reconstruct().await.unwrap();
         assert_eq!(
             t.dispatcher.upgrades.load(Ordering::SeqCst),

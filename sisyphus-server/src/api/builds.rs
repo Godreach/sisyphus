@@ -599,10 +599,7 @@ pub async fn remove(
         )));
     }
     // 数据裁剪（日志 + 产物文件 + 元数据 + 空目录回收；builds/jobs 记录保留）。
-    let artifacts_root = state
-        .artifacts
-        .root()
-        .to_path_buf();
+    let artifacts_root = state.artifacts.root().to_path_buf();
     crate::store::delete_build_data(&state.pool, &artifacts_root, build.id)
         .await
         .map_err(|e| ApiError::internal("构建数据清理", &e))?;

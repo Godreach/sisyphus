@@ -2073,9 +2073,7 @@ impl FakeArtifactIo {
     }
 
     /// 挂起式上传：`tx` 置 true 前每次上传等待。
-    fn gated(
-        gate: watch::Receiver<bool>,
-    ) -> Arc<Self> {
+    fn gated(gate: watch::Receiver<bool>) -> Arc<Self> {
         Arc::new(Self {
             uploads: Mutex::new(Vec::new()),
             downloads: Mutex::new(Vec::new()),
@@ -2114,10 +2112,12 @@ impl sisyphus_agent::artifacts::ArtifactIo for FakeArtifactIo {
         name: &str,
         dest: &Path,
     ) -> Result<(), sisyphus_agent::artifacts::ArtifactError> {
-        self.downloads
-            .lock()
-            .expect("锁")
-            .push((_job_id.into(), source_job.into(), name.into(), dest.into()));
+        self.downloads.lock().expect("锁").push((
+            _job_id.into(),
+            source_job.into(),
+            name.into(),
+            dest.into(),
+        ));
         match &*self.download_result.lock().expect("锁") {
             Ok(bytes) => {
                 std::fs::create_dir_all(dest.parent().expect("父目录")).expect("建目录");

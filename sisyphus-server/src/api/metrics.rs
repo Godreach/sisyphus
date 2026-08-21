@@ -8,8 +8,8 @@
 //! （与业务同缝：Bearer PAT / cookie 会话双通道）。响应 `Content-Type:
 //! text/plain; version=0.0.4`。
 
-use axum::http::header;
 use axum::http::StatusCode;
+use axum::http::header;
 use axum::response::{IntoResponse, Response};
 
 /// `/metrics` 文本响应（recorder 未安装时输出空体 200——未装配形态不炸）。
@@ -17,7 +17,10 @@ pub async fn get() -> Response {
     let text = crate::metrics::render();
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         text,
     )
         .into_response()

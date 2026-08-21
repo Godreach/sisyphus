@@ -33,7 +33,9 @@ use tonic::metadata::MetadataValue;
 
 mod common;
 
-use common::{TestApp, body_json, body_text, req_with_cookie, setup_and_login, test_app_from_state};
+use common::{
+    TestApp, body_json, body_text, req_with_cookie, setup_and_login, test_app_from_state,
+};
 
 /// 与 workspace 同版本（兼容窗口内）。
 fn version() -> Version {
@@ -261,11 +263,12 @@ async fn collect_job_specs(
 
 /// 从 `/metrics` 文本提取单行指标值（按行前缀匹配）。
 fn metric_value(text: &str, prefix: &str) -> Option<u64> {
-    text.lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(' ')?;
-            name.starts_with(prefix).then(|| value.parse().ok()).flatten()
-        })
+    text.lines().find_map(|line| {
+        let (name, value) = line.split_once(' ')?;
+        name.starts_with(prefix)
+            .then(|| value.parse().ok())
+            .flatten()
+    })
 }
 
 /// Bearer 认证的进程内请求（/metrics 鉴权面）。
@@ -318,7 +321,11 @@ async fn overview_and_metrics_report_true_state() {
 
     // /metrics 鉴权：默认开 → 无凭证 401；PAT 通过且文本出现契约名。
     let anon = common::get(&h.app, "/metrics").await;
-    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED, "metrics 默认需认证");
+    assert_eq!(
+        anon.status(),
+        StatusCode::UNAUTHORIZED,
+        "metrics 默认需认证"
+    );
     let auth_metrics = bearer_get(&h.app, "/metrics", &pat).await;
     assert_eq!(auth_metrics.status(), StatusCode::OK);
     let text = body_text(auth_metrics).await;
@@ -334,11 +341,18 @@ async fn overview_and_metrics_report_true_state() {
         assert!(text.contains(name), "{name} 应在 /metrics：\n{text}");
     }
     // 概览空态已把当前值灌入 recorder（report_snapshot 固定标签全集）。
-    assert!(text.contains("reason=\"no_online_agent\""), "队列原因维度稳定输出");
+    assert!(
+        text.contains("reason=\"no_online_agent\""),
+        "队列原因维度稳定输出"
+    );
     // 空态下无任何终态事件：终态计数器尚未被触碰（Prometheus 只输出已触碰
     // 指标）——作为增量断言基线，先记「不存在」。
     assert!(
-        metric_value(&text, "sisyphus_builds_terminal_total{result=\"succeeded\"}").is_none(),
+        metric_value(
+            &text,
+            "sisyphus_builds_terminal_total{result=\"succeeded\"}"
+        )
+        .is_none(),
         "空态不应有终态计数行"
     );
 
@@ -470,7 +484,10 @@ async fn overview_and_metrics_report_true_state() {
     );
     // 增量断言：成功计数从「不存在（0）」翻到 1（DB 终态迁移唯一命中一次）。
     assert_eq!(
-        metric_value(&text, "sisyphus_builds_terminal_total{result=\"succeeded\"}"),
+        metric_value(
+            &text,
+            "sisyphus_builds_terminal_total{result=\"succeeded\"}"
+        ),
         Some(1),
         "终态计数器应恰 +1：\n{text}"
     );

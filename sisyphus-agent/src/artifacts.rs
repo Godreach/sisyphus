@@ -64,12 +64,7 @@ impl std::error::Error for ArtifactError {}
 pub trait ArtifactIo: Send + Sync {
     /// 上传：`job_id` 为本任务行 id、`name` 为产物名、`path` 为工作区内
     /// 源文件（已存在）。
-    async fn upload(
-        &self,
-        job_id: &str,
-        name: &str,
-        path: &Path,
-    ) -> Result<(), ArtifactError>;
+    async fn upload(&self, job_id: &str, name: &str, path: &Path) -> Result<(), ArtifactError>;
 
     /// 下载依赖：`job_id` 为本任务行 id（Server 侧定位构建）、`source_job`
     /// 为声明的来源任务名、`name` 为产物名、`dest` 为工作区内目标路径。
@@ -98,7 +93,11 @@ impl RealArtifactIo {
 
     /// 注入 client 形态（测试直接驱动；与 upgrader 的 `ReqwestDownloader`
     /// 同款可换测缝）。
-    pub fn with_client(client: reqwest::Client, api_url: Option<String>, token: Option<String>) -> Self {
+    pub fn with_client(
+        client: reqwest::Client,
+        api_url: Option<String>,
+        token: Option<String>,
+    ) -> Self {
         Self {
             client,
             api_url,
@@ -147,12 +146,7 @@ impl RealArtifactIo {
 
 #[async_trait::async_trait]
 impl ArtifactIo for RealArtifactIo {
-    async fn upload(
-        &self,
-        job_id: &str,
-        name: &str,
-        path: &Path,
-    ) -> Result<(), ArtifactError> {
+    async fn upload(&self, job_id: &str, name: &str, path: &Path) -> Result<(), ArtifactError> {
         // 引导态校验先行（未配置 api_url/token 时不必碰文件）。
         self.config()?;
         // 源文件流式读（64 KiB 块）→ reqwest Body（chunked 传输，大文件
@@ -160,20 +154,24 @@ impl ArtifactIo for RealArtifactIo {
         let file = tokio::fs::File::open(path)
             .await
             .map_err(|e| ArtifactError::Io(format!("打开 {} 失败：{e}", path.display())))?;
-        let body = reqwest::Body::wrap_stream(futures::stream::unfold(file, |mut file| async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = vec![0u8; 64 * 1024];
-            match file.read(&mut buf).await {
-                Ok(0) => None,
-                Ok(n) => {
-                    buf.truncate(n);
-                    Some((Ok(bytes::Bytes::from(buf)), file))
+        let body =
+            reqwest::Body::wrap_stream(futures::stream::unfold(file, |mut file| async move {
+                use tokio::io::AsyncReadExt;
+                let mut buf = vec![0u8; 64 * 1024];
+                match file.read(&mut buf).await {
+                    Ok(0) => None,
+                    Ok(n) => {
+                        buf.truncate(n);
+                        Some((Ok(bytes::Bytes::from(buf)), file))
+                    }
+                    Err(e) => Some((Err(e), file)),
                 }
-                Err(e) => Some((Err(e), file)),
-            }
-        }));
+            }));
         let resp = self
-            .request(reqwest::Method::POST, &format!("{UPLOAD_ENDPOINT}/{job_id}/{name}"))?
+            .request(
+                reqwest::Method::POST,
+                &format!("{UPLOAD_ENDPOINT}/{job_id}/{name}"),
+            )?
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
             .body(body)
             .send()

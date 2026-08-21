@@ -38,7 +38,14 @@ pub async fn run_daily_cleanup(
     loop {
         // 首 tick 立即触发（interval 首 tick 即 now），等价「启动先跑一轮」。
         ticker.tick().await;
-        match sweep(&pool, &artifacts_root, crate::store::now_ms(), retention_days).await {
+        match sweep(
+            &pool,
+            &artifacts_root,
+            crate::store::now_ms(),
+            retention_days,
+        )
+        .await
+        {
             Ok(report) if report.builds_purged > 0 => tracing::info!(
                 builds = report.builds_purged,
                 logs = report.logs_deleted,
@@ -140,12 +147,10 @@ async fn purge_build(
     let mut report = CleanupReport::default();
 
     // 产物字节先删（文件名即磁盘路径段，均过存储层名校验；缺失文件容错）。
-    let names = sqlx::query_scalar::<_, String>(
-        "SELECT name FROM artifacts WHERE build_id = ?",
-    )
-    .bind(build_id)
-    .fetch_all(pool)
-    .await?;
+    let names = sqlx::query_scalar::<_, String>("SELECT name FROM artifacts WHERE build_id = ?")
+        .bind(build_id)
+        .fetch_all(pool)
+        .await?;
     let dir = artifacts_root.join(build_id.to_string());
     for name in &names {
         let path = dir.join(name);
@@ -206,7 +211,9 @@ mod tests {
             crate::config::Overrides::default(),
         )
         .expect("目录布局");
-        let pool = crate::store::bootstrap(dir.path()).await.expect("bootstrap");
+        let pool = crate::store::bootstrap(dir.path())
+            .await
+            .expect("bootstrap");
         sqlx::query("INSERT INTO projects (name, scm_type, scm_url, created_at, updated_at) VALUES ('demo', 'git', 'https://example.com/r', 0, 0)")
             .execute(&pool)
             .await
@@ -307,7 +314,14 @@ mod tests {
 
         // fresh：29 天前（cutoff 内，留）。expired：31 天前（cutoff 外，删）。
         insert_log(&pool, fresh, fresh_job, NOW - 29 * DAY_MS).await;
-        insert_artifact(&pool, &artifacts_root, fresh, "fresh.bin", NOW - 29 * DAY_MS).await;
+        insert_artifact(
+            &pool,
+            &artifacts_root,
+            fresh,
+            "fresh.bin",
+            NOW - 29 * DAY_MS,
+        )
+        .await;
         insert_log(&pool, expired, expired_job, NOW - 31 * DAY_MS).await;
         insert_artifact(
             &pool,
@@ -342,7 +356,10 @@ mod tests {
                 .expect("fresh 元数据");
         assert_eq!(fresh_meta, 1, "29 天留");
         assert!(
-            artifacts_root.join(fresh.to_string()).join("fresh.bin").exists(),
+            artifacts_root
+                .join(fresh.to_string())
+                .join("fresh.bin")
+                .exists(),
             "fresh 产物文件保留"
         );
 
@@ -377,9 +394,7 @@ mod tests {
         )
         .await;
 
-        let report = sweep(&pool, &artifacts_root, NOW, 30)
-            .await
-            .expect("扫描");
+        let report = sweep(&pool, &artifacts_root, NOW, 30).await.expect("扫描");
         assert_eq!(report.builds_purged, 1, "无日志但产物过期也清");
         assert_eq!(report.artifact_meta_deleted, 1);
         assert!(!artifacts_root.join(only_artifact.0.to_string()).exists());
@@ -398,12 +413,14 @@ mod tests {
         std::fs::create_dir_all(&backups).expect("备份目录");
         std::fs::write(backups.join("sisyphus.db"), b"backup").expect("假备份");
 
-        let report = sweep(&pool, &artifacts_root, NOW, 30)
-            .await
-            .expect("扫描");
+        let report = sweep(&pool, &artifacts_root, NOW, 30).await.expect("扫描");
         assert_eq!(report.logs_deleted, 1, "过期日志删");
         assert!(
-            dir.path().join(crate::config::BACKUPS_DIR).join("123").join("sisyphus.db").exists(),
+            dir.path()
+                .join(crate::config::BACKUPS_DIR)
+                .join("123")
+                .join("sisyphus.db")
+                .exists(),
             "backups/ 备份文件不受清理影响"
         );
         assert_eq!(build_count(&pool).await, 1, "构建记录保留");
@@ -417,9 +434,7 @@ mod tests {
         insert_log(&pool, b.0, b.1, NOW - 10 * DAY_MS).await;
         insert_artifact(&pool, &artifacts_root, b.0, "x.bin", NOW - 5 * DAY_MS).await;
 
-        let report = sweep(&pool, &artifacts_root, NOW, 30)
-            .await
-            .expect("扫描");
+        let report = sweep(&pool, &artifacts_root, NOW, 30).await.expect("扫描");
         assert_eq!(report, CleanupReport::default(), "全留即空报告");
         assert!(artifacts_root.join(b.0.to_string()).join("x.bin").exists());
         let _ = dir;

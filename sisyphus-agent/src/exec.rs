@@ -226,7 +226,9 @@ impl SpawnedStep {
     async fn reap_after_kill(
         job: Option<&crate::windows_job::JobHandle>,
         pid: u32,
-        wait_fut: &mut std::pin::Pin<&mut impl std::future::Future<Output = std::io::Result<std::process::ExitStatus>>>,
+        wait_fut: &mut std::pin::Pin<
+            &mut impl std::future::Future<Output = std::io::Result<std::process::ExitStatus>>,
+        >,
     ) {
         for _ in 0..KILL_REAP_MAX {
             kill_tree(job, pid);
@@ -246,7 +248,9 @@ impl SpawnedStep {
     #[cfg(not(windows))]
     async fn reap_after_kill(
         pid: u32,
-        wait_fut: &mut std::pin::Pin<&mut impl std::future::Future<Output = std::io::Result<std::process::ExitStatus>>>,
+        wait_fut: &mut std::pin::Pin<
+            &mut impl std::future::Future<Output = std::io::Result<std::process::ExitStatus>>,
+        >,
     ) {
         for _ in 0..KILL_REAP_MAX {
             kill_tree(pid);

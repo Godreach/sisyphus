@@ -7,11 +7,11 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use axum::Router;
 use axum::extract::Path as AxumPath;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Router;
 use sisyphus_agent::artifacts::{ArtifactError, ArtifactIo, RealArtifactIo};
 
 /// 上传观测：路径 + 收到的全部字节 + Authorization 头。
@@ -105,8 +105,7 @@ async fn spawn_stub(
 
 async fn stub(download: DownloadScript) -> (String, UploadSeen) {
     let seen = UploadSeen::default();
-    let addr =
-        spawn_stub(seen.clone(), Arc::new(tokio::sync::Mutex::new(download))).await;
+    let addr = spawn_stub(seen.clone(), Arc::new(tokio::sync::Mutex::new(download))).await;
     (addr, seen)
 }
 
@@ -117,7 +116,11 @@ fn io(addr: &str) -> RealArtifactIo {
         .no_proxy()
         .build()
         .expect("build");
-    RealArtifactIo::with_client(client, Some(addr.to_string()), Some("sisa_test_token".into()))
+    RealArtifactIo::with_client(
+        client,
+        Some(addr.to_string()),
+        Some("sisa_test_token".into()),
+    )
 }
 
 /// 上传：Bearer token + 路径契约 + 字节完整（大文件走 chunked 流）。
@@ -208,10 +211,7 @@ async fn download_rejection_surfaces_clear_message() {
         }
         other => panic!("应为 Rejected：{other}"),
     }
-    assert!(
-        !dest.exists(),
-        "失败不落半截文件"
-    );
+    assert!(!dest.exists(), "失败不落半截文件");
 }
 
 /// 契约常量与端点 URL 拼接（纯函数，同票 #57 的 url 单测纪律）。

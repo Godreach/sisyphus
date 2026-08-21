@@ -206,7 +206,10 @@ fn snapshot_ts() -> String {
     for s in crate::samples::samples().into_iter().filter(|s| s.snapshot) {
         let json = serde_json::to_value(&s.pipeline).expect("serialize pipeline");
         let literal = json_to_ts(&json, 0);
-        literals.push(format!("export const {id}: Pipeline = {literal}", id = s.id));
+        literals.push(format!(
+            "export const {id}: Pipeline = {literal}",
+            id = s.id
+        ));
     }
     format!(
         "{header}\n\
@@ -286,7 +289,13 @@ fn json_to_ts(v: &Value, indent: usize) -> String {
             }
             let items: Vec<String> = obj
                 .iter()
-                .map(|(k, e)| format!("{pad_inner}{key}: {val}", key = ts_key(k), val = json_to_ts(e, indent + 1)))
+                .map(|(k, e)| {
+                    format!(
+                        "{pad_inner}{key}: {val}",
+                        key = ts_key(k),
+                        val = json_to_ts(e, indent + 1)
+                    )
+                })
                 .collect();
             format!("{{\n{}\n{pad}}}", items.join(",\n"))
         }
@@ -296,7 +305,9 @@ fn json_to_ts(v: &Value, indent: usize) -> String {
 /// TS 对象字面量键：合法标识符裸写，否则引号（serde 键均为合法标识符，但稳健起见判定）。
 fn ts_key(k: &str) -> String {
     let valid = !k.is_empty()
-        && k.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && k.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if valid {
         k.to_string()

@@ -357,7 +357,14 @@ impl Handle {
         let job_id_for_cleanup = job_id.clone();
         self.jobs.spawn(async move {
             run_job(
-                spec, cancel_rx, uplink, in_flight, workspace, cache, logbuf, gate,
+                spec,
+                cancel_rx,
+                uplink,
+                in_flight,
+                workspace,
+                cache,
+                logbuf,
+                gate,
                 artifact_io,
             )
             .await;
@@ -912,11 +919,15 @@ async fn run_steps(
 /// 来源任务名 + 产物名，经 REST 缝下发（Server 侧定位构建）；落盘到声明的
 /// 工作区相对路径。任一失败即 `Err`（detail 带服务端清晰消息），runner 映射
 /// 任务立刻 failed。无声明 = no-op。
-async fn download_deps(io: &Arc<dyn ArtifactIo>, spec: &JobSpec, ws_dir: &Path) -> Result<(), String> {
+async fn download_deps(
+    io: &Arc<dyn ArtifactIo>,
+    spec: &JobSpec,
+    ws_dir: &Path,
+) -> Result<(), String> {
     for d in &spec.downloads {
         let source_job = d.job_id.as_str();
-        let dest = safe_join(ws_dir, &d.path)
-            .map_err(|e| format!("下载依赖产物 {} 失败：{e}", d.name))?;
+        let dest =
+            safe_join(ws_dir, &d.path).map_err(|e| format!("下载依赖产物 {} 失败：{e}", d.name))?;
         io.download(&spec.job_id, source_job, &d.name, &dest)
             .await
             .map_err(|e| format!("下载依赖产物 {} 失败：{e}", d.name))?;
@@ -927,18 +938,18 @@ async fn download_deps(io: &Arc<dyn ArtifactIo>, spec: &JobSpec, ws_dir: &Path) 
 /// 步骤全部成功后按声明上传产物（缓存 save 之后，ADR-0012）：源文件缺失或
 /// 传输失败即 `Err`（detail 点名），runner 映射任务 failed——上传失败不
 /// 静默（ADR-0008：占用到上传完成的槽位语义要求失败可见）。无声明 = no-op。
-async fn upload_artifacts(io: &Arc<dyn ArtifactIo>, spec: &JobSpec, ws_dir: &Path) -> Result<(), String> {
+async fn upload_artifacts(
+    io: &Arc<dyn ArtifactIo>,
+    spec: &JobSpec,
+    ws_dir: &Path,
+) -> Result<(), String> {
     for u in &spec.uploads {
-        let src = safe_join(ws_dir, &u.path)
-            .map_err(|e| format!("上传产物 {} 失败：{e}", u.name))?;
-        if !tokio::fs::try_exists(&src)
-            .await
-            .unwrap_or(false)
-        {
+        let src =
+            safe_join(ws_dir, &u.path).map_err(|e| format!("上传产物 {} 失败：{e}", u.name))?;
+        if !tokio::fs::try_exists(&src).await.unwrap_or(false) {
             return Err(format!(
                 "上传产物 {} 失败：源路径不存在（{}）",
-                u.name,
-                u.path
+                u.name, u.path
             ));
         }
         io.upload(&spec.job_id, &u.name, &src)

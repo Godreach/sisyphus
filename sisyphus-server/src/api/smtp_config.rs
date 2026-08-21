@@ -107,7 +107,11 @@ pub async fn get(
     State(state): State<AppState>,
     RequireGlobalAdmin(_auth): RequireGlobalAdmin,
 ) -> Result<Json<SmtpConfigState>, ApiError> {
-    let config = state.smtp_config.get().await?.map(SmtpConfigResponse::from_row);
+    let config = state
+        .smtp_config
+        .get()
+        .await?
+        .map(SmtpConfigResponse::from_row);
     Ok(Json(SmtpConfigState {
         configured: config.is_some(),
         config,

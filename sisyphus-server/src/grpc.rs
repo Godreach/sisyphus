@@ -115,8 +115,7 @@ pub struct SessionRegistry {
 
 impl std::fmt::Debug for SessionRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SessionRegistry")
-            .finish_non_exhaustive()
+        f.debug_struct("SessionRegistry").finish_non_exhaustive()
     }
 }
 

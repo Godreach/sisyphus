@@ -78,9 +78,7 @@ fn assert_content_type_starts_with(resp: &Response, prefix: &str) {
 /// src="/assets/index-HASH.js">`）。找不到即 panic——构建产物形态变了需同步本用例。
 fn extract_main_bundle_src(index_html: &str) -> String {
     let needle = "src=\"/assets/";
-    let start = index_html
-        .find(needle)
-        .expect("入口页应引用 /assets/ 主包");
+    let start = index_html.find(needle).expect("入口页应引用 /assets/ 主包");
     let after = &index_html[start + "src=\"".len()..];
     let end = after.find('"').expect("src 属性闭合");
     after[..end].to_string()
@@ -168,7 +166,10 @@ async fn login_and_list_round_trip_via_combo_root() {
     let resp = req_with_cookie(&app, "GET", "/api/v1/projects", None, Some(&cookie)).await;
     assert_eq!(resp.status(), StatusCode::OK, "projects 列表应 200");
     let list = body_json(resp).await;
-    assert!(list.as_array().is_some_and(|a| a.is_empty()), "空库应回空清单");
+    assert!(
+        list.as_array().is_some_and(|a| a.is_empty()),
+        "空库应回空清单"
+    );
 
     // 建项目后列表回含该项目的清单——整组往返成立。
     let resp = req_with_cookie(

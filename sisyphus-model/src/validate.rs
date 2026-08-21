@@ -62,11 +62,7 @@ pub struct ValidationError {
 }
 
 impl ValidationError {
-    fn new(
-        path: impl Into<String>,
-        message: impl Into<String>,
-        code: ValidationCode,
-    ) -> Self {
+    fn new(path: impl Into<String>, message: impl Into<String>, code: ValidationCode) -> Self {
         Self {
             path: path.into(),
             message: message.into(),
@@ -343,7 +339,10 @@ mod tests {
             errs.iter()
                 .any(|e| e.message.contains("必填参数必须带默认值"))
         );
-        assert!(errs.iter().any(|e| e.code == ValidationCode::RequiredParameterDefault));
+        assert!(
+            errs.iter()
+                .any(|e| e.code == ValidationCode::RequiredParameterDefault)
+        );
     }
 
     #[test]
@@ -433,7 +432,10 @@ mod tests {
         });
         let errs = validate(&p).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("命令不能为空")));
-        assert!(errs.iter().any(|e| e.code == ValidationCode::ShellCommandEmpty));
+        assert!(
+            errs.iter()
+                .any(|e| e.code == ValidationCode::ShellCommandEmpty)
+        );
     }
 
     #[test]
@@ -442,7 +444,10 @@ mod tests {
         p.stages[0].jobs[0].exec_env = Some(ExecutionEnv::Container { image: "  ".into() });
         let errs = validate(&p).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("必须指定 image")));
-        assert!(errs.iter().any(|e| e.code == ValidationCode::ContainerImageEmpty));
+        assert!(
+            errs.iter()
+                .any(|e| e.code == ValidationCode::ContainerImageEmpty)
+        );
     }
 
     #[test]
@@ -455,7 +460,10 @@ mod tests {
         });
         let errs = validate(&p).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("缓存 key 禁用")));
-        assert!(errs.iter().any(|e| e.code == ValidationCode::CacheKeyWorkspace));
+        assert!(
+            errs.iter()
+                .any(|e| e.code == ValidationCode::CacheKeyWorkspace)
+        );
     }
 
     #[test]
@@ -482,7 +490,10 @@ mod tests {
         });
         let errs = validate(&p).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("长度超过上限 255")));
-        assert!(errs.iter().any(|e| e.code == ValidationCode::CacheKeyTooLong));
+        assert!(
+            errs.iter()
+                .any(|e| e.code == ValidationCode::CacheKeyTooLong)
+        );
     }
 
     #[test]
@@ -498,7 +509,10 @@ mod tests {
             errs.iter()
                 .any(|e| e.message.contains("仅允许 workspace 相对路径"))
         );
-        assert!(errs.iter().any(|e| e.code == ValidationCode::CachePathNotRelative));
+        assert!(
+            errs.iter()
+                .any(|e| e.code == ValidationCode::CachePathNotRelative)
+        );
     }
 
     #[test]
@@ -511,7 +525,10 @@ mod tests {
             files: vec![],
         });
         let errs = validate(&p).unwrap_err();
-        assert!(errs.iter().any(|e| e.code == ValidationCode::CachePathNotRelative));
+        assert!(
+            errs.iter()
+                .any(|e| e.code == ValidationCode::CachePathNotRelative)
+        );
     }
 
     #[test]
@@ -524,7 +541,10 @@ mod tests {
         });
         let errs = validate(&p).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("不支持 glob")));
-        assert!(errs.iter().any(|e| e.code == ValidationCode::CacheFilesGlob));
+        assert!(
+            errs.iter()
+                .any(|e| e.code == ValidationCode::CacheFilesGlob)
+        );
     }
 
     #[test]
@@ -537,7 +557,10 @@ mod tests {
         }];
         let errs = validate(&p).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("机密名冲突")));
-        assert!(errs.iter().any(|e| e.code == ValidationCode::EnvSecretCollision));
+        assert!(
+            errs.iter()
+                .any(|e| e.code == ValidationCode::EnvSecretCollision)
+        );
     }
 
     #[test]
@@ -549,8 +572,15 @@ mod tests {
             path: "rel/path".into(),
         });
         let errs = validate(&p).unwrap_err();
-        assert!(errs.iter().any(|e| e.code == ValidationCode::ArtifactUploadEmpty));
-        assert!(!errs.iter().any(|e| e.code == ValidationCode::ArtifactUploadAbsolute));
+        assert!(
+            errs.iter()
+                .any(|e| e.code == ValidationCode::ArtifactUploadEmpty)
+        );
+        assert!(
+            !errs
+                .iter()
+                .any(|e| e.code == ValidationCode::ArtifactUploadAbsolute)
+        );
     }
 
     #[test]
@@ -565,7 +595,10 @@ mod tests {
             errs.iter()
                 .any(|e| e.message.contains("workspace 相对路径"))
         );
-        assert!(errs.iter().any(|e| e.code == ValidationCode::ArtifactUploadAbsolute));
+        assert!(
+            errs.iter()
+                .any(|e| e.code == ValidationCode::ArtifactUploadAbsolute)
+        );
     }
 
     #[test]

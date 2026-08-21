@@ -18,10 +18,10 @@ use sqlx::SqlitePool;
 
 use crate::api::auth::validate_new_account;
 use crate::auth::hash_password;
+use crate::store::StoreError;
 use crate::store::audit::{AuditEvent, AuditRepo};
 use crate::store::now_ms;
 use crate::store::users::{User, UserRepo};
-use crate::store::StoreError;
 
 /// 建首个全局管理员（headless 引导，setup wizard 等价）。
 ///

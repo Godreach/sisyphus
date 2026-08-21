@@ -116,7 +116,12 @@ pub fn touch_scheduler(now_ms: i64) {
 /// 空队列也把每个原因置 0（`/metrics` 输出稳定，Prometheus 不缺维度）。
 pub fn report_snapshot(s: &crate::snapshot::Snapshot) {
     // 固定原因标签全集（与 snapshot::classify 的标签值一一对应）。
-    for reason in ["no_online_agent", "missing_labels", "no_slot", "uncategorized"] {
+    for reason in [
+        "no_online_agent",
+        "missing_labels",
+        "no_slot",
+        "uncategorized",
+    ] {
         let depth = s.queue.get(reason).copied().unwrap_or(0);
         metrics::gauge!(QUEUE_DEPTH, "reason" => reason).set(depth as f64);
     }
@@ -169,7 +174,10 @@ mod tests {
             GRPC_DISCONNECTS,
             SCHEDULER_LAST_ACTIVITY,
         ] {
-            assert!(text.contains(name), "{name} 应出现在 /metrics 输出：\n{text}");
+            assert!(
+                text.contains(name),
+                "{name} 应出现在 /metrics 输出：\n{text}"
+            );
         }
     }
 

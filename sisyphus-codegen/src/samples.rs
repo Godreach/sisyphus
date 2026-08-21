@@ -369,9 +369,7 @@ pub fn samples() -> Vec<Sample> {
 
     // R6：容器执行环境 image 为空。
     let mut p = base();
-    p.stages[0].jobs[0].exec_env = Some(ExecutionEnv::Container {
-        image: "  ".into(),
-    });
+    p.stages[0].jobs[0].exec_env = Some(ExecutionEnv::Container { image: "  ".into() });
     out.push(Sample {
         id: "r6_container_no_image",
         pipeline: p,

@@ -223,7 +223,9 @@ impl LocalDiskUpgradePackageStore {
         validate_package_name(package_name)?;
         let path = self.package_path(package_name);
         if !tokio::fs::try_exists(&path).await? {
-            return Err(StoreError::NotFound(format!("升级包 {package_name} 不存在")));
+            return Err(StoreError::NotFound(format!(
+                "升级包 {package_name} 不存在"
+            )));
         }
         let file = tokio::fs::File::open(&path).await?;
         // 64 KiB 块流式回放：EOF 关流；读错误透传（HTTP 层截断响应）。
@@ -254,7 +256,10 @@ impl LocalDiskUpgradePackageStore {
 }
 
 /// 流式写盘 + 边写边算 SHA-256/字节数。
-async fn write_stream(tmp: &Path, mut content: ByteStream) -> Result<UpgradePackageBytes, StoreError> {
+async fn write_stream(
+    tmp: &Path,
+    mut content: ByteStream,
+) -> Result<UpgradePackageBytes, StoreError> {
     let mut file = tokio::fs::File::create(tmp).await?;
     let mut hasher = Sha256::new();
     let mut size: u64 = 0;
@@ -301,7 +306,8 @@ impl UpgradePackageRepo {
     /// 最新（`ON CONFLICT DO UPDATE`，与字节层 rename 覆盖同语义）。`version`
     /// 以 JSON 文本列存储（与 `agents.agent_version` 同形态）。
     pub async fn record(&self, meta: &UpgradePackageMeta) -> Result<(), StoreError> {
-        let version_json = serde_json::to_string(&meta.version).map_err(StoreError::DefinitionJson)?;
+        let version_json =
+            serde_json::to_string(&meta.version).map_err(StoreError::DefinitionJson)?;
         sqlx::query(
             "INSERT INTO upgrade_packages
                 (package_name, version, target_os, target_arch, size, sha256, created_at)
@@ -349,11 +355,10 @@ impl UpgradePackageRepo {
     /// 删除包元数据行（字节文件由 [`LocalDiskUpgradePackageStore::delete`] 另删）。
     /// 返回 false 表示包不存在。
     pub async fn delete(&self, package_name: &str) -> Result<bool, StoreError> {
-        let result =
-            sqlx::query("DELETE FROM upgrade_packages WHERE package_name = ?")
-                .bind(package_name)
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query("DELETE FROM upgrade_packages WHERE package_name = ?")
+            .bind(package_name)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() > 0)
     }
 }
@@ -443,10 +448,7 @@ mod tests {
         let (dir, store, repo) = fixture().await;
         let name = "sisyphus-agent-1.0.0-linux-x86_64.tar.gz";
         let data = b"upgrade package bytes".repeat(50);
-        let bytes = store
-            .store(name, bytes_stream(&data))
-            .await
-            .expect("落盘");
+        let bytes = store.store(name, bytes_stream(&data)).await.expect("落盘");
         assert_eq!(bytes.size, data.len() as u64);
         assert_eq!(bytes.sha256, sha256_hex(&data));
 
@@ -513,10 +515,7 @@ mod tests {
             "sisyphus-agent-1.0.0-macos-aarch64.tar.gz",
             "sisyphus-agent-0.9.0-linux-x86_64.tar.gz",
         ] {
-            let bytes = store
-                .store(name, bytes_stream(b"pkg"))
-                .await
-                .expect("落盘");
+            let bytes = store.store(name, bytes_stream(b"pkg")).await.expect("落盘");
             repo.record(&sample_meta(name, &bytes, 1_000))
                 .await
                 .expect("record");
@@ -528,11 +527,15 @@ mod tests {
             .into_iter()
             .map(|m| m.package_name)
             .collect();
-        assert_eq!(names, vec![
-            "sisyphus-agent-0.9.0-linux-x86_64.tar.gz".to_string(),
-            "sisyphus-agent-1.0.0-linux-x86_64.tar.gz".to_string(),
-            "sisyphus-agent-1.0.0-macos-aarch64.tar.gz".to_string(),
-        ], "按包名排序");
+        assert_eq!(
+            names,
+            vec![
+                "sisyphus-agent-0.9.0-linux-x86_64.tar.gz".to_string(),
+                "sisyphus-agent-1.0.0-linux-x86_64.tar.gz".to_string(),
+                "sisyphus-agent-1.0.0-macos-aarch64.tar.gz".to_string(),
+            ],
+            "按包名排序"
+        );
 
         // 删一个：元数据行 + 字节文件皆无。
         let gone = "sisyphus-agent-0.9.0-linux-x86_64.tar.gz";

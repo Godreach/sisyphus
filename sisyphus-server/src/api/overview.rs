@@ -114,9 +114,13 @@ pub async fn get(
     axum::Extension(auth): axum::Extension<AuthContext>,
 ) -> Result<Json<OverviewResponse>, ApiError> {
     // 可见项目（最近构建过滤面；与 /projects 同可见性语义）。
-    let visible = state.projects.list_visible(auth.is_admin, auth.user_id).await?;
+    let visible = state
+        .projects
+        .list_visible(auth.is_admin, auth.user_id)
+        .await?;
     let snap = snapshot::compute(&state.pool).await?;
-    let recent = snapshot::recent_builds(&state.pool, &visible, snapshot::RECENT_BUILDS_LIMIT).await?;
+    let recent =
+        snapshot::recent_builds(&state.pool, &visible, snapshot::RECENT_BUILDS_LIMIT).await?;
 
     // 同一份数灌入 recorder（/metrics 双消费，ADR-0019）。
     crate::metrics::report_snapshot(&snap);

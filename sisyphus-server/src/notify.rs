@@ -19,12 +19,12 @@ use crate::engine;
 use crate::events::{Event, EventBus};
 use crate::secrets::{MasterKey, decrypt};
 use crate::store::builds::{BuildRepo, BuildStatus};
-use crate::store::smtp_config::SmtpTls;
 use crate::store::smtp_config::SmtpConfigRow;
+use crate::store::smtp_config::SmtpTls;
 
 use lettre::message::Mailbox;
-use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::AsyncSmtpTransport;
+use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncTransport, Message, Tokio1Executor};
 
 // ---------------------------------------------------------------------------
@@ -122,23 +122,23 @@ impl MailSender for SmtpSender {
         async move {
             // 解密密码（密文 → 明文，仅发送瞬间存在）。
             let password: Option<Vec<u8>> = match conn.password_ciphertext.as_deref() {
-                Some(blob) => Some(
-                    decrypt(&key, blob).map_err(|e| MailSendError::Decrypt(e.to_string()))?,
-                ),
+                Some(blob) => {
+                    Some(decrypt(&key, blob).map_err(|e| MailSendError::Decrypt(e.to_string()))?)
+                }
                 None => None,
             };
 
             // 按 TLS 模式构 transport builder（port 由调用侧给，覆盖默认 25/465）。
             let mut builder = match conn.tls {
-                SmtpTls::None => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&conn.host),
-                SmtpTls::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(
-                    &conn.host,
-                )
-                .map_err(|e| MailSendError::Build(e.to_string()))?,
-                SmtpTls::Implicit => {
-                    AsyncSmtpTransport::<Tokio1Executor>::relay(&conn.host)
+                SmtpTls::None => {
+                    AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&conn.host)
+                }
+                SmtpTls::StartTls => {
+                    AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&conn.host)
                         .map_err(|e| MailSendError::Build(e.to_string()))?
                 }
+                SmtpTls::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(&conn.host)
+                    .map_err(|e| MailSendError::Build(e.to_string()))?,
             };
             builder = builder.port(conn.port as u16);
             // 仅当用户名非空且有密码时启用认证（无认证 SMTP：两者皆空）。
@@ -161,10 +161,9 @@ impl MailSender for SmtpSender {
                     .map_err(|e| MailSendError::Build(format!("发件人地址解析失败：{e}")))?,
             );
             for to in &msg.to {
-                email_builder = email_builder.to(
-                    to.parse::<Mailbox>()
-                        .map_err(|e| MailSendError::Build(format!("收件人地址解析失败：{e}")))?,
-                );
+                email_builder = email_builder.to(to
+                    .parse::<Mailbox>()
+                    .map_err(|e| MailSendError::Build(format!("收件人地址解析失败：{e}")))?);
             }
             let email = email_builder
                 .subject(&msg.subject)
@@ -407,8 +406,12 @@ mod tests {
                 "{status:?} 为终态"
             );
         }
-        assert!(!is_notifiable_terminal(&terminal_event(BuildStatus::Running)));
-        assert!(!is_notifiable_terminal(&terminal_event(BuildStatus::Queued)));
+        assert!(!is_notifiable_terminal(&terminal_event(
+            BuildStatus::Running
+        )));
+        assert!(!is_notifiable_terminal(&terminal_event(
+            BuildStatus::Queued
+        )));
         assert!(!is_notifiable_terminal(&Event::JobStatus {
             job_id: 1,
             build_id: 1,

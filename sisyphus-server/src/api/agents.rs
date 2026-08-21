@@ -634,7 +634,9 @@ pub async fn upgrade_all(
         .upgrade_package_meta
         .find(&req.package_name)
         .await?
-        .ok_or_else(|| ApiError::resource_not_found(format!("升级包 {} 不存在", req.package_name)))?;
+        .ok_or_else(|| {
+            ApiError::resource_not_found(format!("升级包 {} 不存在", req.package_name))
+        })?;
     let pending = PendingUpgrade {
         package_name: pkg.package_name.clone(),
         sha256: pkg.sha256.clone(),
@@ -667,7 +669,9 @@ pub async fn upgrade_all(
             &auth.username,
             AuditEvent::UpgradeCommandIssued,
             None,
-            Some(&serde_json::json!({ "package": pkg.package_name, "agents": targets }).to_string()),
+            Some(
+                &serde_json::json!({ "package": pkg.package_name, "agents": targets }).to_string(),
+            ),
         )
         .await?;
     Ok((
@@ -713,7 +717,9 @@ pub async fn upgrade_one(
         .upgrade_package_meta
         .find(&req.package_name)
         .await?
-        .ok_or_else(|| ApiError::resource_not_found(format!("升级包 {} 不存在", req.package_name)))?;
+        .ok_or_else(|| {
+            ApiError::resource_not_found(format!("升级包 {} 不存在", req.package_name))
+        })?;
     if row.agent_version().unwrap_or(None) == Some(pkg.version) {
         return Err(ApiError::conflict(format!(
             "Agent {name} 已在目标版本 {}.{}.{}",
@@ -741,7 +747,10 @@ pub async fn upgrade_one(
         )
         .await?;
     let updated = state.agents.get(row.id).await?.expect("刚更新的行必存在");
-    Ok((StatusCode::ACCEPTED, Json(to_response(&state, updated).await?)))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(to_response(&state, updated).await?),
+    ))
 }
 
 /// 升级指令请求校验：package_name 非空。
@@ -805,7 +814,12 @@ pub async fn workspace_list(
         .map_err(|e| await_to_api_error(e, &name))?;
     let list = match resp.kind {
         Some(Kind::WorkspaceList(l)) => l,
-        _ => return Err(ApiError::internal("workspace list", &"响应帧非 WorkspaceList")),
+        _ => {
+            return Err(ApiError::internal(
+                "workspace list",
+                &"响应帧非 WorkspaceList",
+            ));
+        }
     };
     Ok(Json(WorkspaceListResponse {
         entries: list

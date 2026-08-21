@@ -230,8 +230,12 @@ async fn main() {
     let cleanup_artifacts = config.data_dir.join(sisyphus_server::config::ARTIFACTS_DIR);
     let cleanup_retention = config.retention_days;
     let cleanup_task = tokio::spawn(async move {
-        sisyphus_server::store::run_daily_cleanup(cleanup_pool, cleanup_artifacts, cleanup_retention)
-            .await;
+        sisyphus_server::store::run_daily_cleanup(
+            cleanup_pool,
+            cleanup_artifacts,
+            cleanup_retention,
+        )
+        .await;
     });
 
     // 双端口先绑定再 serve（ADR-0005 端口合并策略推迟，各自独立监听）：
@@ -324,7 +328,10 @@ fn init_tracing(config: &Config) {
 /// 读一行（v1 文本读，TTY 不回显留 follow-up——文档明示 `--password-stdin`
 /// 优先）。失败按 [`AdminCreateError`] 人读消息 exit 1。
 async fn run_admin_create(args: &Args, admin: AdminArgs) {
-    let AdminCommand::Create { username, password_stdin } = admin.admin_command;
+    let AdminCommand::Create {
+        username,
+        password_stdin,
+    } = admin.admin_command;
 
     let config = match Config::load(
         args.data_dir.clone(),
@@ -365,7 +372,10 @@ async fn run_admin_create(args: &Args, admin: AdminArgs) {
 
     match sisyphus_server::admin::create_admin(&pool, &username, &password).await {
         Ok(user) => {
-            println!("全局管理员 {} 已创建（is_admin={}）", user.username, user.is_admin);
+            println!(
+                "全局管理员 {} 已创建（is_admin={}）",
+                user.username, user.is_admin
+            );
             println!("引导完成：用户表非空，web setup wizard 不再进入。");
             std::process::exit(0);
         }

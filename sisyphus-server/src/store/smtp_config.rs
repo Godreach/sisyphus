@@ -13,9 +13,9 @@
 //! 布尔；本 repo 的 [`Self::get`] 仅供 notify 发送路径（解密密码即用）与 GET 端点
 //! （转脱敏形态）消费，密文永不出 API 面。
 
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use utoipa::ToSchema;
-use serde::{Deserialize, Serialize};
 
 use super::StoreError;
 
@@ -99,9 +99,8 @@ impl SmtpConfigRepo {
         .await?;
         Ok(match row {
             Some(r) => {
-                let tls = SmtpTls::parse(&r.4).ok_or_else(|| {
-                    StoreError::Invalid(format!("smtp tls 值损坏：{}", r.4))
-                })?;
+                let tls = SmtpTls::parse(&r.4)
+                    .ok_or_else(|| StoreError::Invalid(format!("smtp tls 值损坏：{}", r.4)))?;
                 Some(SmtpConfigRow {
                     host: r.0,
                     port: r.1,
@@ -171,7 +170,9 @@ mod tests {
             crate::config::Overrides::default(),
         )
         .expect("目录布局");
-        let pool = super::super::bootstrap(dir.path()).await.expect("bootstrap");
+        let pool = super::super::bootstrap(dir.path())
+            .await
+            .expect("bootstrap");
         (dir, pool)
     }
 
@@ -294,12 +295,30 @@ mod tests {
     async fn set_is_singleton_only_one_row() {
         let (_dir, pool) = fixture().await;
         let repo = SmtpConfigRepo::new(pool.clone());
-        repo.set("a.example.com", 25, None, None, SmtpTls::None, "a@x", "u", 0)
-            .await
-            .unwrap();
-        repo.set("b.example.com", 465, None, None, SmtpTls::Implicit, "b@x", "u", 1)
-            .await
-            .unwrap();
+        repo.set(
+            "a.example.com",
+            25,
+            None,
+            None,
+            SmtpTls::None,
+            "a@x",
+            "u",
+            0,
+        )
+        .await
+        .unwrap();
+        repo.set(
+            "b.example.com",
+            465,
+            None,
+            None,
+            SmtpTls::Implicit,
+            "b@x",
+            "u",
+            1,
+        )
+        .await
+        .unwrap();
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM global_smtp_config")
             .fetch_one(&pool)
             .await

@@ -19,9 +19,9 @@ use std::collections::BTreeMap;
 
 use sqlx::SqlitePool;
 
+use crate::store::StoreError;
 use crate::store::builds::{BuildRepo, BuildRow};
 use crate::store::projects::Project;
-use crate::store::StoreError;
 
 /// 等待原因前缀（与 [`crate::sched`] 的 `waiting_reason` 文案对应；解析
 /// 前缀做归类，不依赖完整文案——缺标签详情可变）。
@@ -117,9 +117,9 @@ pub async fn compute(pool: &SqlitePool) -> Result<Snapshot, StoreError> {
     // 无匹配 agent（no_online_agent / missing_labels）才是「构建无法下发」；
     // no_slot 是「有匹配 agent 但无空槽」——调度仍会推进，不该点亮警示
     // （spec 断言：警示语义 = 匹配不上）。
-    let has_no_match = queue
-        .iter()
-        .any(|(reason, depth)| *depth > 0 && matches!(reason, &"no_online_agent" | &"missing_labels"));
+    let has_no_match = queue.iter().any(|(reason, depth)| {
+        *depth > 0 && matches!(reason, &"no_online_agent" | &"missing_labels")
+    });
 
     Ok(Snapshot {
         queue,
@@ -165,12 +165,12 @@ fn classify(detail: Option<&str>) -> &'static str {
 /// 停用 Agent 离线是预期态（不计离线警示）；排空/不兼容 = 在线但
 /// [`AgentRow::mid_upgrade`]/[`AgentRow::version_incompatible`]（ADR-0017 四态）。
 async fn agent_stats(pool: &SqlitePool) -> Result<(u64, u64, bool, bool), StoreError> {
-    let agents = crate::store::agents::AgentRepo::new(pool.clone()).list().await?;
+    let agents = crate::store::agents::AgentRepo::new(pool.clone())
+        .list()
+        .await?;
     let total = agents.len() as u64;
     let online = agents.iter().filter(|a| a.online).count() as u64;
-    let has_offline = agents
-        .iter()
-        .any(|a| !a.online && !a.disabled);
+    let has_offline = agents.iter().any(|a| !a.online && !a.disabled);
     let server = crate::store::agents::AgentRepo::new(pool.clone()).server_version();
     let mut has_draining = false;
     for agent in &agents {
@@ -192,11 +192,10 @@ async fn slot_stats(pool: &SqlitePool) -> Result<(u64, u64), StoreError> {
         sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE status IN ('running', 'unknown')")
             .fetch_one(pool)
             .await?;
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(max_concurrency), 0) FROM agents WHERE online = 1",
-    )
-    .fetch_one(pool)
-    .await?;
+    let total: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(max_concurrency), 0) FROM agents WHERE online = 1")
+            .fetch_one(pool)
+            .await?;
     Ok((used as u64, total as u64))
 }
 
@@ -272,7 +271,9 @@ mod tests {
             crate::config::Overrides::default(),
         )
         .expect("目录布局");
-        let pool = crate::store::bootstrap(dir.path()).await.expect("bootstrap");
+        let pool = crate::store::bootstrap(dir.path())
+            .await
+            .expect("bootstrap");
         ProjectRepo::new(pool.clone())
             .create(NewProject {
                 name: "demo".into(),
@@ -353,8 +354,14 @@ mod tests {
     async fn compute_no_slot_alone_does_not_flag_no_match() {
         let (_dir, pool) = fixture().await;
         let build_id = insert_build(&pool, 1, "release", 1).await;
-        insert_job(&pool, build_id, "j0", "queued", Some("等待匹配 agent：在线 agent 无空槽"))
-            .await;
+        insert_job(
+            &pool,
+            build_id,
+            "j0",
+            "queued",
+            Some("等待匹配 agent：在线 agent 无空槽"),
+        )
+        .await;
 
         let snap = compute(&pool).await.expect("快照");
         assert_eq!(snap.queue.get("no_slot"), Some(&1));
@@ -385,19 +392,13 @@ mod tests {
         assert_eq!(snap.agents_online, 0);
 
         // 停用 Agent 离线不计（预期态）。
-        agents
-            .set_disabled(offline.id, true)
-            .await
-            .expect("停用");
+        agents.set_disabled(offline.id, true).await.expect("停用");
         let snap = compute(&pool).await.expect("快照");
         assert!(!snap.has_offline_agent, "停用离线是预期态");
         assert_eq!(snap.agents_total, 1, "总数含停用");
 
         // 排空 Agent（在线 + pending_upgrade）→ has_draining_incompatible。
-        agents
-            .set_disabled(offline.id, false)
-            .await
-            .expect("启用");
+        agents.set_disabled(offline.id, false).await.expect("启用");
         agents
             .mark_online(offline.id, "[]", None, 1_000)
             .await

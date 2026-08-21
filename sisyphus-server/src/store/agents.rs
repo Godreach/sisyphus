@@ -237,10 +237,7 @@ impl AgentRow {
     /// JSON 视为库损坏——返回 `Err` 而非静默判兼容（否则损坏数据会绕过 N-1
     /// 拒派门）。从未握手（无版本）视为兼容——无版本的 Agent 不会在线（握手
     /// 即落版本），离线者本就不派。
-    pub fn version_incompatible(
-        &self,
-        server: &AgentVersion,
-    ) -> Result<bool, StoreError> {
+    pub fn version_incompatible(&self, server: &AgentVersion) -> Result<bool, StoreError> {
         match self.agent_version()? {
             Some(v) => Ok(v.too_old(server) || v.too_new(server)),
             None => Ok(false),
@@ -251,7 +248,10 @@ impl AgentRow {
     /// [`AgentRepo::has_slots`] 另判）。调度候选过滤的单点谓词。脏
     /// `agent_version` JSON 透传为 `Err`（库损坏不静默放行）。
     pub fn dispatchable(&self, server: &AgentVersion) -> Result<bool, StoreError> {
-        Ok(self.online && !self.disabled && !self.mid_upgrade() && !self.version_incompatible(server)?)
+        Ok(self.online
+            && !self.disabled
+            && !self.mid_upgrade()
+            && !self.version_incompatible(server)?)
     }
 }
 
@@ -654,7 +654,11 @@ impl AgentRepo {
 
     /// 落库握手版本（连接建立时；ADR-0017 版本进契约）。版本以 JSON 文本列
     /// 存储（与 disk_usage 同形态）。
-    pub async fn set_agent_version(&self, id: i64, version: &AgentVersion) -> Result<bool, StoreError> {
+    pub async fn set_agent_version(
+        &self,
+        id: i64,
+        version: &AgentVersion,
+    ) -> Result<bool, StoreError> {
         let json = serde_json::to_string(version).map_err(StoreError::DefinitionJson)?;
         let result =
             sqlx::query("UPDATE agents SET agent_version = ?, updated_at = ? WHERE id = ?")
@@ -752,10 +756,7 @@ impl AgentRepo {
 
     /// 某 Agent 的待补发升级指令（重连补发按 Agent 取用）。Agent 不存在或
     /// 无待补发均返回 `None`。
-    pub async fn pending_upgrade_for(
-        &self,
-        id: i64,
-    ) -> Result<Option<PendingUpgrade>, StoreError> {
+    pub async fn pending_upgrade_for(&self, id: i64) -> Result<Option<PendingUpgrade>, StoreError> {
         match self.get(id).await? {
             None => Ok(None),
             Some(row) => row.pending_upgrade(),
@@ -1595,7 +1596,12 @@ mod tests {
             .expect("建");
         // 新建从未握手：版本为空。
         assert!(
-            repo.get(agent.id).await.unwrap().unwrap().agent_version.is_none(),
+            repo.get(agent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .agent_version
+                .is_none(),
             "新建 Agent 无版本"
         );
 
@@ -1606,10 +1612,17 @@ mod tests {
             patch: 0,
         };
         assert!(
-            repo.set_agent_version(agent.id, &v100).await.expect("落版本")
+            repo.set_agent_version(agent.id, &v100)
+                .await
+                .expect("落版本")
         );
         assert_eq!(
-            repo.get(agent.id).await.unwrap().unwrap().agent_version().unwrap(),
+            repo.get(agent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .agent_version()
+                .unwrap(),
             Some(v100)
         );
 
@@ -1619,9 +1632,16 @@ mod tests {
             minor: 9,
             patch: 5,
         };
-        repo.set_agent_version(agent.id, &v095).await.expect("覆盖版本");
+        repo.set_agent_version(agent.id, &v095)
+            .await
+            .expect("覆盖版本");
         assert_eq!(
-            repo.get(agent.id).await.unwrap().unwrap().agent_version().unwrap(),
+            repo.get(agent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .agent_version()
+                .unwrap(),
             Some(v095)
         );
 
@@ -1695,12 +1715,17 @@ mod tests {
         let cmd = PendingUpgrade {
             package_name: "sisyphus-agent-1.0.0-linux-x86_64.tar.gz".into(),
             sha256: "abc123".into(),
-            download_url: "/api/v1/agent/upgrade-packages/sisyphus-agent-1.0.0-linux-x86_64.tar.gz".into(),
+            download_url: "/api/v1/agent/upgrade-packages/sisyphus-agent-1.0.0-linux-x86_64.tar.gz"
+                .into(),
         };
 
         // 两条待补发：补发视图含 a、b（按 id 排序）。
-        repo.set_pending_upgrade(a.id, &cmd).await.expect("a 待补发");
-        repo.set_pending_upgrade(b.id, &cmd).await.expect("b 待补发");
+        repo.set_pending_upgrade(a.id, &cmd)
+            .await
+            .expect("a 待补发");
+        repo.set_pending_upgrade(b.id, &cmd)
+            .await
+            .expect("b 待补发");
         let view = repo.pending_upgrade_resend().await.expect("补发视图");
         assert_eq!(view.len(), 2);
         assert_eq!(view[0].0, a.id);
@@ -1731,7 +1756,12 @@ mod tests {
         repo.clear_pending_upgrade(a.id).await.expect("清 a");
         repo.clear_upgrade_state(a.id).await.expect("a 清状态");
         assert!(
-            repo.get(a.id).await.unwrap().unwrap().pending_upgrade.is_none()
+            repo.get(a.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .pending_upgrade
+                .is_none()
         );
     }
 
@@ -1745,7 +1775,9 @@ mod tests {
             .create(new_agent("linux-1", "[]", "[]"))
             .await
             .expect("建");
-        repo.mark_online(agent.id, "[]", None, 1_000).await.expect("上线");
+        repo.mark_online(agent.id, "[]", None, 1_000)
+            .await
+            .expect("上线");
 
         // 在线 + 无标签约束：本应命中。
         assert_eq!(
@@ -1781,7 +1813,9 @@ mod tests {
         );
 
         // fallback 阶段：回到可派发（升级失败回退旧版本继续跑）。
-        repo.clear_pending_upgrade(agent.id).await.expect("清待补发");
+        repo.clear_pending_upgrade(agent.id)
+            .await
+            .expect("清待补发");
         repo.set_upgrade_status(agent.id, "fallback", Some("退回 .old"))
             .await
             .expect("回退");
@@ -1801,32 +1835,63 @@ mod tests {
         let (_dir, pool) = fixture().await;
         let repo = AgentRepo::new(pool.clone());
         let server = repo.server_version();
-        assert_eq!(server, AgentVersion {
-            major: 1,
-            minor: 0,
-            patch: 0
-        });
+        assert_eq!(
+            server,
+            AgentVersion {
+                major: 1,
+                minor: 0,
+                patch: 0
+            }
+        );
 
-        let too_old = repo.create(new_agent("old-1", "[]", "[]")).await.expect("old");
-        let in_window = repo.create(new_agent("ok-1", "[]", "[]")).await.expect("ok");
+        let too_old = repo
+            .create(new_agent("old-1", "[]", "[]"))
+            .await
+            .expect("old");
+        let in_window = repo
+            .create(new_agent("ok-1", "[]", "[]"))
+            .await
+            .expect("ok");
         for a in [&too_old, &in_window] {
-            repo.mark_online(a.id, "[]", None, 1_000).await.expect("上线");
+            repo.mark_online(a.id, "[]", None, 1_000)
+                .await
+                .expect("上线");
         }
-        repo.set_agent_version(too_old.id, &AgentVersion { major: 0, minor: 8, patch: 0 })
-            .await
-            .expect("落旧版本");
-        repo.set_agent_version(in_window.id, &AgentVersion { major: 0, minor: 9, patch: 0 })
-            .await
-            .expect("落窗口内版本");
+        repo.set_agent_version(
+            too_old.id,
+            &AgentVersion {
+                major: 0,
+                minor: 8,
+                patch: 0,
+            },
+        )
+        .await
+        .expect("落旧版本");
+        repo.set_agent_version(
+            in_window.id,
+            &AgentVersion {
+                major: 0,
+                minor: 9,
+                patch: 0,
+            },
+        )
+        .await
+        .expect("落窗口内版本");
 
         // 派生谓词：过旧 Agent 在线但 dispatchable=false（版本不兼容，非离线）；
         // 窗口内 Agent dispatchable=true。
         let old_row = repo.get(too_old.id).await.unwrap().unwrap();
         let ok_row = repo.get(in_window.id).await.unwrap().unwrap();
         assert!(old_row.online, "过旧 Agent 仍在线");
-        assert!(!old_row.dispatchable(&server).unwrap(), "过旧 Agent 不可派发");
+        assert!(
+            !old_row.dispatchable(&server).unwrap(),
+            "过旧 Agent 不可派发"
+        );
         assert!(old_row.version_incompatible(&server).unwrap());
-        assert!(!ok_row.version_incompatible(&server).unwrap(), "0.9.0 在窗口内");
+        assert!(
+            !ok_row.version_incompatible(&server).unwrap(),
+            "0.9.0 在窗口内"
+        );
         assert!(ok_row.dispatchable(&server).unwrap());
 
         // 候选只含窗口内 Agent（过旧者被版本门滤掉）。

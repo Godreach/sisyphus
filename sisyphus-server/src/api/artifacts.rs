@@ -111,9 +111,8 @@ pub async fn require_agent_auth(
         Ok(None) => return ApiError::unauthorized().into_response(),
         Err(e) => return ApiError::internal("agent token lookup", &e).into_response(),
     };
-    req.extensions_mut().insert(AgentAuth {
-        agent_id: agent.id,
-    });
+    req.extensions_mut()
+        .insert(AgentAuth { agent_id: agent.id });
     next.run(req).await
 }
 
@@ -350,7 +349,10 @@ async fn artifact_response(
         .map_err(|e| ApiError::internal("产物读取", &e))?;
     let body = Body::from_stream(stream.map(|r| r.map(axum::body::Bytes::from)));
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_LENGTH, size.to_string().parse().expect("长度为合法头值"));
+    headers.insert(
+        header::CONTENT_LENGTH,
+        size.to_string().parse().expect("长度为合法头值"),
+    );
     headers.insert(
         header::HeaderName::from_static("x-sisyphus-sha256"),
         sha256.parse().expect("sha256 hex 为合法头值"),

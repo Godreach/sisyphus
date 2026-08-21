@@ -38,13 +38,19 @@ fn main() -> ExitCode {
 fn generate() -> ExitCode {
     let dir = out_dir();
     if let Err(e) = fs::create_dir_all(&dir) {
-        eprintln!("无法创建输出目录 {dir_display}: {e}", dir_display = dir.display());
+        eprintln!(
+            "无法创建输出目录 {dir_display}: {e}",
+            dir_display = dir.display()
+        );
         return ExitCode::from(1);
     }
     for (name, content) in codegen::generated() {
         let path = dir.join(name);
         if let Err(e) = fs::write(&path, content) {
-            eprintln!("无法写入 {path_display}: {e}", path_display = path.display());
+            eprintln!(
+                "无法写入 {path_display}: {e}",
+                path_display = path.display()
+            );
             return ExitCode::from(1);
         }
         println!("  生成 {name}");
@@ -87,11 +93,14 @@ fn check() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sisyphus_model::validate::{validate, ValidationCode};
+    use sisyphus_model::validate::{ValidationCode, validate};
 
     /// 把规则码切片按 snake_case 字符串排序为 `Vec<String>`（multiset 比较用）。
     fn sorted_codes(codes: &[ValidationCode]) -> Vec<String> {
-        let mut s: Vec<String> = codes.iter().map(|c| serde_json::to_string(c).unwrap()).collect();
+        let mut s: Vec<String> = codes
+            .iter()
+            .map(|c| serde_json::to_string(c).unwrap())
+            .collect();
         s.sort();
         s
     }
@@ -108,12 +117,18 @@ mod tests {
             let actual_sorted = sorted_codes(&actual);
             let expected_sorted = sorted_codes(s.expected_codes);
             assert_eq!(
-                actual_sorted, expected_sorted,
+                actual_sorted,
+                expected_sorted,
                 "样本 `{id}`：Rust 标记码 {actual_sorted:?} != 声明码 {expected_sorted:?}",
                 id = s.id
             );
             // valid 与「无错」一致。
-            assert_eq!(s.valid, actual.is_empty(), "样本 `{}`：valid 标记与校验结果矛盾", s.id);
+            assert_eq!(
+                s.valid,
+                actual.is_empty(),
+                "样本 `{}`：valid 标记与校验结果矛盾",
+                s.id
+            );
         }
     }
 

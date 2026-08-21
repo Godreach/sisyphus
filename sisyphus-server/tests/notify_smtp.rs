@@ -22,7 +22,9 @@ use axum::http::StatusCode;
 
 use common::{TestApp, body_json, cookie_of, req_with_cookie};
 use sisyphus_server::events::Event;
-use sisyphus_server::notify::{MailMessage, MailSender, MailSendError, SmtpConnection, spawn_notifier};
+use sisyphus_server::notify::{
+    MailMessage, MailSendError, MailSender, SmtpConnection, spawn_notifier,
+};
 use sisyphus_server::store::builds::BuildStatus;
 use tokio::sync::mpsc;
 
@@ -65,9 +67,7 @@ impl MailSender for FailingSender {
     ) -> impl Future<Output = Result<(), MailSendError>> + Send {
         self.attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        async {
-            Err(MailSendError::Send("fake failure（AC3 验证）".into()))
-        }
+        async { Err(MailSendError::Send("fake failure（AC3 验证）".into())) }
     }
 }
 
@@ -100,7 +100,13 @@ async fn fixture(smtp: bool, on_success: bool, recipients: &[&str]) -> (TestApp,
     let app = common::test_app().await;
     let admin = common::setup_and_login(&app).await;
     create_project(&app, &admin).await;
-    save_definition(&app, &admin, "release", definition_with_notification(on_success, recipients)).await;
+    save_definition(
+        &app,
+        &admin,
+        "release",
+        definition_with_notification(on_success, recipients),
+    )
+    .await;
     if smtp {
         put_smtp_config(&app, &admin).await;
     }
@@ -112,9 +118,7 @@ async fn create_project(app: &TestApp, cookie: &str) {
         app,
         "POST",
         "/api/v1/projects",
-        Some(
-            r#"{"name":"demo","scm_type":"git","scm_url":"https://example.com/demo"}"#.into(),
-        ),
+        Some(r#"{"name":"demo","scm_type":"git","scm_url":"https://example.com/demo"}"#.into()),
         Some(cookie),
     )
     .await;
@@ -241,7 +245,11 @@ async fn failure_always_sends_with_content() {
     let mut rx = spawn_recording(&app);
     publish_terminal(&app, build_id, number, BuildStatus::Failed);
     let msg = recv_mail(&mut rx).await;
-    assert!(msg.body.contains(&format!("#{number}")), "含构建号：{}", msg.body);
+    assert!(
+        msg.body.contains(&format!("#{number}")),
+        "含构建号：{}",
+        msg.body
+    );
     assert!(msg.body.contains("release"), "含 pipeline：{}", msg.body);
     assert!(msg.body.contains("demo"), "含项目：{}", msg.body);
     assert!(msg.body.contains("失败"), "含状态：{}", msg.body);
@@ -415,11 +423,12 @@ async fn put_smtp_audits_and_get_is_desensitized() {
     );
 
     // 审计：audit_log 含 smtp_config_changed（一次 PUT = 一条）。
-    let rows: Vec<String> =
-        sqlx::query_scalar("SELECT event_type FROM audit_log WHERE event_type = 'smtp_config_changed'")
-            .fetch_all(&app.pool)
-            .await
-            .expect("查审计");
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT event_type FROM audit_log WHERE event_type = 'smtp_config_changed'",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .expect("查审计");
     assert_eq!(rows.len(), 1, "一次 PUT 应记一条 smtp_config_changed");
 }
 
@@ -458,7 +467,11 @@ async fn put_smtp_rejects_non_global_admin() {
         Some(&alice),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "非全局 admin PUT 应 403");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "非全局 admin PUT 应 403"
+    );
 }
 
 /// GET 未配置时 configured=false、config 省略。
@@ -470,5 +483,8 @@ async fn get_smtp_unconfigured_returns_false() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body["configured"], false);
-    assert!(body.get("config").is_none() || body["config"].is_null(), "未配置无 config");
+    assert!(
+        body.get("config").is_none() || body["config"].is_null(),
+        "未配置无 config"
+    );
 }

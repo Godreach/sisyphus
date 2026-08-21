@@ -214,16 +214,18 @@ impl SqliteArtifactMetaRepo {
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(build_id, name, path, size, sha256, created_at)| ArtifactMetaEntry {
-                meta: ArtifactMeta {
-                    build_id,
-                    name,
-                    path,
-                    size: size as u64,
-                    sha256,
+            .map(
+                |(build_id, name, path, size, sha256, created_at)| ArtifactMetaEntry {
+                    meta: ArtifactMeta {
+                        build_id,
+                        name,
+                        path,
+                        size: size as u64,
+                        sha256,
+                    },
+                    created_at,
                 },
-                created_at,
-            })
+            )
             .collect())
     }
 }
@@ -263,13 +265,15 @@ impl ArtifactMetaRepo for SqliteArtifactMetaRepo {
         .bind(name)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|(build_id, name, path, size, sha256)| ArtifactMeta {
-            build_id,
-            name,
-            path,
-            size: size as u64,
-            sha256,
-        }))
+        Ok(
+            row.map(|(build_id, name, path, size, sha256)| ArtifactMeta {
+                build_id,
+                name,
+                path,
+                size: size as u64,
+                sha256,
+            }),
+        )
     }
 
     async fn list_by_build(&self, build_id: i64) -> Result<Vec<ArtifactMeta>, StoreError> {
@@ -299,7 +303,11 @@ mod tests {
     use futures::stream::{self, StreamExt};
 
     /// 临时库装配：bootstrap（迁移含 0012 artifacts 表）+ 父行（项目/构建）。
-    async fn fixture() -> (tempfile::TempDir, LocalDiskArtifactStore, SqliteArtifactMetaRepo) {
+    async fn fixture() -> (
+        tempfile::TempDir,
+        LocalDiskArtifactStore,
+        SqliteArtifactMetaRepo,
+    ) {
         let dir = tempfile::tempdir().expect("临时数据目录");
         crate::config::Config::load(
             dir.path().to_path_buf(),
@@ -392,7 +400,10 @@ mod tests {
         repo.record(&meta_v2).await.expect("record v2");
 
         let found = repo.find(1, "app.tar").await.expect("find");
-        assert_eq!(found.as_ref().map(|m| m.sha256.clone()), Some(sha256_hex(b"v2-longer-bytes")));
+        assert_eq!(
+            found.as_ref().map(|m| m.sha256.clone()),
+            Some(sha256_hex(b"v2-longer-bytes"))
+        );
         let rows = repo.list_by_build(1).await.expect("list");
         assert_eq!(rows.len(), 1, "(build, name) 唯一——覆盖非新增");
     }
@@ -482,8 +493,11 @@ mod tests {
     async fn failed_stream_write_cleans_tmp_and_leaves_no_artifact() {
         let (dir, store, repo) = fixture().await;
         // 中途报错的流：半截写入须清理，不产生可见产物。
-        let broken: ByteStream = stream::iter(vec![Ok(b"half".to_vec()), Err(std::io::Error::other("boom"))])
-            .boxed();
+        let broken: ByteStream = stream::iter(vec![
+            Ok(b"half".to_vec()),
+            Err(std::io::Error::other("boom")),
+        ])
+        .boxed();
         let err = store
             .store(1, "broken.bin", broken)
             .await
