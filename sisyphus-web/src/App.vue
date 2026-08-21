@@ -12,11 +12,12 @@ import { useI18n } from 'vue-i18n'
 
 import { currentLocale, setLocale } from '@/i18n'
 import { useAuthStore } from '@/stores/auth'
-import { themeOverrides } from '@/theme'
+import { useDarkMode } from '@/composables/useDarkMode'
 
 const { t } = useI18n()
 const router = useRouter()
 const auth = useAuthStore()
+const { theme, themeOverrides } = useDarkMode()
 
 const locale = computed(() => currentLocale())
 const isAuthed = computed(() => auth.isAuthed)
@@ -63,7 +64,7 @@ async function signOut(): Promise<void> {
 </script>
 
 <template>
-  <n-config-provider :theme-overrides="themeOverrides">
+  <n-config-provider :theme="theme" :theme-overrides="themeOverrides">
     <div class="app-shell">
       <aside v-if="isAuthed" class="app-sidebar">
         <nav class="sidebar-nav">

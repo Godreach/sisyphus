@@ -14,6 +14,18 @@
     'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sisy-color-bg: #1a1a2e;
+    --sisy-color-surface: #16213e;
+    --sisy-color-border: #2a2a4a;
+    --sisy-color-text: #e0e0e0;
+    --sisy-color-text-secondary: #a0a0b0;
+    --sisy-color-primary: #3a6bb5;
+    --sisy-color-danger: #ef5350;
+  }
+}
+
 * {
   box-sizing: border-box;
 }
