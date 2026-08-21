@@ -12,6 +12,7 @@ import { useI18n } from 'vue-i18n'
 
 import { currentLocale, setLocale } from '@/i18n'
 import { useAuthStore } from '@/stores/auth'
+import { themeOverrides } from '@/theme'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -62,23 +63,12 @@ async function signOut(): Promise<void> {
 </script>
 
 <template>
-  <div class="app-shell">
-    <aside v-if="isAuthed" class="app-sidebar">
-      <nav class="sidebar-nav">
-        <button
-          v-for="item in mainNav"
-          :key="item.name"
-          type="button"
-          class="sidebar-link"
-          :class="{ active: $route.name === item.name }"
-          @click="go(item.name)"
-        >
-          {{ t(item.labelKey) }}
-        </button>
-        <template v-if="isAdmin">
-          <span class="sidebar-sep" aria-hidden="true"></span>
+  <n-config-provider :theme-overrides="themeOverrides">
+    <div class="app-shell">
+      <aside v-if="isAuthed" class="app-sidebar">
+        <nav class="sidebar-nav">
           <button
-            v-for="item in adminNav"
+            v-for="item in mainNav"
             :key="item.name"
             type="button"
             class="sidebar-link"
@@ -87,26 +77,39 @@ async function signOut(): Promise<void> {
           >
             {{ t(item.labelKey) }}
           </button>
-        </template>
-      </nav>
-    </aside>
+          <template v-if="isAdmin">
+            <span class="sidebar-sep" aria-hidden="true"></span>
+            <button
+              v-for="item in adminNav"
+              :key="item.name"
+              type="button"
+              class="sidebar-link"
+              :class="{ active: $route.name === item.name }"
+              @click="go(item.name)"
+            >
+              {{ t(item.labelKey) }}
+            </button>
+          </template>
+        </nav>
+      </aside>
 
-    <div class="app-body">
-      <main class="app-main">
-        <RouterView />
-      </main>
+      <div class="app-body">
+        <main class="app-main">
+          <RouterView />
+        </main>
 
-      <footer class="app-footer">
-        <div v-if="isAuthed" class="footer-user">
-          <span class="footer-username">{{ username }}</span>
-          <button type="button" class="footer-logout" @click="signOut">
-            {{ t('auth.logout') }}
+        <footer class="app-footer">
+          <div v-if="isAuthed" class="footer-user">
+            <span class="footer-username">{{ username }}</span>
+            <button type="button" class="footer-logout" @click="signOut">
+              {{ t('auth.logout') }}
+            </button>
+          </div>
+          <button type="button" class="lang-switch" @click="toggleLocale">
+            {{ t('app.langSwitch') }}
           </button>
-        </div>
-        <button type="button" class="lang-switch" @click="toggleLocale">
-          {{ t('app.langSwitch') }}
-        </button>
-      </footer>
+        </footer>
+      </div>
     </div>
-  </div>
+  </n-config-provider>
 </template>

@@ -2,6 +2,9 @@ import { fileURLToPath, URL } from 'node:url'
 
 import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
+import AutoImport from 'unplugin-auto-import/vite'
+import Components from 'unplugin-vue-components/vite'
+import { NaiveUiResolver } from 'unplugin-vue-components/resolvers'
 
 // sisyphus-web 前端工程（ADR-0003/0020，票 B4-T1）。
 //
@@ -17,7 +20,27 @@ import vue from '@vitejs/plugin-vue'
 //   （SameSite=Lax + HttpOnly）与 CSRF 同源校验在浏览器侧语义一致。
 //   swagger-ui 同样转发（debug 构建下 server 暴露）。
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    AutoImport({
+      imports: [
+        'vue',
+        'vue-router',
+        'vue-i18n',
+        {
+          'naive-ui': [
+            'useDialog',
+            'useMessage',
+            'useNotification',
+            'useLoadingBar',
+          ],
+        },
+      ],
+    }),
+    Components({
+      resolvers: [NaiveUiResolver()],
+    }),
+  ],
   base: '/',
   resolve: {
     alias: {
