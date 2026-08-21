@@ -566,7 +566,6 @@
   "errors": {
     "generic": "发生未知错误",
     "network": "网络请求失败，请检查服务是否可达",
-    "notFound": "页面不存在",
     "notFoundTitle": "404",
     "notFoundDesc": "抱歉，您访问的页面不存在或已被移除。",
     "backToHome": "返回首页"

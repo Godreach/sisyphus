@@ -566,7 +566,6 @@
   "errors": {
     "generic": "An unknown error occurred",
     "network": "Network request failed. Please check that the service is reachable.",
-    "notFound": "Page not found",
     "notFoundTitle": "404",
     "notFoundDesc": "Sorry, the page you visited does not exist or has been removed.",
     "backToHome": "Back to home"

@@ -62,8 +62,8 @@ describe('NotFoundView（404 页面 Naive UI 迁移）', () => {
 
   it('使用 NResult 组件显示 404 状态', () => {
     wrapper = mountView()
-    // NResult 渲染时会包含结果区域
-    expect(wrapper.find('.not-found-page').exists()).toBe(true)
+    // NResult 渲染出 `.n-result` 根元素，且 icon 区域按 status="404" 绘制。
+    expect(wrapper.find('.n-result').exists()).toBe(true)
   })
 })
 
