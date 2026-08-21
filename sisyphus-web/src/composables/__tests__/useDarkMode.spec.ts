@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { computed, nextTick, ref } from 'vue'
+import { nextTick } from 'vue'
 import { useDarkMode } from '@/composables/useDarkMode'
 
 describe('useDarkMode', () => {

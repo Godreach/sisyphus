@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-
 import LoginView from '@/views/LoginView.vue'
 import { i18n, setLocale } from '@/i18n'
 
@@ -112,5 +111,97 @@ describe('LoginView（登录/回跳/错误展示）', () => {
 
     await fillAndSubmit('alice', 'secret123')
     await vi.waitFor(() => expect(wrapper.get('[role="alert"]').text()).toContain('网络请求失败'))
+  })
+})
+
+describe('LoginView Naive UI 迁移', () => {
+  let pinia: Pinia
+  let router: Router
+  let wrapper: VueWrapper
+
+  const fetchMock = vi.fn()
+
+  beforeEach(async () => {
+    setLocale('zh-CN')
+    pinia = createPinia()
+    setActivePinia(pinia)
+    router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', name: 'login', component: { template: '<div />' } },
+        { path: '/projects', name: 'projects', component: { template: '<div />' } },
+        { path: '/', name: 'overview', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/login')
+    await router.isReady()
+    globalThis.fetch = fetchMock
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    vi.restoreAllMocks()
+  })
+
+  function mountLogin() {
+    return mount(LoginView, {
+      global: {
+        plugins: [pinia, router, i18n],
+        stubs: {
+          NConfigProvider: false,
+        },
+      },
+    })
+  }
+
+  it('空值提交 → 显示内联校验错误', async () => {
+    wrapper = mountLogin()
+    // 提交空表单
+    await wrapper.get('form').trigger('submit')
+    // 应该出现校验错误信息
+    await vi.waitFor(() => {
+      const text = wrapper.text()
+      expect(text).toContain('请输入用户名')
+      expect(text).toContain('请输入密码')
+    })
+    // 不应触发网络请求
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('提交中 → 按钮禁用并显示加载状态', async () => {
+    wrapper = mountLogin()
+    // 设置 fetch 延迟响应
+    fetchMock.mockImplementation(() => new Promise(() => {}))
+    await wrapper.get('input[name="username"]').setValue('alice')
+    await wrapper.get('input[name="password"]').setValue('secret')
+    await wrapper.get('form').trigger('submit')
+    await vi.waitFor(() => {
+      const button = wrapper.get('button[type="submit"]')
+      expect(button.attributes('disabled')).toBeDefined()
+      // 应该有 NSpin 或加载指示器（暂检查按钮文本变化）
+      expect(button.text()).toContain('登录中')
+    })
+  })
+
+  it('登录失败 → 显示 NAlert 错误提示', async () => {
+    wrapper = mountLogin()
+    fetchMock.mockResolvedValue(
+      jsonResponse(401, { code: 'UNAUTHORIZED', message: '用户名或密码错误' }),
+    )
+    await wrapper.get('input[name="username"]').setValue('alice')
+    await wrapper.get('input[name="password"]').setValue('wrong')
+    await wrapper.get('form').trigger('submit')
+    await vi.waitFor(() => {
+      // 应该出现 NAlert 组件（role="alert"）
+      const alert = wrapper.get('[role="alert"]')
+      expect(alert.text()).toContain('用户名或密码错误')
+    })
+  })
+
+  it('页面使用 NCard 居中布局', () => {
+    wrapper = mountLogin()
+    // 检查是否存在 NCard（可能渲染为 div with class naive-card）
+    // 暂时检查是否有卡片容器（可根据实际结构调整）
+    expect(wrapper.find('.login-card').exists()).toBe(true) // 保留原有 class 作为标识
   })
 })

@@ -10,7 +10,7 @@
 import { computed, h, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import type { MenuMixedOption } from 'naive-ui'
+import type { MenuOption } from 'naive-ui'
 import {
   Home,
   FolderOpen,
@@ -55,8 +55,8 @@ function renderIcon(icon: ReturnType<typeof import('vue').defineComponent>) {
 }
 
 /** 构建 NMenu 选项：主区 + 管理区（admin 仅对全局 admin 可见）。 */
-const menuOptions = computed<MenuMixedOption[]>(() => {
-  const groups: MenuMixedOption[] = [
+const menuOptions = computed<MenuOption[]>(() => {
+  const groups: MenuOption[] = [
     {
       type: 'group',
       label: () => t('nav.main'),

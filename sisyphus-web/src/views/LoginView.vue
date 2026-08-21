@@ -3,9 +3,12 @@
 // - 登录成功换 cookie 会话（HttpOnly + SameSite=Lax，浏览器自动携带）。
 // - 401（用户名或密码错误）与 429（限流）统一错误展示（code 分支）。
 // - 登录成功回跳原目标：`route.query.redirect`（路由守卫写入）。
+// #88: 使用 Naive UI 组件重写，验证主题配置和组件集成。
 
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { NCard, NForm, NFormItem, NInput, NButton, NAlert, NIcon } from 'naive-ui'
+import { PersonOutline, LockClosedOutline } from '@vicons/ionicons5'
 
 import { describeSubmitError } from '@/api/errors'
 import { useAuthStore } from '@/stores/auth'
@@ -20,9 +23,29 @@ const username = ref('')
 const password = ref('')
 const submitting = ref(false)
 const errorMessage = ref('')
+const formRef = ref<InstanceType<typeof NForm> | null>(null)
+
+const rules = computed(() => ({
+  username: {
+    required: true,
+    message: t('auth.usernameRequired'),
+    trigger: 'blur',
+  },
+  password: {
+    required: true,
+    message: t('auth.passwordRequired'),
+    trigger: 'blur',
+  },
+}))
 
 async function submit(): Promise<void> {
   errorMessage.value = ''
+  try {
+    await formRef.value?.validate()
+  } catch {
+    // 校验失败，不提交
+    return
+  }
   submitting.value = true
   try {
     // 登录换会话 cookie（auth store 单一动作），成功即回跳原目标。
@@ -39,25 +62,49 @@ async function submit(): Promise<void> {
 
 <template>
   <div class="login-page">
-    <form class="login-card" @submit.prevent="submit">
+    <n-card class="login-card" :bordered="false">
       <h1>{{ t('app.name') }}</h1>
       <p class="login-tagline">{{ t('auth.loginTagline') }}</p>
 
-      <label class="field">
-        <span>{{ t('auth.username') }}</span>
-        <input v-model="username" name="username" autocomplete="username" required />
-      </label>
+      <n-form ref="formRef" :model="{ username, password }" :rules="rules" @submit.prevent="submit">
+        <n-form-item path="username" :label="t('auth.username')">
+          <n-input
+            v-model:value="username"
+            :placeholder="t('auth.username')"
+            :input-props="{ name: 'username', autocomplete: 'username' }"
+          >
+            <template #prefix>
+              <n-icon :component="PersonOutline" />
+            </template>
+          </n-input>
+        </n-form-item>
 
-      <label class="field">
-        <span>{{ t('auth.password') }}</span>
-        <input v-model="password" type="password" name="password" autocomplete="current-password" required />
-      </label>
+        <n-form-item path="password" :label="t('auth.password')">
+          <n-input
+            v-model:value="password"
+            type="password"
+            show-password-on="mousedown"
+            :placeholder="t('auth.password')"
+            :input-props="{ name: 'password', autocomplete: 'current-password' }"
+          >
+            <template #prefix>
+              <n-icon :component="LockClosedOutline" />
+            </template>
+          </n-input>
+        </n-form-item>
 
-      <p v-if="errorMessage" class="login-error" role="alert">{{ errorMessage }}</p>
+        <n-alert v-if="errorMessage" type="error" :title="errorMessage" role="alert" />
 
-      <button type="submit" :disabled="submitting">
-        {{ submitting ? t('auth.loggingIn') : t('auth.login') }}
-      </button>
-    </form>
+        <n-button
+          type="primary"
+          attr-type="submit"
+          :disabled="submitting"
+          :loading="submitting"
+          block
+        >
+          {{ submitting ? t('auth.loggingIn') : t('auth.login') }}
+        </n-button>
+      </n-form>
+    </n-card>
   </div>
 </template>

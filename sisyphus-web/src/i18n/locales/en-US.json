@@ -14,7 +14,9 @@
     "username": "Username",
     "password": "Password",
     "loginRateLimited": "Too many attempts. Retry in {seconds}s.",
-    "loginRateLimitedGeneric": "Too many attempts. Please try again later."
+    "loginRateLimitedGeneric": "Too many attempts. Please try again later.",
+    "usernameRequired": "Please enter username",
+    "passwordRequired": "Please enter password"
   },
   "setup": {
     "title": "Initial setup",
