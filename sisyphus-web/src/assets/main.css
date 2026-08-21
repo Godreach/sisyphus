@@ -148,95 +148,11 @@ h3 {
   margin: 8px 0;
 }
 
-/* 概览页：stat 卡 + 警示态 + 最近构建（ADR-0019）。 */
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 12px;
-  margin: 16px 0;
-}
-
-.stat-card {
-  background: var(--sisy-color-surface);
-  border: 1px solid var(--sisy-color-border);
-  border-radius: var(--sisy-radius);
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.stat-label {
-  color: var(--sisy-color-text-secondary);
-  font-size: 12px;
-}
-
-.stat-value {
-  font-size: 22px;
-  font-weight: 600;
-}
-
-.stat-degraded {
-  border-style: dashed;
-  background: #fafbfc;
-}
-
-.stat-degraded .stat-value {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--sisy-color-text-secondary);
-}
-
-.stat-degraded-note {
-  color: var(--sisy-color-text-secondary);
-  font-size: 11px;
-}
-
-.alerts {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 8px 0 20px;
-}
-
-.alert {
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: var(--sisy-radius);
-  font-size: 13px;
-}
-
-.alert-warn {
-  background: #fff4e5;
-  border: 1px solid #e6a23c;
-  color: #8a4b08;
-}
-
-.alert-info {
-  background: #e8f1fb;
-  border: 1px solid #a3c2e8;
-  color: #1f3c6e;
-}
-
-.alert-degraded {
-  background: #f6f8fa;
-  border: 1px dashed var(--sisy-color-border);
-  color: var(--sisy-color-text-secondary);
-}
-
-.recent-builds h2,
+/* 概览页样式已迁移至 OverviewView.vue 的 scoped style（#91）——
+   仅保留其余视图仍依赖的 `.detail-section h2` 规则。 */
 .detail-section h2 {
   font-size: 16px;
   margin: 20px 0 10px;
-}
-
-.recent-builds-degraded {
-  color: var(--sisy-color-text-secondary);
-  font-size: 13px;
-}
-
-.overview-error {
-  color: var(--sisy-color-danger);
 }
 
 /* 项目页：列表 + 新建表单。 */

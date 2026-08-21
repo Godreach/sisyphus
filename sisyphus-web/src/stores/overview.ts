@@ -54,6 +54,8 @@ export interface OverviewState {
 
 export const useOverviewStore = defineStore('overview', () => {
   const loadError = ref('')
+  /** 首载中（初始加载 true；重试/刷新期间也置 true，#91 骨架屏）。 */
+  const loading = ref(false)
   const state = ref<OverviewState | null>(null)
 
   /** 有启用但离线的 Agent（事实警示，零阈值；ADR-0019）。 */
@@ -68,17 +70,21 @@ export const useOverviewStore = defineStore('overview', () => {
   /** 加载概览快照：单来源整页语义——失败置 loadError（可重试），不静默部分值。 */
   async function load(): Promise<void> {
     loadError.value = ''
+    loading.value = true
     try {
       const snap = await overviewApi.snapshot()
       state.value = fromSnapshot(snap)
     } catch (err) {
       state.value = null
       loadError.value = err instanceof ApiError ? err.message : String(err)
+    } finally {
+      loading.value = false
     }
   }
 
   return {
     loadError,
+    loading,
     state,
     offlineAlert,
     noMatchAlert,

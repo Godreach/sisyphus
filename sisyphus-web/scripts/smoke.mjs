@@ -367,7 +367,7 @@ async function runAuthed(browser) {
     await page.locator('h1', { hasText: '概览' }).first().waitFor({ timeout: 10000 })
     await page.locator('.stat-card').first().waitFor({ timeout: 5000 })
     const cardCount = await page.locator('.stat-card').count()
-    const hasError = await page.locator('.overview-error').count()
+    const hasError = await page.locator('[data-testid="overview-error"]').count()
     ok(
       'overview no-degradation (real stat cards, no error)',
       cardCount > 0 && hasError === 0,
@@ -381,9 +381,9 @@ async function runAuthed(browser) {
   try {
     await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
     await page.locator('h1', { hasText: '概览' }).first().waitFor({ timeout: 10000 })
-    await page.locator('.lang-switch').click()
+    await page.locator('.app-footer .n-switch').click()
     await page.locator('h1', { hasText: 'Overview' }).first().waitFor({ timeout: 5000 })
-    await page.locator('.lang-switch').click()
+    await page.locator('.app-footer .n-switch').click()
     await page.locator('h1', { hasText: '概览' }).first().waitFor({ timeout: 5000 })
     ok('i18n zh→en→zh', true)
   } catch (err) {
