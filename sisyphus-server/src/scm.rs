@@ -47,20 +47,6 @@ pub trait ScmProbe: Send + Sync {
     async fn probe_head(&self, project: &Project) -> Result<Option<String>, String>;
 }
 
-/// 占位探测（生产面，随 scm 批次替换为真实 git / svn 探测）：一律返回探测
-/// 失败，错误信息标注「尚未实现」。poll 触发源据此记 `last_probe_error`、
-/// 按节奏重试、不自动禁用——cron 触发源不经探测，照常工作。真实探测落地
-/// 后在 main 装配处换入即可。
-#[derive(Debug, Default, Clone)]
-pub struct UnimplementedProbe;
-
-#[tonic::async_trait]
-impl ScmProbe for UnimplementedProbe {
-    async fn probe_head(&self, _project: &Project) -> Result<Option<String>, String> {
-        Err("SCM 探测尚未实现（随 scm 批次落地）".into())
-    }
-}
-
 /// 可控探测（测试 / 无网络面，票 B2c-T6 假探测）：按编程结果序列逐次返回
 /// [`probe_head`](ScmProbe::probe_head) 的结果。每次调用弹出队首结果；队空
 /// 兜底 `Ok(None)`（空仓库）——测试应编程到预期点再用 [`Self::pending`]
@@ -679,7 +665,8 @@ pub(crate) async fn svn_info_revision(
 // ============================================================
 
 /// 生产 SCM 探测（B5-T3）：解密项目存储凭据 → shell 出 `git ls-remote` /
-/// `svn info` 探测 head。装配于 main（替换 [`UnimplementedProbe`]）。凭据经
+/// `svn info` 探测 head。装配于 main（生产唯一探测，测试面用
+/// [`crate::scm::FakeProbe`]）。凭据经
 /// ADR-0015 链路解密（[`crate::secrets::decrypt`] + 主密钥），探测毕即弃，
 /// 永不上命令行/URL。缺 git/svn 二进制 → 清晰报错（不静默降级，ADR-0016）。
 pub struct SystemScmProbe {
@@ -795,12 +782,6 @@ mod tests {
     async fn fake_probe_empty_queue_falls_back_to_none() {
         let probe = FakeProbe::new();
         assert_eq!(probe.probe_head(&proj()).await.expect("兜底"), None);
-    }
-
-    #[tokio::test]
-    async fn unimplemented_probe_always_errors() {
-        let probe = UnimplementedProbe;
-        assert!(probe.probe_head(&proj()).await.is_err());
     }
 
     // ---- 解析原语（纯）----

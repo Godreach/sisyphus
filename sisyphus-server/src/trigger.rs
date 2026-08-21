@@ -167,7 +167,7 @@ pub struct TickReport {
 /// 触发引擎：cron 扫表 + poll 轮询，调 [`Engine::start_build`]。
 ///
 /// 组合根装配：engine（编排推进，与 REST/sched 共享同一引擎与事件总线）
-/// 与探测端口（生产 [`crate::scm::UnimplementedProbe`]，测试
+/// 与探测端口（生产 [`crate::scm::SystemScmProbe`]，测试
 /// [`crate::scm::FakeProbe`]）。后台 [`Self::run`] 周期调 [`Self::tick`]；
 /// 测试直接调 [`Self::tick`] 注入假时钟。
 pub struct TriggerEngine {
