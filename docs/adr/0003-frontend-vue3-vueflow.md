@@ -11,6 +11,8 @@ sisyphus 的核心卖点是可视化 pipeline 编排编辑器（ADR-0001），�
 
 web 前端用 **Vue 3（`<script setup>` + TypeScript + Vite）**，编排编辑器基于 **Vue Flow（`@vue-flow/core`）** 二次封装，i18n 用 **vue-i18n v11**（Composition API 模式）。
 
+> 修订：编辑器形态经 [ADR-0020](0020-web-ui-ia-and-hybrid-editor.md) 调整——Vue Flow 从「编辑器基础」降级为可选依赖，编辑器改用混合式（左数据派生轨道 + 右结构化表单，无画布）；Vue 3 + TS + Vite + vue-i18n v11 不变。
+
 ## 理由
 
 - **Vue Flow 是同量级候选中唯一经大规模生产验证的 Vue 3 编排方案**：n8n（editor-ui 直接依赖 @vue-flow/core@1.48.0）与 Kestra 构建于其上；"节点即 Vue 组件"天然承载节点配置表单、校验、只读运行态渲染；MIT 协议、周下载 51 万、2026 年持续发版。

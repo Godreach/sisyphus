@@ -23,6 +23,8 @@
 
 **离线处置**：离线不判死。45s 判离线后运行中任务标记 `unknown`，Agent 侧继续执行（日志本地缓冲，重连补传），重连后回归 running。Agent 重启丢任务则上报 aborted 判失败走 fail-fast。orphan 宽限默认 10 分钟（可配），超时未恢复判失败（避免同 pipeline 串行队列被一台掉线机器堵死）；UI 可提前手动判败。
 
+> 修订：离线回归经 [ADR-0011](0011-agent-workspace-isolation-and-lifecycle.md) 补丁——宽限超时判败后原 Agent 重连、本地任务仍在跑时，Agent 上报在途任务、Server 告知已判终态、Agent 本地终止并丢弃；重跑任务下发时 Agent 检查目标工作区无残留进程记录。v1 不做本地工作区锁。
+
 **超时**：仅 job 级 `timeout` 字段（分钟，默认 0 = 无限），Server 从下发时刻计时，超时走取消路径、终态 `timeout`。不做 build 总超时与无输出超时（通道存活即视为在跑）。默认无限：宿主机构建时长差异过大，拍默认值误杀风险大于挂死风险。
 
 **调度器形态**：进程内单调度循环、事件驱动唤醒（槽位释放 / job 就绪 / Agent 上下线 / 标签变更），排队状态落 SQLite（ADR-0004），无内存队列。Server 重启不取消在途任务：通道断开 Agent 侧续跑，重启后 Agent 重连上报在途任务与日志 seq，Server 从库 + 上报重建调度状态。

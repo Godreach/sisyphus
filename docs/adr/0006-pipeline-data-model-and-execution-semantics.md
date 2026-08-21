@@ -19,6 +19,8 @@
 
 **参数化**：必填参数必须带默认值（保存时校验），所有触发方式取参一律"默认值，手动触发可覆盖"——不存在 cron/poll 触发缺参数的死锁分支。变量引用 `${name}` 语法（`$${name}` 转义），可用于任意字符串字段；内置变量 8 个（`SISY_BUILD_NUMBER`、`SISY_PIPELINE_NAME`、`SISY_PROJECT_NAME`、`SISY_JOB_NAME`、`SISY_STAGE_NAME`、`SISY_COMMIT_ID`、`SISY_BRANCH`、`SISY_WORKSPACE`），Server 端下发前解析完毕。env 键值对（pipeline/任务两级）与 `${}` 替换是两个机制。
 
+> 修订：内置变量经 [ADR-0011](0011-agent-workspace-isolation-and-lifecycle.md) 补丁——`SISY_WORKSPACE` 改为以占位符随任务规格下发、Agent 执行任何步骤前替换；实际为 7 个 Server 端解析 + 1 个（`SISY_WORKSPACE`）Agent 端解析。when 表达式禁用 `SISY_WORKSPACE` 不变。
+
 **条件执行**：阶段/任务/步骤三级统一挂 when，语言为受限表达式（比较、`&&`/`||`、字符串相等、存在性），无图灵完备。阶段跳过即其内任务全不发。
 
 **失败与重试**：默认 fail-fast——某任务失败即取消同阶段未完成任务、跳过后续所有阶段；任务可标 allow_failure 豁免。自动重试 N 次后仍失败才算失败。手动重跑两种：从头重跑（新构建占新号）；从失败任务重跑（同号延续，attempt+1，已成功任务的结果/日志/产物保留）。
