@@ -16,10 +16,26 @@
 // CLI 等价提示：每步头部给 headless/Docker 用户对应的命令行（跑过即视为
 // 引导完成，ADR-0010「headless 等价」）。用户显式跳过全部步骤即视为引导
 // 完成（dismiss），此后守卫不再把受保护页重定向回 /setup。
+//
+// #89: 使用 Naive UI 组件重写，配合 toast 通知提供即时反馈。
 
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import {
+  NCard,
+  NSteps,
+  NStep,
+  NButton,
+  NInput,
+  NSelect,
+  NAlert,
+  NCode,
+  NIcon,
+  useMessage,
+  type StepsProps,
+} from 'naive-ui'
+import { ClipboardOutline } from '@vicons/ionicons5'
 
 import { agentsApi, projectsApi, setupApi } from '@/api/client'
 import { describeSubmitError } from '@/api/errors'
@@ -30,6 +46,7 @@ import { buildAgentRegisterCommand, type AgentTargetOs } from '@/utils/agentComm
 const { t } = useI18n()
 const router = useRouter()
 const auth = useAuthStore()
+const message = useMessage()
 
 /** 当前步骤（0 = 管理员，1 = Agent，2 = 项目）。 */
 const step = ref(0)
@@ -56,6 +73,13 @@ const defaultBranch = ref('')
 
 const isLastStep = computed(() => step.value === 2)
 
+/** NSteps 各步骤状态映射。 */
+function stepStatus(index: number): StepsProps['status'] {
+  if (index < step.value) return 'finish'
+  if (index === step.value) return 'process'
+  return 'wait'
+}
+
 /** 逐步错误清空 + 进入下一步。 */
 function goTo(stepIndex: number): void {
   errorMessage.value = ''
@@ -73,10 +97,10 @@ async function createAdmin(): Promise<void> {
     const creds = { username: adminUsername.value, password: adminPassword.value }
     await setupApi.setup(creds)
     await auth.login(creds.username, creds.password)
+    message.success(t('setup.step1Title') + ' ✓')
     goTo(1)
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
-      // 用户表非空（引导已完成，如 CLI 已建管理员）：不在此建，回落登录。
       auth.dismissSetupFlow()
       await router.replace({ name: 'login' })
       return
@@ -100,6 +124,7 @@ async function createAgent(): Promise<void> {
       registerCode: created.register_code,
       agentName: created.agent.name,
     }
+    message.success(t('setup.step2Title') + ' ✓')
   } catch (err) {
     errorMessage.value = describeSubmitError(err)
   } finally {
@@ -118,6 +143,7 @@ async function createProject(): Promise<void> {
       scm_url: scmUrl.value.trim(),
       default_branch: defaultBranch.value.trim() || null,
     })
+    message.success(t('setup.step3Title') + ' ✓')
     finishSetup()
   } catch (err) {
     errorMessage.value = describeSubmitError(err)
@@ -164,52 +190,65 @@ function agentCommand(os: AgentTargetOs): string {
   return buildAgentRegisterCommand(os, agentCreds.value?.registerCode ?? '')
 }
 
-/** 复制当前目标 OS 的注册命令到剪贴板（不可用时回落选中态提示）。 */
-async function copyCommand(): Promise<void> {
-  const cmd = agentCommand(targetOs.value)
+/** 复制文本到剪贴板。 */
+async function copyToClipboard(text: string): Promise<void> {
   try {
-    await navigator.clipboard.writeText(cmd)
+    await navigator.clipboard.writeText(text)
+    message.success(t('setup.copy') + ' ✓')
   } catch {
-    // 剪贴板 API 不可用（非安全上下文等）：不打断流程，命令本就在框内可选。
+    // 剪贴板 API 不可用（非安全上下文等）：不打断流程。
   }
 }
 </script>
 
 <template>
   <div class="setup-page">
-    <h1>{{ t('app.name') }}</h1>
-    <p class="setup-intro">{{ t('setup.intro') }}</p>
+    <n-card class="setup-card" :bordered="false">
+      <h1>{{ t('app.name') }}</h1>
+      <p class="setup-intro">{{ t('setup.intro') }}</p>
 
-    <!-- 步骤进度（三步各自可跳过）。 -->
-    <ol class="setup-steps">
-      <li :class="{ now: step === 0, done: step > 0 }">
-        <span class="setup-dot">{{ step > 0 ? '✓' : 1 }}</span>
-        {{ t('setup.step1Title') }}
-      </li>
-      <li :class="{ now: step === 1, done: step > 1 }">
-        <span class="setup-dot">{{ step > 1 ? '✓' : 2 }}</span>
-        {{ t('setup.step2Title') }}
-      </li>
-      <li :class="{ now: step === 2, done: step > 2 }">
-        <span class="setup-dot">{{ step > 2 ? '✓' : 3 }}</span>
-        {{ t('setup.step3Title') }}
-      </li>
-    </ol>
+      <!-- 步骤进度（Naive UI NSteps）。 -->
+      <n-steps :current="step + 1" class="setup-steps">
+        <n-step :title="t('setup.step1Title')" :status="stepStatus(0)" />
+        <n-step :title="t('setup.step2Title')" :status="stepStatus(1)" />
+        <n-step :title="t('setup.step3Title')" :status="stepStatus(2)" />
+      </n-steps>
 
-    <form class="setup-card" @submit.prevent>
       <!-- 步骤 1：管理员。 -->
       <section v-if="step === 0">
         <h2>{{ t('setup.step1Title') }}</h2>
         <p class="setup-desc">{{ t('setup.step1Desc') }}</p>
-        <label class="field">
-          <span>{{ t('auth.username') }}</span>
-          <input v-model="adminUsername" name="admin-username" autocomplete="username" />
-        </label>
-        <label class="field">
-          <span>{{ t('auth.password') }}</span>
-          <input v-model="adminPassword" type="password" name="admin-password" autocomplete="new-password" />
-        </label>
-        <pre class="setup-cli">{{ t('setup.cliLabel') }}<br /><code>{{ cliAdminCommand }}</code></pre>
+
+        <n-alert v-if="errorMessage" type="error" :title="errorMessage" role="alert" class="setup-alert" />
+
+        <n-card size="small" class="setup-cli-card">
+          <template #header>{{ t('setup.cliLabel') }}</template>
+          <template #header-extra>
+            <n-button size="small" type="primary" @click="copyToClipboard(cliAdminCommand)">
+              {{ t('setup.copy') }}
+            </n-button>
+          </template>
+          <n-code :code="cliAdminCommand" language="bash" word-wrap />
+        </n-card>
+
+        <div class="setup-fields">
+          <label class="field">
+            <span>{{ t('auth.username') }}</span>
+            <n-input
+              v-model:value="adminUsername"
+              :input-props="{ name: 'admin-username', autocomplete: 'username' }"
+            />
+          </label>
+          <label class="field">
+            <span>{{ t('auth.password') }}</span>
+            <n-input
+              v-model:value="adminPassword"
+              type="password"
+              show-password-on="mousedown"
+              :input-props="{ name: 'admin-password', autocomplete: 'new-password' }"
+            />
+          </label>
+        </div>
       </section>
 
       <!-- 步骤 2：Agent（注册码 + token + 按 OS 复制命令）。 -->
@@ -217,44 +256,73 @@ async function copyCommand(): Promise<void> {
         <h2>{{ t('setup.step2Title') }}</h2>
         <p class="setup-desc">{{ t('setup.step2Desc') }}</p>
 
+        <n-alert v-if="errorMessage" type="error" :title="errorMessage" role="alert" class="setup-alert" />
+
         <template v-if="agentCreds">
           <!-- 已建条目：一次性明文展示 + 按目标 OS 命令。 -->
-          <div class="setup-creds" role="alert">
-            <p class="setup-creds-title">{{ t('setup.credsOneTime') }}</p>
-            <dl>
+          <n-card size="small" role="alert" class="setup-creds">
+            <template #header>{{ t('setup.credsOneTime') }}</template>
+            <dl class="setup-creds-list">
               <dt>{{ t('setup.agentNameLabel') }}</dt>
-              <dd class="mono">{{ agentCreds.agentName }}</dd>
+              <dd>
+                <n-code :code="agentCreds.agentName" />
+                <n-button size="small" quaternary type="primary" @click="copyToClipboard(agentCreds.agentName)">
+                  <template #icon><n-icon :component="ClipboardOutline" /></template>
+                </n-button>
+              </dd>
               <dt>{{ t('setup.registerCodeLabel') }}</dt>
-              <dd class="mono">{{ agentCreds.registerCode }}</dd>
+              <dd>
+                <n-code :code="agentCreds.registerCode" />
+                <n-button size="small" quaternary type="primary" @click="copyToClipboard(agentCreds.registerCode)">
+                  <template #icon><n-icon :component="ClipboardOutline" /></template>
+                </n-button>
+              </dd>
               <dt>{{ t('setup.agentTokenLabel') }}</dt>
-              <dd class="mono">{{ agentCreds.token }}</dd>
+              <dd>
+                <n-code :code="agentCreds.token" />
+                <n-button size="small" quaternary type="primary" @click="copyToClipboard(agentCreds.token)">
+                  <template #icon><n-icon :component="ClipboardOutline" /></template>
+                </n-button>
+              </dd>
             </dl>
             <p class="setup-creds-warn">{{ t('setup.credsWarn') }}</p>
-          </div>
+          </n-card>
 
           <label class="field">
             <span>{{ t('setup.targetOs') }}</span>
-            <select v-model="targetOs">
-              <option value="linux">Linux / macOS</option>
-              <option value="windows">Windows</option>
-            </select>
+            <n-select
+              v-model:value="targetOs"
+              :options="[
+                { label: 'Linux / macOS', value: 'linux' },
+                { label: 'Windows', value: 'windows' },
+              ]"
+            />
           </label>
 
-          <div class="setup-cmd">
-            <code>{{ agentCommand(targetOs) }}</code>
-            <button type="button" @click="copyCommand">
-              {{ t('setup.copy') }}
-            </button>
-          </div>
+          <n-card size="small" class="setup-cmd-card">
+            <template #header>{{ t('setup.copy') }}</template>
+            <template #header-extra>
+              <n-button size="small" type="primary" @click="copyToClipboard(agentCommand(targetOs))">
+                {{ t('setup.copy') }}
+              </n-button>
+            </template>
+            <n-code :code="agentCommand(targetOs)" language="bash" word-wrap />
+          </n-card>
           <p class="setup-cmd-note">{{ t('setup.cmdNote') }}</p>
         </template>
 
         <template v-else>
           <!-- 未建条目：表单 + 建条目动作。 -->
-          <label class="field">
-            <span>{{ t('setup.agentNameLabel') }}</span>
-            <input v-model="agentName" name="agent-name" :placeholder="t('setup.agentNamePlaceholder')" />
-          </label>
+          <div class="setup-fields">
+            <label class="field">
+              <span>{{ t('setup.agentNameLabel') }}</span>
+              <n-input
+                v-model:value="agentName"
+                :input-props="{ name: 'agent-name' }"
+                :placeholder="t('setup.agentNamePlaceholder')"
+              />
+            </label>
+          </div>
           <p class="setup-desc">{{ t('setup.agentHint') }}</p>
         </template>
       </section>
@@ -263,75 +331,101 @@ async function copyCommand(): Promise<void> {
       <section v-else>
         <h2>{{ t('setup.step3Title') }}</h2>
         <p class="setup-desc">{{ t('setup.step3Desc') }}</p>
-        <label class="field">
-          <span>{{ t('projects.name') }}</span>
-          <input v-model="projectName" name="project-name" :placeholder="t('setup.projectNamePlaceholder')" />
-        </label>
-        <label class="field">
-          <span>{{ t('projects.scmType') }}</span>
-          <select v-model="scmType">
-            <option value="git">git</option>
-            <option value="svn">svn</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>{{ t('projects.scmUrl') }}</span>
-          <input v-model="scmUrl" name="project-url" :placeholder="t('projects.scmUrlPlaceholder')" />
-        </label>
-        <label v-if="scmType === 'git'" class="field">
-          <span>{{ t('projects.defaultBranch') }}</span>
-          <input v-model="defaultBranch" name="project-branch" :placeholder="t('projects.defaultBranchPlaceholder')" />
-        </label>
-        <pre class="setup-cli">{{ t('setup.cliLabel') }}<br /><code>{{ cliProjectCommand }}</code></pre>
+
+        <n-alert v-if="errorMessage" type="error" :title="errorMessage" role="alert" class="setup-alert" />
+
+        <n-card size="small" class="setup-cli-card">
+          <template #header>{{ t('setup.cliLabel') }}</template>
+          <template #header-extra>
+            <n-button size="small" type="primary" @click="copyToClipboard(cliProjectCommand)">
+              {{ t('setup.copy') }}
+            </n-button>
+          </template>
+          <n-code :code="cliProjectCommand" language="bash" word-wrap />
+        </n-card>
+
+        <div class="setup-fields">
+          <label class="field">
+            <span>{{ t('projects.name') }}</span>
+            <n-input
+              v-model:value="projectName"
+              :input-props="{ name: 'project-name' }"
+              :placeholder="t('setup.projectNamePlaceholder')"
+            />
+          </label>
+          <label class="field">
+            <span>{{ t('projects.scmType') }}</span>
+            <n-select
+              v-model:value="scmType"
+              :options="[
+                { label: 'git', value: 'git' },
+                { label: 'svn', value: 'svn' },
+              ]"
+            />
+          </label>
+          <label class="field">
+            <span>{{ t('projects.scmUrl') }}</span>
+            <n-input
+              v-model:value="scmUrl"
+              :input-props="{ name: 'project-url' }"
+              :placeholder="t('projects.scmUrlPlaceholder')"
+            />
+          </label>
+          <label v-if="scmType === 'git'" class="field">
+            <span>{{ t('projects.defaultBranch') }}</span>
+            <n-input
+              v-model:value="defaultBranch"
+              :input-props="{ name: 'project-branch' }"
+              :placeholder="t('projects.defaultBranchPlaceholder')"
+            />
+          </label>
+        </div>
       </section>
 
-      <p v-if="errorMessage" class="setup-error" role="alert">{{ errorMessage }}</p>
-
       <div class="setup-actions">
-        <button type="button" class="setup-skip" @click="skip">
+        <n-button @click="skip">
           {{ isLastStep ? t('setup.finish') : t('setup.skip') }}
-        </button>
-        <button
+        </n-button>
+
+        <n-button
           v-if="step === 1 && agentCreds"
-          type="button"
-          class="setup-primary"
-          :disabled="submitting"
+          type="primary"
           @click="goTo(2)"
         >
           {{ t('setup.next') }}
-        </button>
-        <button
+        </n-button>
+        <n-button
           v-else-if="step === 0"
-          type="button"
-          class="setup-primary"
+          type="primary"
           :disabled="submitting || !adminUsername.trim() || adminPassword.length < 8"
+          :loading="submitting"
           @click="createAdmin"
         >
           {{ submitting ? t('setup.submitting') : t('setup.createAdmin') }}
-        </button>
-        <button
+        </n-button>
+        <n-button
           v-else-if="step === 1"
-          type="button"
-          class="setup-primary"
+          type="primary"
           :disabled="submitting"
+          :loading="submitting"
           @click="createAgent"
         >
           {{ submitting ? t('setup.submitting') : t('setup.createAgent') }}
-        </button>
-        <button
+        </n-button>
+        <n-button
           v-else
-          type="button"
-          class="setup-primary"
+          type="primary"
           :disabled="submitting || !projectName.trim() || !scmUrl.trim()"
+          :loading="submitting"
           @click="createProject"
         >
           {{ submitting ? t('setup.submitting') : t('setup.createProject') }}
-        </button>
+        </n-button>
       </div>
-    </form>
+    </n-card>
 
-    <button type="button" class="setup-done" @click="finishSetup">
+    <n-button quaternary type="primary" class="setup-done" @click="finishSetup">
       {{ t('setup.doneLink') }}
-    </button>
+    </n-button>
   </div>
 </template>
