@@ -186,6 +186,10 @@
     "cacheDeleteAction": "Delete cache",
     "cacheDeleteDone": "Cache delete command sent (fire-and-forget; agent has no ack)"
   },
+  "nav": {
+    "main": "Main",
+    "admin": "Admin"
+  },
   "routes": {
     "overview": "Overview",
     "projects": "Projects",

@@ -15,6 +15,7 @@ declare module 'vue' {
     EnvListEditor: typeof import('./src/components/editor/EnvListEditor.vue')['default']
     JobFormPanel: typeof import('./src/components/editor/JobFormPanel.vue')['default']
     NConfigProvider: typeof import('naive-ui')['NConfigProvider']
+    NMenu: typeof import('naive-ui')['NMenu']
     ParametersTab: typeof import('./src/components/editor/ParametersTab.vue')['default']
     PipelineTrack: typeof import('./src/components/editor/PipelineTrack.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']

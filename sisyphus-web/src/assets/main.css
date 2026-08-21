@@ -58,42 +58,10 @@ h3 {
 }
 
 .app-sidebar {
-  flex: 0 0 180px;
+  flex: 0 0 200px;
   background: var(--sisy-color-surface);
   border-right: 1px solid var(--sisy-color-border);
-  padding: 16px 8px;
-}
-
-.sidebar-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.sidebar-link {
-  border: none;
-  background: none;
-  text-align: left;
-  padding: 8px 12px;
-  border-radius: var(--sisy-radius);
-  cursor: pointer;
-  font-size: 14px;
-  color: var(--sisy-color-text);
-}
-
-.sidebar-link:hover {
-  background: #eef1f4;
-}
-
-.sidebar-link.active {
-  background: var(--sisy-color-primary);
-  color: #fff;
-}
-
-.sidebar-sep {
-  height: 1px;
-  margin: 8px 6px;
-  background: var(--sisy-color-border);
+  padding: 8px 0;
 }
 
 .app-body {

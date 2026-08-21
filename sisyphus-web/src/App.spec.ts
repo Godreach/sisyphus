@@ -102,31 +102,32 @@ describe('App 壳（管理区侧栏 is_admin 门控）', () => {
     vi.restoreAllMocks()
   })
 
-  it('全局 admin 侧栏显示管理区四入口 + 分隔条', async () => {
+  it('全局 admin 侧栏显示管理区四入口 + 管理分组标题', async () => {
     const auth = useAuthStore()
     auth.setAuthed({ username: 'admin', isAdmin: true })
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.find('.sidebar-sep').exists()).toBe(true)
-    const text = wrapper.find('.sidebar-nav').text()
-    expect(text).toContain('机密')
-    expect(text).toContain('审计日志')
-    expect(text).toContain('Agent 升级')
-    expect(text).toContain('用户')
+    const sidebarText = wrapper.find('.app-sidebar').text()
+    expect(sidebarText).toContain('管理')
+    expect(sidebarText).toContain('机密')
+    expect(sidebarText).toContain('审计日志')
+    expect(sidebarText).toContain('Agent 升级')
+    expect(sidebarText).toContain('用户')
   })
 
-  it('非全局 admin 侧栏不显示管理区入口（无分隔条）', async () => {
+  it('非全局 admin 侧栏不显示管理区入口（无管理分组）', async () => {
     const auth = useAuthStore()
     auth.setAuthed({ username: 'alice', isAdmin: false })
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.find('.sidebar-sep').exists()).toBe(false)
-    const text = wrapper.find('.sidebar-nav').text()
+    const sidebarText = wrapper.find('.app-sidebar').text()
     // 主区仍在。
-    expect(text).toContain('概览')
-    expect(text).toContain('项目')
+    expect(sidebarText).toContain('主区')
+    expect(sidebarText).toContain('概览')
+    expect(sidebarText).toContain('项目')
     // 管理区不可见。
-    expect(text).not.toContain('机密')
-    expect(text).not.toContain('审计日志')
+    expect(sidebarText).not.toContain('管理')
+    expect(sidebarText).not.toContain('机密')
+    expect(sidebarText).not.toContain('审计日志')
   })
 })

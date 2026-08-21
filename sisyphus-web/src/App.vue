@@ -6,9 +6,19 @@
 // 直访 URL 由路由守卫兜底回首页）。pipeline 编辑仍占位。登出后整页回登录页：
 // 清 cookie + 清认证态（401 回调的 redirect 不适用，登出是主动离开，不回跳原目标）。
 
-import { computed } from 'vue'
+import { computed, h } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import type { MenuMixedOption } from 'naive-ui'
+import {
+  Home,
+  FolderOpen,
+  Server,
+  LockClosed,
+  DocumentText,
+  CloudUpload,
+  People,
+} from '@vicons/ionicons5'
 
 import { currentLocale, setLocale } from '@/i18n'
 import { useAuthStore } from '@/stores/auth'
@@ -24,7 +34,6 @@ const isAuthed = computed(() => auth.isAuthed)
 const isAdmin = computed(() => auth.user?.isAdmin === true)
 const username = computed(() => auth.user?.username ?? '')
 
-/** 侧栏导航项（ADR-0020 四区；页面未实现者也列出，点击落占位页）。 */
 type NavName =
   | 'overview'
   | 'projects'
@@ -34,27 +43,54 @@ type NavName =
   | 'admin-upgrade'
   | 'admin-users'
 
-/** 主区导航（全员可见）。 */
-const mainNav: { name: NavName; labelKey: string }[] = [
-  { name: 'overview', labelKey: 'routes.overview' },
-  { name: 'projects', labelKey: 'routes.projects' },
-  { name: 'agents', labelKey: 'routes.agents' },
-]
+/** 渲染 ionicons5 图标组件（NMenu icon 需要 () => VNode）。 */
+function renderIcon(icon: ReturnType<typeof import('vue').defineComponent>) {
+  return () => h(icon, { style: 'width: 18px; height: 18px' })
+}
 
-/** 管理区导航（全局 admin 专属，票 B4-T6：is_admin 门控）。 */
-const adminNav: { name: NavName; labelKey: string }[] = [
-  { name: 'admin-secrets', labelKey: 'routes.adminSecrets' },
-  { name: 'admin-audit', labelKey: 'routes.adminAudit' },
-  { name: 'admin-upgrade', labelKey: 'routes.adminUpgrade' },
-  { name: 'admin-users', labelKey: 'routes.adminUsers' },
-]
+/** 构建 NMenu 选项：主区 + 管理区（admin 仅对全局 admin 可见）。 */
+const menuOptions = computed<MenuMixedOption[]>(() => {
+  const groups: MenuMixedOption[] = [
+    {
+      type: 'group',
+      label: () => t('nav.main'),
+      key: 'group-main',
+      children: [
+        { key: 'overview', label: () => t('routes.overview'), icon: renderIcon(Home) },
+        { key: 'projects', label: () => t('routes.projects'), icon: renderIcon(FolderOpen) },
+        { key: 'agents', label: () => t('routes.agents'), icon: renderIcon(Server) },
+      ],
+    },
+  ]
+
+  if (isAdmin.value) {
+    groups.push({
+      type: 'group',
+      label: () => t('nav.admin'),
+      key: 'group-admin',
+      children: [
+        { key: 'admin-secrets', label: () => t('routes.adminSecrets'), icon: renderIcon(LockClosed) },
+        { key: 'admin-audit', label: () => t('routes.adminAudit'), icon: renderIcon(DocumentText) },
+        { key: 'admin-upgrade', label: () => t('routes.adminUpgrade'), icon: renderIcon(CloudUpload) },
+        { key: 'admin-users', label: () => t('routes.adminUsers'), icon: renderIcon(People) },
+      ],
+    })
+  }
+
+  return groups
+})
+
+const activeKey = computed(() => {
+  const name = router.currentRoute.value.name
+  return (typeof name === 'string' ? name : null) as string | null
+})
+
+function handleMenuUpdate(key: string) {
+  void router.push({ name: key as NavName })
+}
 
 function toggleLocale(): void {
   setLocale(locale.value === 'zh-CN' ? 'en-US' : 'zh-CN')
-}
-
-function go(name: NavName): void {
-  void router.push({ name })
 }
 
 async function signOut(): Promise<void> {
@@ -67,31 +103,12 @@ async function signOut(): Promise<void> {
   <n-config-provider :theme="theme" :theme-overrides="themeOverrides">
     <div class="app-shell">
       <aside v-if="isAuthed" class="app-sidebar">
-        <nav class="sidebar-nav">
-          <button
-            v-for="item in mainNav"
-            :key="item.name"
-            type="button"
-            class="sidebar-link"
-            :class="{ active: $route.name === item.name }"
-            @click="go(item.name)"
-          >
-            {{ t(item.labelKey) }}
-          </button>
-          <template v-if="isAdmin">
-            <span class="sidebar-sep" aria-hidden="true"></span>
-            <button
-              v-for="item in adminNav"
-              :key="item.name"
-              type="button"
-              class="sidebar-link"
-              :class="{ active: $route.name === item.name }"
-              @click="go(item.name)"
-            >
-              {{ t(item.labelKey) }}
-            </button>
-          </template>
-        </nav>
+        <n-menu
+          :options="menuOptions"
+          :value="activeKey"
+          :indent="24"
+          @update:value="handleMenuUpdate"
+        />
       </aside>
 
       <div class="app-body">

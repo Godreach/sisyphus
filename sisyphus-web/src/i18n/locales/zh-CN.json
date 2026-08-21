@@ -186,6 +186,10 @@
     "cacheDeleteAction": "删除缓存",
     "cacheDeleteDone": "缓存删除指令已下发（fire-and-forget，Agent 侧无 ack）"
   },
+  "nav": {
+    "main": "主区",
+    "admin": "管理"
+  },
   "routes": {
     "overview": "概览",
     "projects": "项目",
