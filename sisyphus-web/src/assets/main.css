@@ -528,13 +528,11 @@ h3 {
 
 /* 404。 */
 .not-found-page {
-  text-align: center;
-  padding-top: 10vh;
-}
-
-.not-found-page h1 {
-  font-size: 48px;
-  margin: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 80vh;
+  padding: 24px;
 }
 
 /* ---------------------------------------------------------------------------
