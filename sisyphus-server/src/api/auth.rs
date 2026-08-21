@@ -416,7 +416,7 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
         };
         let user = match active_user_or_reject(&state, pat.user_id).await {
             Ok(user) => user,
-            Err(resp) => return resp,
+            Err(e) => return e.into_response(),
         };
         req.extensions_mut().insert(AuthContext {
             user_id: user.id,
@@ -441,7 +441,7 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
     };
     let user = match active_user_or_reject(&state, session.user_id).await {
         Ok(user) => user,
-        Err(resp) => return resp,
+        Err(e) => return e.into_response(),
     };
     if let Err(e) = state.sessions.touch(&hash, now + SESSION_TTL_MS).await {
         return ApiError::internal("session touch", &e).into_response();
@@ -469,14 +469,17 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
 
 /// 用户行解析（两通道共用）：按 id 取行且未禁用；缺失/禁用 401、库错 500
 /// （响应形态收口在此，通道分支只管各自的凭据查行）。
+///
+/// 返回 `ApiError` 而非 `Response`：把渲染推迟到调用处，避免 `Result<_, Response>`
+/// 的 Err 变体过大触发 clippy::result_large_err。
 async fn active_user_or_reject(
     state: &AppState,
     user_id: i64,
-) -> Result<crate::store::users::User, Response> {
+) -> Result<crate::store::users::User, ApiError> {
     match state.users.get_by_id(user_id).await {
         Ok(Some(user)) if !user.disabled => Ok(user),
-        Ok(_) => Err(ApiError::unauthorized().into_response()),
-        Err(e) => Err(ApiError::internal("user lookup", &e).into_response()),
+        Ok(_) => Err(ApiError::unauthorized()),
+        Err(e) => Err(ApiError::internal("user lookup", &e)),
     }
 }
 
