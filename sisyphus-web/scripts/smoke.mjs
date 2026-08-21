@@ -131,6 +131,50 @@ const buildDetail = {
 }
 const buildList = { items: [], total: 0, page: 1, limit: 20 }
 
+// 升级包（升级页表格区渲染用——占位态消除：mock 回非空包，断言 upgrade-table 出现）。
+const upgradePackage = {
+  package_name: 'sisyphus-agent-1.0.0-linux-x86_64.tar.gz',
+  version: { major: 1, minor: 0, patch: 0 },
+  target_os: 'linux',
+  target_arch: 'x86_64',
+  size: 1234,
+  sha256: 'deadbeef',
+  created_at: 0,
+}
+// SCM 探测（test-connection 动作用：scm-probe 回 head、scm-branches 回默认分支）。
+const scmProbe = { head: 'abc123deadbeef' }
+const scmBranches = {
+  branches: [
+    { name: 'main', head: 'abc123deadbeef' },
+    { name: 'dev', head: 'def456' },
+  ],
+  default_branch: 'main',
+}
+// 概览快照（overview stat 卡渲染用——全卡真值，无退化态）。
+const overviewSnapshot = {
+  queue_depth: 0,
+  queue_reasons: [],
+  agents_online: 1,
+  agents_total: 1,
+  slots_used: 0,
+  slots_total: 2,
+  builds_terminal: { succeeded: 1, failed: 0, cancelled: 0, timeout: 0 },
+  artifact_bytes: 1024,
+  log_bytes: 2048,
+  alerts: { has_no_match: false, has_offline_agent: false, has_draining_incompatible: false },
+  recent_builds: [
+    {
+      project: 'demo',
+      pipeline: 'release',
+      number: 1,
+      status: 'succeeded',
+      trigger: 'manual',
+      started_at: 0,
+      finished_at: 1000,
+    },
+  ],
+}
+
 /** `/api/v1/**` 拦截器工厂：authed 决定会话态与空库判定。
  *  - authed=true：`/auth/me`→200 admin，`/auth/setup`→404（非空库，引导已完成，
  *    受保护页守卫不再探测 setup）。
@@ -165,6 +209,9 @@ function mockApi(authed) {
     if (p === '/api/v1/auth/login' || p === '/api/v1/auth/logout') {
       return json(200, me)
     }
+    // SCM 探测（test-connection 动作：scm-probe / scm-branches）。
+    if (m === 'POST' && p === '/api/v1/projects/scm-probe') return json(200, scmProbe)
+    if (m === 'POST' && p === '/api/v1/projects/scm-branches') return json(200, scmBranches)
     if (m === 'GET') {
       if (p === '/api/v1/projects') return json(200, [project])
       if (p === '/api/v1/projects/demo') return json(200, project)
@@ -175,6 +222,8 @@ function mockApi(authed) {
       if (p === '/api/v1/projects/demo/pipelines/release/builds/1') return json(200, buildDetail)
       if (p === '/api/v1/agents') return json(200, [agent])
       if (p === '/api/v1/agents/linux-1') return json(200, agent)
+      if (p === '/api/v1/upgrade-packages') return json(200, [upgradePackage])
+      if (p === '/api/v1/overview') return json(200, overviewSnapshot)
       if (p === '/api/v1/audit') return json(200, [])
       if (p === '/api/v1/users') return json(200, [])
       if (p === '/api/v1/users/directory') return json(200, [])
@@ -270,6 +319,63 @@ async function runAuthed(browser) {
   await visit(page, '/admin/audit', '审计日志', 'admin-audit')
   await visit(page, '/admin/upgrade', 'Agent 升级', 'admin-upgrade')
   await visit(page, '/admin/users', '用户', 'admin-users')
+
+  // 关键动作 1：升级页升级包表格渲染（占位态消除——mock 回非空包，
+  // upgrade-table 出现且含包名）。B5-T4 起升级端点已交付，页不再退化。
+  try {
+    await page.goto(`${BASE}/admin/upgrade`, { waitUntil: 'domcontentloaded' })
+    await page.locator('h1', { hasText: 'Agent 升级' }).first().waitFor({ timeout: 10000 })
+    await page
+      .locator('.upgrade-table td', { hasText: 'sisyphus-agent-1.0.0-linux-x86_64.tar.gz' })
+      .first()
+      .waitFor({ timeout: 5000 })
+    ok('admin-upgrade package table renders', true)
+  } catch (err) {
+    ok('admin-upgrade package table renders', false, err.message)
+  }
+
+  // 关键动作 2：项目页测试连接按钮（B5-T3 SCM 真实探测端点已交付）——展开
+  // 新建表单 → 填 scm_url → 点测试连接 → 断言 probeMsg（role=status）渲染
+  // mock 回的 head + 预填默认分支。
+  try {
+    await page.goto(`${BASE}/projects`, { waitUntil: 'domcontentloaded' })
+    await page.locator('h1', { hasText: '项目' }).first().waitFor({ timeout: 10000 })
+    await page.locator('button[name="project-new"]').click()
+    await page.locator('input[name="project-url"]').waitFor({ timeout: 5000 })
+    await page.locator('input[name="project-url"]').fill('https://example.com/demo')
+    await page.locator('button[name="project-test-connection"]').click()
+    await page
+      .locator('[role="status"]', { hasText: '连接成功，当前 head：abc123deadbeef' })
+      .first()
+      .waitFor({ timeout: 5000 })
+    await page
+      .locator('[role="status"]', { hasText: '已预填默认分支：main' })
+      .first()
+      .waitFor({ timeout: 5000 })
+    ok('projects test-connection renders head + prefilled branch', true)
+  } catch (err) {
+    const body = await page.locator('body').innerText().catch(() => '<unreachable>')
+    ok('projects test-connection renders head + prefilled branch', false, `${err.message} | body: ${body.slice(0, 160)}`)
+  }
+
+  // 退化标注消除巡检（B5-T9 AC：关键页面不再有退化标注）。B5-T3/T4/T7 已移除
+  // 运行态退化（overview 退化卡 / 升级页占位态 / testConnectionUnavailable）；
+  // 此巡检为回归护栏——断言概览页渲染真实 stat 卡（非退化态、无 loadError）。
+  // 升级页占位态消除由动作 1（upgrade-table 渲染）守、测试连接由动作 2 守。
+  try {
+    await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
+    await page.locator('h1', { hasText: '概览' }).first().waitFor({ timeout: 10000 })
+    await page.locator('.stat-card').first().waitFor({ timeout: 5000 })
+    const cardCount = await page.locator('.stat-card').count()
+    const hasError = await page.locator('.overview-error').count()
+    ok(
+      'overview no-degradation (real stat cards, no error)',
+      cardCount > 0 && hasError === 0,
+      `cards=${cardCount} error=${hasError}`,
+    )
+  } catch (err) {
+    ok('overview no-degradation (real stat cards, no error)', false, err.message)
+  }
 
   // i18n 即时切换：概览页 h1 概览 → Overview → 概览。
   try {
