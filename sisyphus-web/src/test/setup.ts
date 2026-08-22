@@ -12,3 +12,12 @@ if (!window.matchMedia) {
     }),
   })
 }
+
+// jsdom 未实现 Element.prototype.scrollTo（Naive UI NSelect 下拉/内部
+// scrollbar 在菜单滚动定位时会调用），补齐最小替身避免未处理异常。
+if (typeof window.HTMLElement !== 'undefined' && !window.HTMLElement.prototype.scrollTo) {
+  Object.defineProperty(window.HTMLElement.prototype, 'scrollTo', {
+    writable: true,
+    value: () => {},
+  })
+}

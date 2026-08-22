@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
+import { NMessageProvider } from 'naive-ui'
+import { defineComponent, h } from 'vue'
 
 import ProjectDetailView from '@/views/ProjectDetailView.vue'
 import { i18n, setLocale } from '@/i18n'
@@ -19,6 +21,11 @@ import { i18n, setLocale } from '@/i18n'
 function jsonResponse(status: number, body: unknown): Response {
   const headers = new Headers({ 'Content-Type': 'application/json' })
   return new Response(JSON.stringify(body), { status, headers })
+}
+
+/** 204 无响应体（204/205 不允许有 body——Response 构造器会拒）。 */
+function noContent(): Response {
+  return new Response(null, { status: 204 })
 }
 
 function project(name: string) {
@@ -62,8 +69,16 @@ describe('ProjectDetailView 项目详情（pipeline 探测 + 成员角色）', (
     routes.set(prefix, res)
   }
 
+  /** 包装组件：NMessageProvider + ProjectDetailView，保证 useMessage 注入可用。 */
+  const DetailWrapper = defineComponent({
+    name: 'DetailWrapper',
+    setup(_, { attrs }) {
+      return () => h(NMessageProvider, () => h(ProjectDetailView, { ...attrs }))
+    },
+  })
+
   function mountView(): VueWrapper {
-    return mount(ProjectDetailView, {
+    return mount(DetailWrapper, {
       global: { plugins: [pinia, router, i18n] },
     })
   }
@@ -100,11 +115,15 @@ describe('ProjectDetailView 项目详情（pipeline 探测 + 成员角色）', (
 
   it('pipeline 列表降级探测：200 存在 / 404 未配置 / 其它失败标探测失败 + 退化标注', async () => {
     setRoute('/api/v1/projects/demo', jsonResponse(200, project('demo')))
-    setRoute('/api/v1/projects/demo/pipelines/main', jsonResponse(200, pipelineDef()))
     // release 探测遇网络层失败（503，非 404）：不得静默当「未配置」，应标「探测失败」。
+    setRoute('/api/v1/projects/demo/pipelines/main', jsonResponse(200, pipelineDef()))
     setRoute('/api/v1/projects/demo/pipelines/release', jsonResponse(503, { code: 'HTTP_ERROR', message: 'boom' }))
 
     const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.find('.n-tabs').exists()).toBe(true))
+    // 切到 Pipeline 标签页查看探测结果。
+    const tab = wrapper.findAll('.n-tabs-tab').find((x) => x.text().trim() === 'Pipeline')!
+    await tab.trigger('click')
     // 探测结果渲染（等待 pipeline 项出现——注意退化标注静态文案里也含「存在」，
     // 须等真实探测结果：pipeline 名渲染即探测已落定）。
     await vi.waitFor(() => expect(wrapper.findAll('.pipeline-item').length).toBe(2))
@@ -128,6 +147,9 @@ describe('ProjectDetailView 项目详情（pipeline 探测 + 成员角色）', (
     setRoute('/api/v1/projects/demo/pipelines/release', jsonResponse(404, { code: 'NOT_FOUND', message: 'x' }))
 
     const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.find('.n-tabs').exists()).toBe(true))
+    const tab = wrapper.findAll('.n-tabs-tab').find((x) => x.text().trim() === 'Pipeline')!
+    await tab.trigger('click')
     await vi.waitFor(() => expect(wrapper.findAll('.pipeline-item').length).toBe(2))
     expect(wrapper.text()).toContain('release')
     expect(wrapper.text()).toContain('未配置')
@@ -140,15 +162,36 @@ describe('ProjectDetailView 项目详情（pipeline 探测 + 成员角色）', (
     setRoute('/api/v1/users/directory', jsonResponse(200, [{ id: 1, username: 'bob' }, { id: 2, username: 'carol' }]))
 
     const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.find('.n-tabs').exists()).toBe(true))
+    // 切到成员标签页。
+    const tab = wrapper.findAll('.n-tabs-tab').find((x) => x.text().trim() === '成员')!
+    await tab.trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('bob'))
 
     // 从目录下拉选新成员 carol + 角色 runner → 保存（PUT 整组替换）。
-    await wrapper.get('select[name="member-username"]').setValue('carol')
-    await wrapper.get('select[name="member-role"]').setValue('runner')
+    // NSelect 下拉：点开菜单再点选项（jsdom 下需 virtual-scroll 关闭）。
+    const usernameSelect = wrapper.findAll('.member-add-field .n-base-selection')[0]!
+    await usernameSelect.trigger('click')
+    await vi.waitFor(() => {
+      const carol = [...document.querySelectorAll('.n-base-select-option')].find((o) => o.textContent?.trim() === 'carol')
+      expect(carol).toBeTruthy()
+      ;(carol as HTMLElement).click()
+    })
+    await new Promise((r) => setTimeout(r, 50))
+
+    // 角色下拉切到 runner（第二个 member-add-field 的 NSelect）。
+    const roleSelect = wrapper.findAll('.member-add-field .n-base-selection')[1]!
+    await roleSelect.trigger('click')
+    await vi.waitFor(() => {
+      const runner = [...document.querySelectorAll('.n-base-select-option')].find((o) => o.textContent?.trim() === 'runner')
+      expect(runner).toBeTruthy()
+      ;(runner as HTMLElement).click()
+    })
+    await new Promise((r) => setTimeout(r, 50))
 
     // 保存回读：PUT 后返回新清单。
     setRoute('/api/v1/projects/demo/members', jsonResponse(200, [member('bob', 'viewer'), member('carol', 'runner')]))
-    await wrapper.get('button.btn-primary').trigger('click')
+    await wrapper.find('button[name="member-save"]').trigger('click')
 
     await vi.waitFor(() => {
       const put = fetchMock.mock.calls.find((c) => (c as unknown as [string, RequestInit])[1]?.method === 'PUT')
@@ -171,8 +214,181 @@ describe('ProjectDetailView 项目详情（pipeline 探测 + 成员角色）', (
     setRoute('/api/v1/users/directory', jsonResponse(403, { code: 'FORBIDDEN', message: '项目权限不足' }))
 
     const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.find('.n-tabs').exists()).toBe(true))
+    const tab = wrapper.findAll('.n-tabs-tab').find((x) => x.text().trim() === '成员')!
+    await tab.trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('项目权限不足'))
     expect(wrapper.find('.member-table').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+describe('ProjectDetailView Naive UI 迁移（#92）', () => {
+  let pinia: Pinia
+  let router: Router
+  let wrapper: VueWrapper
+
+  /** URL → 响应的路由表（按最长前缀匹配，防并发乱序 + 子路径优先）。 */
+  const routes = new Map<string, Response>()
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    let best: { len: number; res: Response } | null = null
+    for (const [prefix, res] of routes) {
+      if (url.startsWith(prefix) && (best == null || prefix.length > best.len)) {
+        best = { len: prefix.length, res }
+      }
+    }
+    return best ? best.res : jsonResponse(404, { code: 'NOT_FOUND', message: `no mock for ${url}` })
+  })
+
+  function setRoute(prefix: string, res: Response): void {
+    routes.set(prefix, res)
+  }
+
+  /** 包装组件：NMessageProvider + ProjectDetailView，保证 useMessage 注入可用。 */
+  const DetailWrapper = defineComponent({
+    name: 'DetailWrapper',
+    setup(_, { attrs }) {
+      return () => h(NMessageProvider, () => h(ProjectDetailView, { ...attrs }))
+    },
+  })
+
+  function mountView(): VueWrapper {
+    return mount(DetailWrapper, {
+      global: { plugins: [pinia, router, i18n] },
+    })
+  }
+
+  beforeEach(async () => {
+    setLocale('zh-CN')
+    routes.clear()
+    pinia = createPinia()
+    setActivePinia(pinia)
+    router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/projects/:name', name: 'project-detail', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/projects/demo')
+    await router.isReady()
+    globalThis.fetch = fetchMock
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    vi.restoreAllMocks()
+  })
+
+  it('内容改用 NTabs 组织：概览 / Pipeline / 成员 / SCM 凭据 四个标签页', async () => {
+    setRoute('/api/v1/projects/demo', jsonResponse(200, project('demo')))
+
+    wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.find('.n-tabs').exists()).toBe(true))
+    const tabTitles = wrapper.findAll('.n-tabs-tab').map((t) => t.text().trim())
+    expect(tabTitles).toContain('概览')
+    expect(tabTitles).toContain('Pipeline')
+    expect(tabTitles).toContain('成员')
+    expect(tabTitles).toContain('SCM 凭据')
+    // 默认落在概览标签页：展示项目元数据。
+    expect(wrapper.text()).toContain('demo')
+    wrapper.unmount()
+  })
+
+  it('SCM 凭据标签页：保存调 PUT /scm-credential（整组替换），成功 toast + 清空表单', async () => {
+    setRoute('/api/v1/projects/demo', jsonResponse(200, project('demo')))
+    // 项目 admin 档（成员清单可读 = 是）→ SCM 凭据表单可操作。
+    setRoute('/api/v1/projects/demo/members', jsonResponse(200, [member('bob', 'viewer')]))
+    setRoute('/api/v1/users/directory', jsonResponse(200, [{ id: 1, username: 'bob' }]))
+
+    wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.find('.n-tabs').exists()).toBe(true))
+    // 切到 SCM 凭据标签。
+    const scmTab = wrapper.findAll('.n-tabs-tab').find((t) => t.text().trim() === 'SCM 凭据')!
+    await scmTab.trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('input[name="cred-username"]').exists()).toBe(true))
+
+    setRoute('/api/v1/projects/demo/scm-credential', noContent())
+    await wrapper.get('input[name="cred-username"]').setValue('alice')
+    await wrapper.get('input[name="cred-password"]').setValue('secret')
+    await wrapper.get('button[name="cred-save"]').trigger('click')
+
+    await vi.waitFor(() => {
+      const put = fetchMock.mock.calls.find((c) => (c as unknown as [string, RequestInit])[1]?.method === 'PUT')
+      expect(put).toBeTruthy()
+      const [url, init] = put as unknown as [string, RequestInit]
+      expect(url).toBe('/api/v1/projects/demo/scm-credential')
+      expect(JSON.parse(init.body as string)).toEqual({ username: 'alice', password: 'secret' })
+    })
+    // toast 通知。
+    await vi.waitFor(() => {
+      const msg = [...document.querySelectorAll('.n-message')].find((m) => m.textContent?.includes('凭据已保存'))
+      expect(msg).toBeTruthy()
+    })
+    wrapper.unmount()
+  })
+
+  it('SCM 凭据标签页：用户名密码皆空保存 = 清除凭据，toast 提示已清除', async () => {
+    setRoute('/api/v1/projects/demo', jsonResponse(200, project('demo')))
+    // 项目 admin 档（成员清单可读 = 是）→ SCM 凭据表单可操作。
+    setRoute('/api/v1/projects/demo/members', jsonResponse(200, [member('bob', 'viewer')]))
+    setRoute('/api/v1/users/directory', jsonResponse(200, [{ id: 1, username: 'bob' }]))
+
+    wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.find('.n-tabs').exists()).toBe(true))
+    const scmTab = wrapper.findAll('.n-tabs-tab').find((t) => t.text().trim() === 'SCM 凭据')!
+    await scmTab.trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('input[name="cred-username"]').exists()).toBe(true))
+
+    setRoute('/api/v1/projects/demo/scm-credential', noContent())
+    await wrapper.get('button[name="cred-save"]').trigger('click')
+
+    await vi.waitFor(() => {
+      const put = fetchMock.mock.calls.find((c) => (c as unknown as [string, RequestInit])[1]?.method === 'PUT')
+      expect(put).toBeTruthy()
+      const [, init] = put as unknown as [string, RequestInit]
+      // 皆空 → 双 null（后端语义 = 清除凭据）。
+      expect(JSON.parse(init.body as string)).toEqual({ username: null, password: null })
+    })
+    await vi.waitFor(() => {
+      const msg = [...document.querySelectorAll('.n-message')].find((m) => m.textContent?.includes('凭据已清除'))
+      expect(msg).toBeTruthy()
+    })
+    wrapper.unmount()
+  })
+
+  it('SCM 凭据标签页：测试连接调 POST /test-connection，成功展示 head 徽章', async () => {
+    setRoute('/api/v1/projects/demo', jsonResponse(200, project('demo')))
+    // 项目 admin 档（成员清单可读 = 是）→ SCM 凭据表单可操作。
+    setRoute('/api/v1/projects/demo/members', jsonResponse(200, [member('bob', 'viewer')]))
+    setRoute('/api/v1/users/directory', jsonResponse(200, [{ id: 1, username: 'bob' }]))
+
+    wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.find('.n-tabs').exists()).toBe(true))
+    const scmTab = wrapper.findAll('.n-tabs-tab').find((t) => t.text().trim() === 'SCM 凭据')!
+    await scmTab.trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('button[name="cred-test-connection"]').exists()).toBe(true))
+
+    setRoute('/api/v1/projects/demo/test-connection', jsonResponse(200, { head: 'deadbeef' }))
+    await wrapper.get('button[name="cred-test-connection"]').trigger('click')
+
+    // 成功徽章（NTag），head 文案展示。
+    await vi.waitFor(() => expect(wrapper.find('.cred-badge .n-tag').exists()).toBe(true))
+    expect(wrapper.text()).toContain('连接成功')
+    wrapper.unmount()
+  })
+
+  it('SCM 凭据标签页：非项目 admin（成员 403）→ 就地提示需 admin 档，不渲染表单', async () => {
+    setRoute('/api/v1/projects/demo', jsonResponse(200, project('demo')))
+    setRoute('/api/v1/projects/demo/members', jsonResponse(403, { code: 'FORBIDDEN', message: '项目权限不足' }))
+    setRoute('/api/v1/users/directory', jsonResponse(403, { code: 'FORBIDDEN', message: '项目权限不足' }))
+
+    wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.find('.n-tabs').exists()).toBe(true))
+    const scmTab = wrapper.findAll('.n-tabs-tab').find((t) => t.text().trim() === 'SCM 凭据')!
+    await scmTab.trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('凭据管理需项目 admin 档'))
+    expect(wrapper.find('button[name="cred-save"]').exists()).toBe(false)
     wrapper.unmount()
   })
 })
