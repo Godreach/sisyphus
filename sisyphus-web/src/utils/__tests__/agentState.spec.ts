@@ -3,6 +3,7 @@
 //   （incompatible > draining > online > offline）。
 // - agentBadgeState：停用优先（停用即踢线，不展示在线态以免误导）。
 // - agentStateLabelKey / agentStateClass：徽标态 → i18n key / CSS 类。
+// - agentStateTagType：徽标态 → NTag 状态色（票 #94 AC 颜色编码）。
 
 import { describe, expect, it } from 'vitest'
 
@@ -10,6 +11,7 @@ import {
   agentBadgeState,
   agentStateClass,
   agentStateLabelKey,
+  agentStateTagType,
   deriveAgentState,
 } from '@/utils/agentState'
 import type { AgentResponse } from '@/api/types'
@@ -94,5 +96,18 @@ describe('agentStateLabelKey / agentStateClass', () => {
     expect(agentStateClass('draining')).toBe('agent-state-draining')
     expect(agentStateClass('incompatible')).toBe('agent-state-incompatible')
     expect(agentStateClass('disabled')).toBe('agent-state-disabled')
+  })
+})
+
+describe('agentStateTagType NTag 状态色（票 #94）', () => {
+  it('online=绿 / offline=红 / draining=黄 / incompatible=灰', () => {
+    expect(agentStateTagType('online')).toBe('success')
+    expect(agentStateTagType('offline')).toBe('error')
+    expect(agentStateTagType('draining')).toBe('warning')
+    expect(agentStateTagType('incompatible')).toBe('default')
+  })
+
+  it('停用（独立管理态）同为灰，靠文案区分', () => {
+    expect(agentStateTagType('disabled')).toBe('default')
   })
 })

@@ -53,3 +53,21 @@ export function agentStateLabelKey(state: AgentBadgeState): string {
 export function agentStateClass(state: AgentBadgeState): string {
   return `agent-state-${state}`
 }
+
+/** 徽标态 → NTag 状态色（票 #94 列表/详情共用，颜色编码不漂移）：
+ *  online=绿 / offline=红 / draining=黄 / incompatible=灰；停用（独立
+ *  管理态）同为灰，靠文案区分。 */
+export function agentStateTagType(
+  state: AgentBadgeState,
+): 'success' | 'error' | 'warning' | 'default' {
+  switch (state) {
+    case 'online':
+      return 'success'
+    case 'offline':
+      return 'error'
+    case 'draining':
+      return 'warning'
+    default:
+      return 'default'
+  }
+}

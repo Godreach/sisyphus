@@ -110,57 +110,61 @@ async function signOut(): Promise<void> {
 
 <template>
   <n-config-provider :theme="theme" :theme-overrides="themeOverrides">
-    <div class="app-shell">
-      <!-- 桌面端侧栏 -->
-      <aside v-if="isAuthed && !isNarrow" class="app-sidebar">
-        <n-menu
-          :options="menuOptions"
-          :value="activeKey"
-          :indent="24"
-          @update:value="handleMenuUpdate"
-        />
-      </aside>
+    <!-- useMessage 注入源（SetupView/ProjectsView/AgentListView 的 toast 反馈
+         依赖此 provider；缺它时 useMessage() 返回 undefined、toast 静默失效）。 -->
+    <n-message-provider>
+      <div class="app-shell">
+        <!-- 桌面端侧栏 -->
+        <aside v-if="isAuthed && !isNarrow" class="app-sidebar">
+          <n-menu
+            :options="menuOptions"
+            :value="activeKey"
+            :indent="24"
+            @update:value="handleMenuUpdate"
+          />
+        </aside>
 
-      <div class="app-body">
-        <!-- 窄屏顶部栏：汉堡按钮 -->
-        <header v-if="isAuthed && isNarrow" class="app-topbar">
-          <n-button quaternary @click="drawerOpen = true">
-            <template #icon>
-              <n-icon :component="MenuIcon" />
-            </template>
-          </n-button>
-          <span class="app-topbar-title">{{ t('app.name') }}</span>
-        </header>
-
-        <!-- 窄屏 NDrawer 抽屉导航 -->
-        <n-drawer v-model:show="drawerOpen" :width="240" placement="left">
-          <n-drawer-content :title="t('app.name')" closable>
-            <n-menu
-              :options="menuOptions"
-              :value="activeKey"
-              :indent="24"
-              @update:value="handleMenuUpdate"
-            />
-          </n-drawer-content>
-        </n-drawer>
-
-        <main class="app-main">
-          <RouterView />
-        </main>
-
-        <footer class="app-footer">
-          <div v-if="isAuthed" class="footer-user">
-            <n-text strong>{{ username }}</n-text>
-            <n-button size="small" @click="signOut">
-              {{ t('auth.logout') }}
+        <div class="app-body">
+          <!-- 窄屏顶部栏：汉堡按钮 -->
+          <header v-if="isAuthed && isNarrow" class="app-topbar">
+            <n-button quaternary @click="drawerOpen = true">
+              <template #icon>
+                <n-icon :component="MenuIcon" />
+              </template>
             </n-button>
-          </div>
-          <n-switch :value="isZh" @update:value="toggleLocale">
-            <template #checked>中</template>
-            <template #unchecked>EN</template>
-          </n-switch>
-        </footer>
+            <span class="app-topbar-title">{{ t('app.name') }}</span>
+          </header>
+
+          <!-- 窄屏 NDrawer 抽屉导航 -->
+          <n-drawer v-model:show="drawerOpen" :width="240" placement="left">
+            <n-drawer-content :title="t('app.name')" closable>
+              <n-menu
+                :options="menuOptions"
+                :value="activeKey"
+                :indent="24"
+                @update:value="handleMenuUpdate"
+              />
+            </n-drawer-content>
+          </n-drawer>
+
+          <main class="app-main">
+            <RouterView />
+          </main>
+
+          <footer class="app-footer">
+            <div v-if="isAuthed" class="footer-user">
+              <n-text strong>{{ username }}</n-text>
+              <n-button size="small" @click="signOut">
+                {{ t('auth.logout') }}
+              </n-button>
+            </div>
+            <n-switch :value="isZh" @update:value="toggleLocale">
+              <template #checked>中</template>
+              <template #unchecked>EN</template>
+            </n-switch>
+          </footer>
+        </div>
       </div>
-    </div>
+    </n-message-provider>
   </n-config-provider>
 </template>
