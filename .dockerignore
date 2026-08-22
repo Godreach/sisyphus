@@ -1,8 +1,10 @@
 # Docker 构建上下文排除（票 B5-T10）：避免把本地 target/（数十 GB 增量构建
 # 产物）、node_modules/、本地 data/ 等发到 daemon，让 docker build 上下文保持
-# 精简（只发源码 + 已提交的 sisyphus-web/dist/）。
+# 精简（只发源码；前端产物由 Dockerfile frontend stage 现构建，dist/ 不提交
+# git 且无需进上下文）。
 target/
 sisyphus-web/node_modules/
+sisyphus-web/dist/
 data/
 **/.git/
 **/*.tsbuildinfo

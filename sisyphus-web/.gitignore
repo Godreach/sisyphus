@@ -4,4 +4,8 @@ node_modules/
 # Vite/vue-tsc 增量缓存
 *.tsbuildinfo
 
-# 开发期本地产物（build 产物 dist/ 须提交：server rust-embed 编译期内嵌目录）
+# 前端构建产物：本地 npm run build 生成，不提交（server rust-embed 编译期
+# 需要 dist/ 目录存在但内容可缺——目录以 .gitkeep 占位，构建产物由 CI/本地
+# 在 cargo build 前现生成）。本文件位于 sisyphus-web/，规则相对本目录。
+dist/*
+!dist/.gitkeep

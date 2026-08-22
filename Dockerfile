@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 # 官方 Docker 镜像（仅 Server，票 B5-T10 / #82，ADR-0010）。
 #
-# 多阶段：rust builder（release 编译 server，内嵌已提交的 sisyphus-web/dist/
-# ——rust-embed 编译期内嵌，无需 npm 步骤）→ debian-slim runtime（捆绑 git+svn
+# 多阶段：frontend（node 构建 sisyphus-web → dist）→ rust builder（release
+# 编译 server，rust-embed 编译期内嵌 dist）→ debian-slim runtime（捆绑 git+svn
 # 供 SCM 探测零配置 ADR-0016、非 root、/data 卷、EXPOSE 8080 50051、HEALTHCHECK
 # 打 /healthz）。
 #
@@ -11,6 +11,15 @@
 # ring + libsqlite3-sys 的 C 编译在 QEMU 下 20-40 分钟）。故本 Dockerfile 不
 # 含 CROSS 指令，每条 `docker build --platform <p>` 在与该平台一致的 runner
 # 上原生跑。
+
+# ---- frontend：构建 sisyphus-web 产物进 dist/（git 不提交构建产物，镜像
+# 内自建，保证内嵌前端与源码一致；.dockerignore 排除 node_modules/）。 ----
+FROM node:20-bookworm AS frontend
+WORKDIR /web
+COPY sisyphus-web/package.json sisyphus-web/package-lock.json ./
+RUN npm ci
+COPY sisyphus-web/ ./
+RUN npm run build
 
 # ---- builder：编译 server release 二进制 ----
 FROM rust:1-bookworm AS builder
@@ -22,8 +31,8 @@ COPY sisyphus-model/ ./sisyphus-model/
 COPY sisyphus-server/ ./sisyphus-server/
 COPY sisyphus-agent/ ./sisyphus-agent/
 COPY sisyphus-codegen/ ./sisyphus-codegen/
-# sisyphus-web/dist/ 已提交 git（rust-embed 编译期内嵌目录）。
-COPY sisyphus-web/ ./sisyphus-web/
+# 前端产物由 frontend stage 构建注入（rust-embed 编译期内嵌目录）。
+COPY --from=frontend /web/dist ./sisyphus-web/dist
 RUN cargo build --release -p sisyphus-server
 
 # ---- runtime：debian-slim + git + subversion + 非 root ----

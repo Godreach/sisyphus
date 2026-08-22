@@ -1,5 +1,9 @@
 # sisyphus
 
+## Constitution rules
+
+- **No writes outside the repo**: never create or modify files outside the repository root (e.g. `/tmp`, home, temp dirs). All work files, scripts, and temporary artifacts must live inside the repo or in tool-constrained directories.
+
 ## Agent skills
 
 ### Issue tracker

@@ -1,1 +1,0 @@
-function n(e){return e.version_compatible?e.online&&e.draining?"draining":e.online?"online":"offline":"incompatible"}function a(e){return e.disabled?"disabled":n(e)}function i(e){return`agents.state${e.charAt(0).toUpperCase()+e.slice(1)}`}function r(e){return`agent-state-${e}`}export{r as a,a as b,i as c};

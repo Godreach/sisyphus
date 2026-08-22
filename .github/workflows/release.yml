@@ -11,8 +11,9 @@ name: release
 # ubuntu-latest(x86_64) / ubuntu-24.04-arm(aarch64) / macos-13(x86_64) /
 # macos-14(aarch64) / windows-latest(x86_64) / windows-11-arm(aarch64 preview)。
 #
-# sisyphus-web/dist/ 已提交 git（rust-embed 编译期内嵌），故 server 构建无需
-# npm 步骤——直接 cargo build --release 即内嵌前端产物。
+# 前端产物 git 不提交（sisyphus-web/.gitignore）：server 各构建 job 先经
+# frontend job 的 web-dist artifact 注入真实 dist（rust-embed 编译期内嵌），
+# 再 cargo build --release。Dockerfile 的 frontend stage 自建前端，镜像自包含。
 
 on:
   push:
@@ -27,11 +28,43 @@ permissions:
   packages: write    # ghcr 镜像推送
 
 jobs:
+  # 前端产物构建：dist 不提交 git（sisyphus-web/.gitignore），发布前先
+  # npm build 生成，upload artifact 供 server 各构建 job 下载注入
+  # （rust-embed 编译期内嵌目录）。仅 server 需要；agent 不消费。
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sisyphus-web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: sisyphus-web/package-lock.json
+
+      - name: Install dependencies（按锁文件）
+        run: npm ci
+
+      - name: 构建产物进 dist/
+        run: npm run build
+
+      - name: 上传 dist 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: sisyphus-web/dist
+          if-no-files-found: error
+
   # 12 产物构建：{server,agent} × 6 原生目标。fail-fast: false——单个目标红
   # （如 windows-11-arm preview 抖动）不连坐其余 11 个。
   # 注：本 matrix.target 与 ci.yml 的 cross-compile-matrix 同源（6 目标原生
   # runner，此处多 ext 字段供打包）；加目标时两处同改——本文件为发布产物权威。
   build-matrix:
+    needs: frontend
     strategy:
       fail-fast: false
       matrix:
@@ -54,8 +87,16 @@ jobs:
         with:
           key: release-${{ matrix.crate }}-${{ matrix.target.runner }}
 
+      # server 构建需真实 dist（rust-embed 编译期内嵌）；agent 不需要前端。
+      - name: 下载前端产物（server）
+        if: matrix.crate == 'server'
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: sisyphus-web/dist
+
       # 原生构建——runner 架构与目标一致，无需 --target / cross（C 依赖用
-      # 原生工具链直接编译）。dist/ 已提交，server 内嵌前端无需 npm。
+      # 原生工具链直接编译）。dist 由 frontend job 注入。
       - name: Build（release）
         run: cargo build --release -p sisyphus-${{ matrix.crate }}
 
@@ -139,7 +180,8 @@ jobs:
 
   # ghcr 官方 Docker 镜像（仅 Server，双架构）。非 buildx QEMU——双原生 runner
   # 各建单架构镜像，再 manifest 合并：避 aws-lc-sys+ring+libsqlite3-sys 的 C
-  # 编译在 QEMU 仿真下 20-40 分钟慢构建。
+  # 编译在 QEMU 仿真下 20-40 分钟慢构建。Dockerfile 的 frontend stage 自建
+  # 前端产物（git 不提交 dist），docker job 无需注入。
   docker-amd64:
     needs: build-matrix
     runs-on: ubuntu-latest
