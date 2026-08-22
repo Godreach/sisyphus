@@ -6,15 +6,28 @@
 //   queued/running/succeeded/failed/cancelled/timeout）。
 // - 行展示：构建号、状态、触发源、触发人、attempt、开始/终态、耗时。
 // - 加载失败（404 = 项目/pipeline 不可见）与空列表都有明确文案。
+// #93: 使用 Naive UI 组件重写——NDataTable（状态列 NTag 颜色编码、
+// 行点击进详情）、NSelect 状态筛选、NPagination 分页、NEmpty 空态、
+// NAlert 错误态、NSkeleton 首载骨架屏；视觉与 #84/#86 主题一致。
 
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, h, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import {
+  NAlert,
+  NDataTable,
+  NEmpty,
+  NPagination,
+  NSelect,
+  NSkeleton,
+  NTag,
+  type DataTableColumns,
+} from 'naive-ui'
 
 import { buildsApi } from '@/api/client'
 import { describeActionError } from '@/api/errors'
 import { formatDateTime } from '@/utils/format'
-import type { BuildListResponse, BuildStatusDto } from '@/api/types'
+import type { BuildListResponse, BuildStatusDto, BuildSummaryResponse } from '@/api/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -79,6 +92,85 @@ function triggerKey(trigger: string): string {
   return `triggerSource.${trigger}`
 }
 
+/** 构建状态 → NTag 状态色（成功=绿 / 失败=红 / 运行=蓝 / 取消=灰等，
+ *  与 Overview 最近构建列同色系，主题 Token 驱动）。 */
+function buildStatusType(status: BuildStatusDto): 'success' | 'error' | 'info' | 'warning' | 'default' {
+  switch (status) {
+    case 'succeeded':
+      return 'success'
+    case 'failed':
+      return 'error'
+    case 'running':
+      return 'info'
+    case 'queued':
+    case 'timeout':
+      return 'warning'
+    default:
+      return 'default'
+  }
+}
+
+/** 状态筛选下拉选项（全部 + 各状态；NSelect value 为空串 = 全部）。 */
+const statusOptions = computed(() => [
+  { label: t('buildList.allStatuses'), value: '' },
+  ...(['queued', 'running', 'succeeded', 'failed', 'cancelled', 'timeout'] as const).map((s) => ({
+    label: t(buildStatusKey(s)),
+    value: s,
+  })),
+])
+
+/** NDataTable 列（行点击进详情经 row-props 挂载；状态列 NTag 色标）。 */
+const columns = computed<DataTableColumns<BuildSummaryResponse>>(() => [
+  {
+    title: t('buildList.number'),
+    key: 'number',
+    sorter: (a, b) => a.number - b.number,
+    render: (row) => `#${row.number}`,
+  },
+  {
+    title: t('buildList.status'),
+    key: 'status',
+    sorter: (a, b) => a.status.localeCompare(b.status),
+    render: (row) =>
+      h(NTag, { size: 'small', type: buildStatusType(row.status), bordered: false }, {
+        default: () => t(buildStatusKey(row.status)),
+      }),
+  },
+  {
+    title: t('buildList.trigger'),
+    key: 'trigger',
+    render: (row) => t(triggerKey(row.trigger)),
+  },
+  {
+    title: t('buildList.triggerBy'),
+    key: 'trigger_by',
+  },
+  {
+    title: t('buildList.attempt'),
+    key: 'attempt',
+  },
+  {
+    title: t('buildList.startedAt'),
+    key: 'started_at',
+    render: (row) => formatDateTime(row.started_at),
+  },
+  {
+    title: t('buildList.finishedAt'),
+    key: 'finished_at',
+    render: (row) => formatDateTime(row.finished_at),
+  },
+])
+
+const rowKey = (row: BuildSummaryResponse): number => row.number
+
+/** 行点击进详情（NDataTable row-props：class 供测试定位 + onClick 跳转）。 */
+function rowProps(row: BuildSummaryResponse): { class: string; onClick: () => void } {
+  return {
+    class: 'build-list-row',
+    onClick: () => openBuild(row.number),
+  }
+}
+
 onMounted(loadList)
 
 watch(
@@ -114,85 +206,120 @@ watch(
     </header>
 
     <div class="build-list-toolbar">
-      <label class="build-status-filter">
-        <span>{{ t('buildList.filterByStatus') }}</span>
-        <select v-model="statusFilter" @change="changeStatus" name="status-filter">
-          <option value="">{{ t('buildList.allStatuses') }}</option>
-          <option
-            v-for="s in ['queued', 'running', 'succeeded', 'failed', 'cancelled', 'timeout']"
-            :key="s"
-            :value="s"
-          >
-            {{ t(buildStatusKey(s as BuildStatusDto)) }}
-          </option>
-        </select>
-      </label>
+      <n-select
+        v-model:value="statusFilter"
+        :options="statusOptions"
+        name="status-filter"
+        class="build-status-filter"
+        :placeholder="t('buildList.filterByStatus')"
+        :virtual-scroll="false"
+        @update:value="changeStatus"
+      />
     </div>
 
-    <p v-if="loading" class="build-muted">{{ t('buildList.loading') }}</p>
+    <n-alert
+      v-if="errorMessage"
+      type="error"
+      :title="errorMessage"
+      role="alert"
+      class="build-list-alert"
+    />
 
-    <p v-else-if="errorMessage" class="build-error" role="alert">
-      {{ errorMessage }}
-    </p>
+    <!-- 首载骨架屏（#93：与 Overview 同纪律——数据到达后替换）。 -->
+    <div v-if="loading && !errorMessage" class="build-list-skeleton" data-testid="build-list-skeleton">
+      <n-skeleton v-for="i in 5" :key="i" text :repeat="2" height="28px" class="build-list-skeleton-row" />
+    </div>
 
-    <p v-else-if="!list || list.items.length === 0" class="build-muted">
-      {{ t('buildList.empty') }}
-    </p>
+    <div v-else-if="!errorMessage && list && list.items.length === 0" class="build-list-empty">
+      <n-empty :description="t('buildList.empty')" />
+    </div>
 
-    <table v-else class="build-list-table">
-      <thead>
-        <tr>
-          <th>{{ t('buildList.number') }}</th>
-          <th>{{ t('buildList.status') }}</th>
-          <th>{{ t('buildList.trigger') }}</th>
-          <th>{{ t('buildList.triggerBy') }}</th>
-          <th>{{ t('buildList.attempt') }}</th>
-          <th>{{ t('buildList.startedAt') }}</th>
-          <th>{{ t('buildList.finishedAt') }}</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr
-          v-for="item in list.items"
-          :key="item.number"
-          class="build-list-row"
-          @click="openBuild(item.number)"
-        >
-          <td class="build-list-number">#{{ item.number }}</td>
-          <td>
-            <span class="build-status-badge" :class="`status-${item.status}`">
-              {{ t(buildStatusKey(item.status)) }}
-            </span>
-          </td>
-          <td>{{ t(triggerKey(item.trigger)) }}</td>
-          <td>{{ item.trigger_by }}</td>
-          <td>{{ item.attempt }}</td>
-          <td>{{ formatDateTime(item.started_at) }}</td>
-          <td>{{ formatDateTime(item.finished_at) }}</td>
-        </tr>
-      </tbody>
-    </table>
+    <n-data-table
+      v-else-if="list && list.items.length > 0"
+      :columns="columns"
+      :data="list.items"
+      :row-key="rowKey"
+      :row-props="rowProps"
+      :bordered="false"
+      :single-line="true"
+      size="small"
+      class="build-list-table"
+    />
 
     <div v-if="list && list.items.length > 0" class="build-list-pagination">
-      <button
-        type="button"
-        class="btn"
-        :disabled="currentPage <= 1"
-        @click="goPage(currentPage - 1)"
-      >
-        {{ t('buildList.prev') }}
-      </button>
-      <span class="build-list-page-num">
-        {{ t('buildList.page', { page: currentPage, total: totalPages }) }}
-      </span>
-      <button
-        type="button"
-        class="btn"
-        :disabled="currentPage >= totalPages"
-        @click="goPage(currentPage + 1)"
-      >
-        {{ t('buildList.next') }}
-      </button>
+      <n-pagination
+        v-model:page="currentPage"
+        :item-count="list.total"
+        :page-size="PAGE_SIZE"
+        @update:page="goPage"
+      />
     </div>
   </div>
 </template>
+
+<style scoped>
+.build-list-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.build-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.build-list-header h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.build-list-edit {
+  font-size: 13px;
+  color: var(--n-text-color-link, #2b5797);
+  text-decoration: none;
+}
+
+.build-list-edit:hover {
+  text-decoration: underline;
+}
+
+.build-list-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.build-status-filter {
+  width: 200px;
+}
+
+.build-list-alert {
+  margin: 4px 0;
+}
+
+.build-list-empty {
+  padding: 24px 0;
+}
+
+.build-list-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.build-list-skeleton-row {
+  width: 100%;
+}
+
+/* NDataTable 行点击进详情：hover 高亮 + 可点击指针。 */
+.build-list-table :deep(.build-list-row) {
+  cursor: pointer;
+}
+
+.build-list-pagination {
+  display: flex;
+  justify-content: flex-end;
+}
+</style>

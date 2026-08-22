@@ -2,6 +2,12 @@
 // 阶段/任务卡渲染（含 attempt 历史、排队缺失标签等待态）、触发/取消/重跑
 // 的动作与 202/409 反馈、SSE 日志折叠/截断/重连。API 层以 fetch mock 驱动，
 // SSE 以替身 EventSource 驱动（Spec B4 测试缝）。
+//
+// #93 迁移 Naive UI：阶段/任务卡改 NCard + NTag 状态徽章、触发弹窗改 NModal
+// + NForm（参数覆盖 + 分支/commit）、产物下载改 NButton + 下载图标、
+// 删除/取消/重跑改 NPopconfirm 确认。只测外部行为（渲染、交互、API 调用），
+// 不测 Naive UI 内部实现。NModal 挂载到 body（teleport）、NPopconfirm 弹层
+// 亦挂 body——断言经 document.querySelector 定位。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
@@ -144,6 +150,7 @@ describe('BuildDetailView（阶段/任务卡 + 触发/取消/重跑 + SSE 日志
     })
   }
 
+  /** 包装组件：直接挂载（无 useMessage 依赖，无需 NMessageProvider）。 */
   function mountView(): VueWrapper {
     wrapper = mount(BuildDetailView, {
       global: { plugins: [pinia, router, i18n] },
@@ -205,9 +212,14 @@ describe('BuildDetailView（阶段/任务卡 + 触发/取消/重跑 + SSE 日志
     // 产物区：按任务声明展示 + 下载占位（缺端点退化态）。
     expect(wrapper.text()).toContain('bundle')
     expect(wrapper.text()).toContain('下载占位')
+
+    // 状态徽章 NTag：成功任务 = 绿、排队任务 = 黄（主题 Token 色通道）。
+    const jobTags = wrapper.findAll('.job-card .n-tag')
+    const successTag = jobTags.find((x) => x.text() === '成功')
+    expect(successTag?.attributes('style')).toContain('24, 160, 88')
   })
 
-  it('产物区（票 #74）：已上传接下载链接（大小/sha 提示），未上传展示占位', async () => {
+  it('产物区（票 #74）：已上传接下载按钮（大小/sha 提示），未上传展示占位', async () => {
     mockApi({
       artifacts: () => ({
         items: [
@@ -223,7 +235,7 @@ describe('BuildDetailView（阶段/任务卡 + 触发/取消/重跑 + SSE 日志
     mountView()
     await vi.waitFor(() => expect(wrapper.find('a.artifact-link').exists()).toBe(true))
 
-    // 声明 bundle 已上传 → 下载链接 + 大小；不再展示占位。
+    // 声明 bundle 已上传 → 下载按钮 + 大小；不再展示占位。
     const link = wrapper.get('a.artifact-link')
     expect(link.text()).toContain('bundle')
     expect(link.text()).toContain('4.0 KB')
@@ -254,27 +266,46 @@ describe('BuildDetailView（阶段/任务卡 + 触发/取消/重跑 + SSE 日志
     await vi.waitFor(() => expect(wrapper.text()).toContain('退化态'))
   })
 
-  it('触发对话框：参数默认值预填、可覆盖，提交 POST 带参数/分支/commit', async () => {
+  it('触发对话框（NModal）：参数默认值预填、可覆盖，提交 POST 带参数/分支/commit', async () => {
     mockApi({})
     mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.stage-card')).toHaveLength(2))
 
+    // 打开触发弹窗（第一个按钮 = 触发构建；NModal teleport 到 body）。
     await wrapper.findAll('.build-actions button')[0]?.trigger('click')
-    await vi.waitFor(() => expect(wrapper.get('.modal').text()).toContain('触发构建'))
+    await vi.waitFor(() => expect(document.querySelector('.n-modal')?.textContent).toContain('触发构建'))
 
-    // 参数默认值预填（enum 默认 x86_64、number 默认 4）。
-    expect((wrapper.get('#param-target').element as HTMLInputElement).value).toBe('x86_64')
-    expect((wrapper.get('#param-jobs').element as HTMLInputElement).value).toBe('4')
+    // 参数默认值预填：enum 参数 target → NSelect（选中 x86_64）、
+    // number 参数 jobs → NInput（name=param-jobs，值 4）。
+    expect(document.querySelector('.n-modal')?.textContent).toContain('x86_64')
+    const jobsInput = document.querySelector('.n-modal input[name="param-jobs"]') as HTMLInputElement
+    expect(jobsInput?.value).toBe('4')
 
-    // 覆盖参数 + 填分支/commit。
-    await wrapper.get('#param-target').setValue('aarch64')
-    await wrapper.get('#param-jobs').setValue('8')
-    await wrapper.get('#trigger-branch').setValue('release/1.0')
-    await wrapper.get('#trigger-commit').setValue('abc123')
+    // 覆盖 enum 参数 target → aarch64（NSelect 下拉选选项）。
+    const modalSelect = document.querySelector('.n-modal .n-base-selection')
+    await (modalSelect as HTMLElement).dispatchEvent(new Event('click'))
+    await vi.waitFor(() => {
+      const opt = [...document.querySelectorAll('.n-base-select-option')].find((o) => o.textContent?.trim() === 'aarch64')
+      expect(opt).toBeTruthy()
+      ;(opt as HTMLElement).click()
+    })
+
+    // 覆盖 number 参数 jobs → 8。
+    jobsInput.value = '8'
+    await jobsInput.dispatchEvent(new Event('input'))
+
+    const branchInput = document.querySelector('.n-modal input[name="trigger-branch"]') as HTMLInputElement
+    const commitInput = document.querySelector('.n-modal input[name="trigger-commit"]') as HTMLInputElement
+    branchInput.value = 'release/1.0'
+    await branchInput.dispatchEvent(new Event('input'))
+    commitInput.value = 'abc123'
+    await commitInput.dispatchEvent(new Event('input'))
 
     const pushSpy = vi.spyOn(router, 'push')
-    // jsdom 下 submit 按钮 click 不自动触发 form submit：直接对 form 触发。
-    await wrapper.get('.modal').trigger('submit')
+    // 提交：点弹窗内的「触发构建」主按钮（NButton type=primary 在弹窗内）。
+    const modalButtons = [...document.querySelectorAll('.n-modal button')]
+    const submitBtn = modalButtons.find((b) => b.textContent?.trim() === '触发构建')
+    await (submitBtn as HTMLElement).click()
     await vi.waitFor(() => expect(pushSpy).toHaveBeenCalled())
 
     // 请求形态：POST /builds（触发）带参数覆盖/分支/commit。
@@ -292,16 +323,24 @@ describe('BuildDetailView（阶段/任务卡 + 触发/取消/重跑 + SSE 日志
     })
   })
 
-  it('取消构建：POST cancel，202 受理反馈', async () => {
+  it('取消构建（NPopconfirm）：点击取消构建 → 弹层确认 → POST cancel，202 受理反馈', async () => {
     mockApi({
       action: () => ({ number: 7, build_id: 1, attempt: 1, status: 'running' }),
     })
     mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.stage-card')).toHaveLength(2))
 
+    // 第二个按钮是「取消构建」（运行中可取消）→ 点开确认弹层。
     const buttons = wrapper.findAll('.build-actions button')
-    // 第二个按钮是「取消构建」（运行中可取消）。
     await buttons[1]?.trigger('click')
+    await vi.waitFor(() =>
+      expect(document.querySelector('.n-popconfirm__action')).toBeTruthy(),
+    )
+
+    // 弹层确认（positive 按钮 = 第一个 action 按钮）。
+    const actionButtons = document.querySelectorAll('.n-popconfirm__action button')
+    // 确认 = positive 按钮（action 末位）；首按钮为取消/关闭弹层。
+    await (actionButtons[actionButtons.length - 1] as HTMLElement).click()
     await vi.waitFor(() => expect(wrapper.text()).toContain('已受理取消'))
 
     const cancelCall = fetchMock.mock.calls.find(
@@ -311,15 +350,20 @@ describe('BuildDetailView（阶段/任务卡 + 触发/取消/重跑 + SSE 日志
     expect(cancelCall[1].method).toBe('POST')
   })
 
-  it('从失败重跑：POST rerun（from_failed）202 受理反馈', async () => {
+  it('从失败重跑（NPopconfirm）：确认后 POST rerun（from_failed）202 受理反馈', async () => {
     mockApi({
       detail: () => buildDetailBody({ status: 'failed', finished_at: 1_700_000_010_000 }),
     })
     mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.stage-card')).toHaveLength(2))
 
-    // from_failed 重跑：成功受理 → 202 反馈。
+    // from_failed 重跑按钮（第 4 个）→ 点开确认弹层 → 确认。
     await wrapper.findAll('.build-actions button')[3]?.trigger('click')
+    await vi.waitFor(() =>
+      expect(document.querySelector('.n-popconfirm__action')).toBeTruthy(),
+    )
+    const actionButtons = document.querySelectorAll('.n-popconfirm__action button')
+    await (actionButtons[actionButtons.length - 1] as HTMLElement).click()
     await vi.waitFor(() => expect(wrapper.text()).toContain('已受理重跑'))
     const rerunCall = fetchMock.mock.calls.find(
       (c) => String(c[0]).includes('/rerun'),
@@ -351,10 +395,15 @@ describe('BuildDetailView（阶段/任务卡 + 触发/取消/重跑 + SSE 日志
     mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.stage-card')).toHaveLength(2))
     await wrapper.findAll('.build-actions button')[3]?.trigger('click')
+    await vi.waitFor(() =>
+      expect(document.querySelector('.n-popconfirm__action')).toBeTruthy(),
+    )
+    const actionButtons = document.querySelectorAll('.n-popconfirm__action button')
+    await (actionButtons[actionButtons.length - 1] as HTMLElement).click()
     await vi.waitFor(() => expect(wrapper.text()).toContain('无法从失败重跑'))
   })
 
-  it('删除构建（票 #78）：终态可删、确认对话后发 DELETE、204 后跳回构建列表', async () => {
+  it('删除构建（票 #78，NPopconfirm）：终态可删、确认后发 DELETE、204 后跳回构建列表', async () => {
     mockApi({
       detail: () => buildDetailBody({ status: 'failed', finished_at: 1_700_000_010_000 }),
     })
@@ -366,20 +415,23 @@ describe('BuildDetailView（阶段/任务卡 + 触发/取消/重跑 + SSE 日志
     expect(deleteBtn).toBeDefined()
     expect(deleteBtn?.attributes('disabled')).toBeUndefined()
 
-    // 打开确认对话 → 取消返回（不发请求）。
+    // 打开确认弹层 → 点弹层外「取消」（negative 按钮）→ 不发请求。
     await deleteBtn?.trigger('click')
-    await vi.waitFor(() => expect(wrapper.text()).toContain('确定删除构建 #7'))
-    await wrapper.findAll('.modal button')[0]?.trigger('click')
-    expect(wrapper.find('.modal').exists()).toBe(false)
+    await vi.waitFor(() => expect(document.querySelector('.n-popconfirm__action')).toBeTruthy())
+    const actionButtons = document.querySelectorAll('.n-popconfirm__action button')
+    // 取消确认 = negative 按钮（action 首位）。
+    await (actionButtons[0] as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 50))
     expect(
       fetchMock.mock.calls.some((c) => String(c[0]).includes('/builds/7') && (c[1] as RequestInit).method === 'DELETE'),
     ).toBe(false)
 
-    // 再次打开并确认 → DELETE 204 → 跳回构建列表。
+    // 再次打开并确认（positive）→ DELETE 204 → 跳回构建列表。
     const pushSpy = vi.spyOn(router, 'push')
     await wrapper.findAll('.build-actions button').find((b) => b.text() === '删除构建')?.trigger('click')
-    await vi.waitFor(() => expect(wrapper.find('.modal').exists()).toBe(true))
-    await wrapper.get('.modal').trigger('submit')
+    await vi.waitFor(() => expect(document.querySelector('.n-popconfirm__action')).toBeTruthy())
+    const actionButtons2 = document.querySelectorAll('.n-popconfirm__action button')
+    await (actionButtons2[actionButtons2.length - 1] as HTMLElement).click()
     await vi.waitFor(() => expect(pushSpy).toHaveBeenCalled())
 
     const delCall = fetchMock.mock.calls.find(
@@ -419,7 +471,7 @@ describe('BuildDetailView（阶段/任务卡 + 触发/取消/重跑 + SSE 日志
     src.dispatch('output', { type: 'output', seq: 3, stream: 'stderr', text: 'warning' })
     await vi.waitFor(() => expect(wrapper.text()).toContain('cargo build'))
 
-    // ANSI 剥离：渲染文本无色码。
+    // ANSI 剥离：渲染文本无色码（ADR-0013）。
     expect(wrapper.text()).toContain('compiling...ok')
     expect(wrapper.text()).not.toContain('\x1b[32m')
 

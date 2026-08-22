@@ -6,6 +6,10 @@
     "openMenu": "Open menu",
     "langLabel": "Language"
   },
+  "common": {
+    "confirm": "Confirm",
+    "cancel": "Cancel"
+  },
   "auth": {
     "login": "Sign in",
     "loginTagline": "Sign in to continue",
@@ -285,12 +289,12 @@
     "trigger": "Trigger build",
     "triggerTitle": "Trigger build",
     "cancel": "Cancel build",
+    "cancelConfirm": "Cancel this build? Started jobs will be aborted (queued/running can be cancelled; accepted as 202).",
     "rerunFromScratch": "Rerun from scratch",
     "rerunFromFailed": "Rerun from failed",
+    "rerunConfirm": "Rerun this build? From scratch creates a new build number; from failed keeps the number with attempt+1 (only failed / cancelled / timeout terminal states).",
     "delete": "Delete build",
-    "deleteTitle": "Delete build",
-    "deleteConfirm": "Delete build #{number}? This immediately removes its logs and artifact files.",
-    "deleteKeepRecord": "The build record (status / number / duration) is kept permanently; only data is purged (ADR-0013).",
+    "deleteConfirm": "Delete build #{number}? This immediately removes its logs and artifact files; the build record (status / number / duration) is kept permanently (ADR-0013).",
     "submitting": "Submitting…",
     "cancelledAccepted": "Cancellation accepted (202).",
     "rerunAccepted": "Rerun accepted (202), attempt+1.",
