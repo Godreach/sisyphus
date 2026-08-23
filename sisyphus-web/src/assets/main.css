@@ -1,7 +1,8 @@
 /* 全局基础样式（ADR-0020 双语布局纪律）。#97: 各页面已全量迁移 Naive UI
  * （#88–#96），组件视觉由 themeOverrides 驱动；本文件仅保留 body 基础
  * 排版、应用壳布局、通用页头/提示，以及无 Naive UI 对应物的页面骨架
- * （项目表单 / 登录 / 初始化引导 / 占位 / 面包屑 / 管理四页纵排）。
+ * （登录 / 初始化引导 / 占位 / 面包屑 / 管理四页纵排）。#98: 项目表单与
+ * 项目详情的页面级规则已收进各自视图 scoped 样式。
  * --sisy-* 变量仍被 Pipeline 编辑器等手写 scoped 样式引用，勿删。 */
 
 :root {
@@ -115,53 +116,6 @@ h3 {
   color: var(--sisy-color-text-secondary);
   font-size: 12px;
   margin: 4px 0 0;
-}
-
-/* 项目页：新建项目表单（ProjectsView；外围卡片样式 + 操作行布局，
- * 其余视觉由 NForm/NInput/NSelect 提供）。 */
-.project-form {
-  background: var(--sisy-color-surface);
-  border: 1px solid var(--sisy-color-border);
-  border-radius: var(--sisy-radius);
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin: 12px 0 20px;
-  max-width: 480px;
-}
-
-.project-form-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-/* 项目详情：pipeline 卡片与成员表（ProjectDetailView；元数据 / 列表 /
- * 成员行等布局已收进该页 scoped 样式）。 */
-.pipeline-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: var(--sisy-color-surface);
-  border: 1px solid var(--sisy-color-border);
-  border-radius: var(--sisy-radius);
-  padding: 8px 12px;
-}
-
-.member-table {
-  border-collapse: collapse;
-  width: 100%;
-  max-width: 560px;
-  margin: 8px 0;
-}
-
-.member-table th,
-.member-table td {
-  text-align: left;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--sisy-color-border);
-  font-size: 13px;
 }
 
 /* 登录页。 */

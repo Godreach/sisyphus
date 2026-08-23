@@ -375,6 +375,26 @@ function onScmTypeChange(v: ScmTypeDto): void {
 </template>
 
 <style scoped>
+/* #98: 自 main.css 原样收编（.n-form 非 inline 时根部无组件样式，无层叠
+ * 冲突）。外围卡片样式 + 操作行布局，其余视觉由 NForm 系列提供。 */
+.project-form {
+  background: var(--sisy-color-surface);
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0 20px;
+  max-width: 480px;
+}
+
+.project-form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 .project-card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));

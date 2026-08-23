@@ -438,13 +438,34 @@ async function testCredential(): Promise<void> {
   margin: 12px 0;
 }
 
+/* #98: 自 main.css 收编，仅迁实际生效的布局声明——background / border /
+ * border-radius 在全局 (0,1,0) 时即输给 .n-card 主题 token（死声明），
+ * 不随迁，避免 scoped (0,2,0) 反把它们复活成回归。 */
+.pipeline-item {
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
 .pipeline-name {
   font-weight: 600;
   font-size: 14px;
 }
 
+/* #98: 自 main.css 收编。width:100% 由 .n-data-table 根规则提供；
+ * border-collapse 对 div 根是无效声明；margin 取原 scoped 覆盖后的生效值。 */
 .member-table {
+  max-width: 560px;
   margin: 12px 0;
+}
+
+/* #98: 原 `.member-table th/td` 四条声明中仅 font-size 实际生效——
+ * padding / text-align / border-bottom 输给 .n-data-table 内部规则
+ * `.n-data-table .n-data-table-th/td`（(0,2,0) > 全局 (0,1,1)），由主题
+ * token 提供。内部单元格需 :deep 穿透组件边界。 */
+.member-table :deep(th),
+.member-table :deep(td) {
+  font-size: 13px;
 }
 
 .member-add-row {
