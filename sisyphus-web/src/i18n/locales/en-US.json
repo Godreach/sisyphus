@@ -1,7 +1,6 @@
 {
   "app": {
     "name": "sisyphus",
-    "pageUnderConstruction": "This page is under construction and will be shipped by a later batch.",
     "langSwitch": "中",
     "openMenu": "Open menu",
     "langLabel": "Language"

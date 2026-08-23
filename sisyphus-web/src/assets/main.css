@@ -1,7 +1,7 @@
 /* 全局基础样式（ADR-0020 双语布局纪律）。#97: 各页面已全量迁移 Naive UI
  * （#88–#96），组件视觉由 themeOverrides 驱动；本文件仅保留 body 基础
  * 排版、应用壳布局、通用页头/提示，以及无 Naive UI 对应物的页面骨架
- * （登录 / 初始化引导 / 占位 / 面包屑 / 管理四页纵排）。#98: 项目表单与
+ * （登录 / 初始化引导 / 面包屑 / 管理四页纵排）。#98: 项目表单与
  * 项目详情的页面级规则已收进各自视图 scoped 样式。
  * --sisy-* 变量仍被 Pipeline 编辑器等手写 scoped 样式引用，勿删。 */
 
@@ -131,15 +131,9 @@ h3 {
   margin-top: -8px;
 }
 
-/* 占位视图与设置页。 */
-.placeholder-view h1,
+/* 设置页。 */
 .setup-page h1 {
   margin-top: 0;
-}
-
-.placeholder-path {
-  color: var(--sisy-color-text-secondary);
-  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
 }
 
 /* 初始化引导 wizard（三步可跳过，ADR-0010/0020）。#89: Naive UI 组件迁移。 */
