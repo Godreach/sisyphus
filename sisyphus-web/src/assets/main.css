@@ -1,5 +1,8 @@
-/* 全局基础样式（ADR-0020 双语布局纪律：表单标签/按钮按最长语言设计，
- * 骨架期只落基础排版；页面级样式随各页面票落地）。 */
+/* 全局基础样式（ADR-0020 双语布局纪律）。#97: 各页面已全量迁移 Naive UI
+ * （#88–#96），组件视觉由 themeOverrides 驱动；本文件仅保留 body 基础
+ * 排版、应用壳布局、通用页头/提示，以及无 Naive UI 对应物的页面骨架
+ * （项目表单 / 登录 / 初始化引导 / 占位 / 面包屑 / 管理四页纵排）。
+ * --sisy-* 变量仍被 Pipeline 编辑器等手写 scoped 样式引用，勿删。 */
 
 :root {
   --sisy-color-bg: #f5f6f8;
@@ -93,10 +96,10 @@ h3 {
 .footer-user {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
 
-/* 通用页头 / 按钮 / 提示 / 错误（项目页与概览页共用）。 */
+/* 通用页头 / 表单提示（各页面共用；按钮已由 NButton 接管）。 */
 .page-title {
   margin-top: 0;
 }
@@ -108,42 +111,14 @@ h3 {
   gap: 12px;
 }
 
-.btn-primary {
-  padding: 8px 12px;
-  background: var(--sisy-color-primary);
-  color: #fff;
-  border: none;
-  border-radius: var(--sisy-radius);
-  cursor: pointer;
-  font-size: 14px;
-}
-
-.btn-primary:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.btn-secondary {
-  border: 1px solid var(--sisy-color-border);
-  background: var(--sisy-color-surface);
-  border-radius: var(--sisy-radius);
-  padding: 8px 12px;
-  cursor: pointer;
-  color: var(--sisy-color-text);
-}
-
-.btn-secondary:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
 .form-hint {
   color: var(--sisy-color-text-secondary);
   font-size: 12px;
   margin: 4px 0 0;
 }
 
-/* 项目页：列表 + 新建表单。 */
+/* 项目页：新建项目表单（ProjectsView；外围卡片样式 + 操作行布局，
+ * 其余视觉由 NForm/NInput/NSelect 提供）。 */
 .project-form {
   background: var(--sisy-color-surface);
   border: 1px solid var(--sisy-color-border);
@@ -156,88 +131,14 @@ h3 {
   max-width: 480px;
 }
 
-.project-form select,
-.member-form select {
-  padding: 6px 8px;
-  border: 1px solid var(--sisy-color-border);
-  border-radius: var(--sisy-radius);
-  font-size: 14px;
-  background: var(--sisy-color-surface);
-}
-
 .project-form-actions {
   display: flex;
   gap: 8px;
   margin-top: 4px;
 }
 
-.project-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.project-item {
-  background: var(--sisy-color-surface);
-  border: 1px solid var(--sisy-color-border);
-  border-radius: var(--sisy-radius);
-}
-
-.project-link {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  width: 100%;
-  text-align: left;
-  border: none;
-  background: none;
-  padding: 12px 16px;
-  cursor: pointer;
-}
-
-.project-link:hover {
-  background: #eef1f4;
-}
-
-.project-name {
-  font-weight: 600;
-  font-size: 15px;
-}
-
-.project-meta {
-  color: var(--sisy-color-text-secondary);
-  font-size: 12px;
-  word-break: break-all;
-}
-
-/* 项目详情：元数据 + pipeline 列表 + 成员表。 */
-.project-meta-dl {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 12px;
-  margin: 8px 0 0;
-}
-
-.project-meta-dl dt {
-  color: var(--sisy-color-text-secondary);
-}
-
-.project-meta-dl dd {
-  margin: 0;
-}
-
-.pipeline-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
+/* 项目详情：pipeline 卡片与成员表（ProjectDetailView；元数据 / 列表 /
+ * 成员行等布局已收进该页 scoped 样式）。 */
 .pipeline-item {
   display: flex;
   align-items: center;
@@ -246,26 +147,6 @@ h3 {
   border: 1px solid var(--sisy-color-border);
   border-radius: var(--sisy-radius);
   padding: 8px 12px;
-}
-
-.badge {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  border: 1px solid var(--sisy-color-border);
-  color: var(--sisy-color-text-secondary);
-}
-
-.badge-ok {
-  background: #e6f4ea;
-  border-color: #b7dfc2;
-  color: #1b6b34;
-}
-
-.badge-unknown {
-  background: #fff4e5;
-  border-color: #e6a23c;
-  color: #8a4b08;
 }
 
 .member-table {
@@ -281,41 +162,6 @@ h3 {
   padding: 6px 8px;
   border-bottom: 1px solid var(--sisy-color-border);
   font-size: 13px;
-}
-
-.member-form {
-  max-width: 560px;
-}
-
-.member-add-row {
-  display: flex;
-  gap: 12px;
-  margin: 10px 0;
-}
-
-.member-actions {
-  display: flex;
-  gap: 8px;
-}
-
-/* 底部用户区（登出动作）。 */
-.footer-user {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.footer-username {
-  color: var(--sisy-color-text-secondary);
-}
-
-.footer-logout {
-  border: 1px solid var(--sisy-color-border);
-  background: var(--sisy-color-surface);
-  border-radius: var(--sisy-radius);
-  padding: 4px 12px;
-  cursor: pointer;
-  color: var(--sisy-color-text);
 }
 
 /* 登录页。 */
@@ -439,33 +285,7 @@ h3 {
   padding: 24px;
 }
 
-/* ---------------------------------------------------------------------------
- * 构建列表 / 构建详情（票 B4-T4）。
- * ------------------------------------------------------------------------- */
-
-/* 通用按钮。 */
-.btn {
-  border: 1px solid var(--sisy-color-border);
-  background: var(--sisy-color-surface);
-  border-radius: var(--sisy-radius);
-  padding: 6px 12px;
-  cursor: pointer;
-  color: var(--sisy-color-text);
-  font-size: 13px;
-}
-
-.btn:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.btn-primary {
-  background: var(--sisy-color-primary);
-  color: #fff;
-  border-color: var(--sisy-color-primary);
-}
-
-/* 面包屑（ADR-0020：项目 > pipeline > 构建号）。 */
+/* 面包屑（ADR-0020：项目 > pipeline > 构建号；Build 列表 / 详情页共用）。 */
 .breadcrumb {
   display: flex;
   align-items: center;
@@ -493,12 +313,9 @@ h3 {
   font-weight: 600;
 }
 
-/* ---------------------------------------------------------------------------
- * 管理四页（机密 / 审计 / Agent 升级 / 用户与 PAT，票 B4-T6）：页面已全量
- * 迁移 Naive UI（票 #95），旧组件样式清除，仅保留 `.admin-page` 页面骨架
- * （纵排 + 间距，四页共用；其余视觉由 Naive UI 主题 Token 驱动）。
- * ------------------------------------------------------------------------- */
-
+/* 管理四页（机密 / 审计 / Agent 升级 / 用户与 PAT，票 B4-T6）：页面已全量
+ * 迁移 Naive UI（票 #95），仅保留 `.admin-page` 页面骨架（纵排 + 间距，
+ * 四页共用；其余视觉由 Naive UI 主题 Token 驱动）。 */
 .admin-page {
   display: flex;
   flex-direction: column;
