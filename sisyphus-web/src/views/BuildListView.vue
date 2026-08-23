@@ -278,7 +278,7 @@ watch(
 
 .build-list-edit {
   font-size: 13px;
-  color: var(--n-text-color-link, #2b5797);
+  color: var(--n-text-color-link, #4f46e5);
   text-decoration: none;
 }
 

@@ -11,7 +11,7 @@
   --sisy-color-border: #d9dce1;
   --sisy-color-text: #1f2328;
   --sisy-color-text-secondary: #59636e;
-  --sisy-color-primary: #2b5797;
+  --sisy-color-primary: #4f46e5;
   --sisy-color-danger: #c62828;
   --sisy-radius: 6px;
   --sisy-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
@@ -20,12 +20,12 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --sisy-color-bg: #1a1a2e;
-    --sisy-color-surface: #16213e;
-    --sisy-color-border: #2a2a4a;
-    --sisy-color-text: #e0e0e0;
-    --sisy-color-text-secondary: #a0a0b0;
-    --sisy-color-primary: #3a6bb5;
+    --sisy-color-bg: #0c0c0e;
+    --sisy-color-surface: #18181b;
+    --sisy-color-border: #27272a;
+    --sisy-color-text: #e4e4e7;
+    --sisy-color-text-secondary: #a1a1aa;
+    --sisy-color-primary: #6366f1;
     --sisy-color-danger: #ef5350;
   }
 }

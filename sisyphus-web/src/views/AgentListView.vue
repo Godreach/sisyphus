@@ -520,7 +520,7 @@ const rowKey = (row: AgentResponse): string => row.name
 }
 
 .agent-name-btn:hover {
-  color: var(--n-text-color-link, #2b5797);
+  color: var(--n-text-color-link, #4f46e5);
   text-decoration: underline;
 }
 

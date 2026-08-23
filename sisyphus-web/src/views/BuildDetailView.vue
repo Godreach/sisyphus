@@ -772,7 +772,7 @@ function paramControl(p: { name: string; type: 'string' | 'number' | 'bool' | 'e
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  background: var(--n-color-primary, #2b5797);
+  background: var(--n-color-primary, #4f46e5);
   color: #fff;
   font-size: 12px;
 }
