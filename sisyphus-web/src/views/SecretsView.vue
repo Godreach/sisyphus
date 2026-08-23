@@ -12,15 +12,39 @@
 // - 删：`DELETE /projects/{name}/secrets/{secret}`（名消失即可观察语义）。
 // - 语义提示：值只写不读、永不可读回；`${}` 插值不解析机密值（防进命令串/
 //   日志回显）；任务 env 键与机密名冲突在 pipeline 保存时校验。
+// #95: 使用 Naive UI 组件重写——项目下拉改 NSelect、写/覆写表单改 NCard +
+// NForm、机密名清单改 NDataTable（删除经 NPopconfirm 确认）、成功操作改
+// NMessage toast、错误态 NAlert、加载 NSkeleton、空态 NEmpty。
 
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, h, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NDataTable,
+  NEmpty,
+  NForm,
+  NFormItem,
+  NInput,
+  NPopconfirm,
+  NSelect,
+  NSkeleton,
+  useMessage,
+  type DataTableColumns,
+} from 'naive-ui'
 
 import { projectsApi, secretsApi } from '@/api/client'
 import { describeSubmitError } from '@/api/errors'
 import type { ProjectResponse } from '@/api/types'
 
+/** 机密名行（NDataTable 行形态：清单端点只回名，无值列——write-only 语义）。 */
+interface SecretRow {
+  name: string
+}
+
 const { t } = useI18n()
+const message = useMessage()
 
 const projects = ref<ProjectResponse[] | null>(null)
 const projectError = ref('')
@@ -36,17 +60,21 @@ const newValue = ref('')
 const saving = ref(false)
 const saveError = ref('')
 
-/** 删除 busy（按名标记，禁对应按钮）。 */
+/** 删除 busy（按名标记，按钮转圈）。 */
 const deletingName = ref<string | null>(null)
-
-/** 最近一次写入/删除的成功提示（覆盖 vs 新建由列表长度不可见——值不回显，
- *  故以操作回执确认动作完成，不区分新建/覆写）。 */
-const note = ref('')
 
 onMounted(loadProjects)
 
 const canSave = computed(
   () => selectedProject.value !== '' && newName.value.trim() !== '' && newValue.value !== '' && !saving.value,
+)
+
+const projectOptions = computed(() =>
+  (projects.value ?? []).map((p) => ({ label: p.name, value: p.name })),
+)
+
+const secretRows = computed<SecretRow[]>(() =>
+  (secrets.value ?? []).map((name) => ({ name })),
 )
 
 // 403 退化态说明：本页经侧栏 `is_admin` 门控 + 路由守卫 `meta.admin` 兜底，
@@ -55,6 +83,44 @@ const canSave = computed(
 // Agent 升级 / 用户）端点为全局 admin 专属，is_admin 被撤销会 403 → 各自
 // 带 `adminOnly` 退化态；本页 403 不可达，故不加该分支（避免不可达死代码），
 // 错误统一经下方 catch 落 `describeSubmitError` 就地展示。
+
+/** NDataTable 列（机密名 mono + 删除 NPopconfirm；无值列——值任何端点不回显）。 */
+const columns = computed<DataTableColumns<SecretRow>>(() => [
+  {
+    title: t('secrets.name'),
+    key: 'name',
+    render: (row) => h('span', { class: 'mono' }, row.name),
+  },
+  {
+    title: '',
+    key: 'actions',
+    width: 110,
+    render: (row) =>
+      h(
+        NPopconfirm,
+        {
+          positiveText: t('common.confirm'),
+          negativeText: t('common.cancel'),
+          onPositiveClick: () => void deleteSecret(row.name),
+        },
+        {
+          trigger: () =>
+            h(
+              NButton,
+              {
+                size: 'small',
+                name: 'secret-delete',
+                loading: deletingName.value === row.name,
+              },
+              { default: () => t('secrets.delete') },
+            ),
+          default: () => t('secrets.deleteConfirm', { name: row.name }),
+        },
+      ),
+  },
+])
+
+const rowKey = (row: SecretRow): string => row.name
 
 /** 项目下拉：全局 admin 全量；选首个为默认。无项目 → 空态。 */
 async function loadProjects(): Promise<void> {
@@ -93,7 +159,6 @@ async function loadSecrets(): Promise<void> {
 /** 写/覆写机密：`PUT .../secrets/{secret}` { value }，成功 204 + 刷新列表。 */
 async function saveSecret(): Promise<void> {
   saveError.value = ''
-  note.value = ''
   saving.value = true
   try {
     await secretsApi.put(selectedProject.value, newName.value.trim(), {
@@ -101,7 +166,7 @@ async function saveSecret(): Promise<void> {
     })
     newName.value = ''
     newValue.value = ''
-    note.value = t('secrets.saved')
+    message.success(t('secrets.saved'))
     await loadSecrets()
   } catch (err) {
     saveError.value = describeSubmitError(err)
@@ -113,10 +178,9 @@ async function saveSecret(): Promise<void> {
 /** 删除机密：`DELETE .../secrets/{secret}`，成功 204 + 刷新列表。 */
 async function deleteSecret(name: string): Promise<void> {
   deletingName.value = name
-  note.value = ''
   try {
     await secretsApi.delete(selectedProject.value, name)
-    note.value = t('secrets.deleted')
+    message.success(t('secrets.deleted'))
     await loadSecrets()
   } catch (err) {
     secretsError.value = describeSubmitError(err)
@@ -131,7 +195,6 @@ function changeProject(): void {
   newName.value = ''
   newValue.value = ''
   saveError.value = ''
-  note.value = ''
 }
 
 watch(selectedProject, () => {
@@ -147,81 +210,153 @@ watch(selectedProject, () => {
       <h1 class="page-title">{{ t('routes.adminSecrets') }}</h1>
     </div>
 
-    <p v-if="projectError" class="form-error" role="alert">{{ projectError }}</p>
+    <n-alert v-if="projectError" type="error" :title="projectError" role="alert" />
 
     <!-- 无项目空态：引导先建项目（机密挂在项目下）。 -->
     <p v-else-if="projects && projects.length === 0" class="form-hint">{{ t('secrets.noProjects') }}</p>
 
     <template v-else-if="projects">
-      <div class="secret-toolbar">
-        <label class="field secret-project-field">
-          <span>{{ t('secrets.project') }}</span>
-          <select v-model="selectedProject" name="secret-project" @change="changeProject">
-            <option v-for="p in projects" :key="p.name" :value="p.name">{{ p.name }}</option>
-          </select>
-        </label>
+      <div class="secrets-toolbar">
+        <span class="secrets-toolbar-label">{{ t('secrets.project') }}</span>
+        <n-select
+          v-model:value="selectedProject"
+          :options="projectOptions"
+          class="secrets-project-select"
+          :virtual-scroll="false"
+          @update:value="changeProject"
+        />
       </div>
 
       <!-- 写/覆写表单（名 + 值；值永不可读回，故无「当前值」回填）。 -->
-      <form class="secret-form" @submit.prevent>
-        <h2 class="secret-form-title">{{ t('secrets.writeTitle') }}</h2>
-        <label class="field">
-          <span>{{ t('secrets.name') }}</span>
-          <input
-            v-model="newName"
-            name="secret-name"
-            :placeholder="t('secrets.namePlaceholder')"
-          />
-        </label>
-        <p class="form-hint">{{ t('secrets.nameHint') }}</p>
-        <label class="field">
-          <span>{{ t('secrets.value') }}</span>
-          <textarea
-            v-model="newValue"
-            name="secret-value"
-            rows="3"
-            :placeholder="t('secrets.valuePlaceholder')"
-          />
-        </label>
-        <p class="form-hint">{{ t('secrets.valueHint') }}</p>
-        <div class="secret-actions">
-          <button
-            type="button"
-            class="btn-primary"
-            name="secret-save"
-            :disabled="!canSave"
-            @click="saveSecret"
-          >
-            {{ saving ? t('secrets.saving') : t('secrets.save') }}
-          </button>
-        </div>
-        <p v-if="saveError" class="form-error" role="alert">{{ saveError }}</p>
-      </form>
+      <n-card :title="t('secrets.writeTitle')" size="small" class="secrets-form-card">
+        <n-form label-placement="top" @submit.prevent="saveSecret">
+          <n-form-item :label="t('secrets.name')" :show-require-mark="true">
+            <n-input
+              v-model:value="newName"
+              :input-props="{ name: 'secret-name' }"
+              :placeholder="t('secrets.namePlaceholder')"
+            />
+          </n-form-item>
+          <p class="form-hint">{{ t('secrets.nameHint') }}</p>
+          <n-form-item :label="t('secrets.value')">
+            <n-input
+              v-model:value="newValue"
+              type="textarea"
+              :rows="3"
+              :input-props="{ name: 'secret-value' }"
+              :placeholder="t('secrets.valuePlaceholder')"
+            />
+          </n-form-item>
+          <p class="form-hint">{{ t('secrets.valueHint') }}</p>
+          <div class="secrets-form-actions">
+            <n-button
+              type="primary"
+              name="secret-save"
+              :disabled="!canSave"
+              :loading="saving"
+              @click="saveSecret"
+            >
+              {{ saving ? t('secrets.saving') : t('secrets.save') }}
+            </n-button>
+          </div>
+          <n-alert v-if="saveError" type="error" :title="saveError" role="alert" class="secrets-form-alert" />
+        </n-form>
+      </n-card>
 
       <!-- 语义提示：值只写不读 + ${} 不解析 + env 键冲突（${} 经具名参数传入，
            避免 vue-i18n 把字面量 ${} 当空占位符编译）。 -->
-      <p class="form-hint secret-discipline">{{ t('secrets.discipline', { interp: '${}' }) }}</p>
+      <p class="form-hint secrets-discipline">{{ t('secrets.discipline', { interp: '${}' }) }}</p>
 
-      <p v-if="note" class="form-hint" role="status">{{ note }}</p>
+      <h2 class="secrets-list-title">{{ t('secrets.listTitle') }}</h2>
 
-      <h2 class="secret-list-title">{{ t('secrets.listTitle') }}</h2>
-      <p v-if="loadingSecrets" class="form-hint">{{ t('secrets.loading') }}</p>
-      <p v-else-if="secretsError" class="form-error" role="alert">{{ secretsError }}</p>
-      <p v-else-if="secrets && secrets.length === 0" class="form-hint">{{ t('secrets.empty') }}</p>
-      <ul v-else-if="secrets" class="secret-list">
-        <li v-for="name in secrets" :key="name" class="secret-item">
-          <span class="secret-name mono">{{ name }}</span>
-          <button
-            type="button"
-            class="btn-secondary secret-delete"
-            name="secret-delete"
-            :disabled="deletingName === name"
-            @click="deleteSecret(name)"
-          >
-            {{ t('secrets.delete') }}
-          </button>
-        </li>
-      </ul>
+      <!-- 首载/切换加载骨架屏（数据到达后替换）。 -->
+      <div v-if="loadingSecrets" class="secrets-skeleton">
+        <n-skeleton v-for="i in 3" :key="i" text :repeat="1" height="28px" class="secrets-skeleton-row" />
+      </div>
+
+      <n-alert v-else-if="secretsError" type="error" :title="secretsError" role="alert" />
+
+      <div v-else-if="secrets && secrets.length === 0" class="secrets-empty">
+        <n-empty :description="t('secrets.empty')" />
+      </div>
+
+      <!-- 机密名清单（无值列——write-only 语义，值任何端点不回显）。 -->
+      <n-data-table
+        v-else-if="secrets"
+        :columns="columns"
+        :data="secretRows"
+        :row-key="rowKey"
+        :bordered="false"
+        :single-line="true"
+        size="small"
+        class="secrets-table"
+      />
     </template>
   </div>
 </template>
+
+<style scoped>
+.secrets-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.secrets-toolbar-label {
+  font-size: 14px;
+  color: var(--n-text-color-3, #7f8792);
+}
+
+.secrets-project-select {
+  width: 260px;
+}
+
+.secrets-form-card {
+  max-width: 560px;
+}
+
+.secrets-form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.secrets-form-alert {
+  margin-top: 8px;
+}
+
+.secrets-discipline {
+  max-width: 640px;
+  line-height: 1.6;
+}
+
+.secrets-list-title {
+  margin: 8px 0 0;
+  font-size: 16px;
+}
+
+.secrets-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.secrets-skeleton-row {
+  width: 100%;
+}
+
+.secrets-empty {
+  padding: 24px 0;
+}
+
+.secrets-table {
+  max-width: 560px;
+}
+
+.mono {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+</style>

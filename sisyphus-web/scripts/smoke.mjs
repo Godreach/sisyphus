@@ -131,7 +131,8 @@ const buildDetail = {
 }
 const buildList = { items: [], total: 0, page: 1, limit: 20 }
 
-// 升级包（升级页表格区渲染用——占位态消除：mock 回非空包，断言 upgrade-table 出现）。
+// 升级包（升级页表格区渲染用——占位态消除：mock 回非空包，断言包表出现。
+// #95 迁移 NDataTable 后包表定位类为 upgrade-packages-table）。
 const upgradePackage = {
   package_name: 'sisyphus-agent-1.0.0-linux-x86_64.tar.gz',
   version: { major: 1, minor: 0, patch: 0 },
@@ -321,12 +322,12 @@ async function runAuthed(browser) {
   await visit(page, '/admin/users', '用户', 'admin-users')
 
   // 关键动作 1：升级页升级包表格渲染（占位态消除——mock 回非空包，
-  // upgrade-table 出现且含包名）。B5-T4 起升级端点已交付，页不再退化。
+  // NDataTable 包表出现且含包名）。B5-T4 起升级端点已交付，页不再退化。
   try {
     await page.goto(`${BASE}/admin/upgrade`, { waitUntil: 'domcontentloaded' })
     await page.locator('h1', { hasText: 'Agent 升级' }).first().waitFor({ timeout: 10000 })
     await page
-      .locator('.upgrade-table td', { hasText: 'sisyphus-agent-1.0.0-linux-x86_64.tar.gz' })
+      .locator('.upgrade-packages-table td', { hasText: 'sisyphus-agent-1.0.0-linux-x86_64.tar.gz' })
       .first()
       .waitFor({ timeout: 5000 })
     ok('admin-upgrade package table renders', true)
@@ -361,7 +362,7 @@ async function runAuthed(browser) {
   // 退化标注消除巡检（B5-T9 AC：关键页面不再有退化标注）。B5-T3/T4/T7 已移除
   // 运行态退化（overview 退化卡 / 升级页占位态 / testConnectionUnavailable）；
   // 此巡检为回归护栏——断言概览页渲染真实 stat 卡（非退化态、无 loadError）。
-  // 升级页占位态消除由动作 1（upgrade-table 渲染）守、测试连接由动作 2 守。
+  // 升级页占位态消除由动作 1（升级包表渲染）守、测试连接由动作 2 守。
   try {
     await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
     await page.locator('h1', { hasText: '概览' }).first().waitFor({ timeout: 10000 })
@@ -415,7 +416,8 @@ async function runGuest(browser) {
       .waitFor({ timeout: 10000 })
     await expectUrl(page, '/setup', 'setup-needed redirect')
     await page.locator('.setup-intro').waitFor({ timeout: 5000 })
-    await page.locator('.setup-steps li').first().waitFor({ timeout: 5000 })
+    // NSteps 渲染 .n-step div（早前 SetupView 迁移 Naive UI 后选择器由 li 修正）。
+    await page.locator('.setup-steps .n-step').first().waitFor({ timeout: 5000 })
     ok('setup wizard renders (via redirect)', true)
   } catch (err) {
     ok('setup wizard renders (via redirect)', false, err.message)

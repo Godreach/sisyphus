@@ -49,12 +49,7 @@ export function agentStateLabelKey(state: AgentBadgeState): string {
   return `agents.state${cap}`
 }
 
-/** 徽标态 → CSS 类后缀（`agent-state-online` 等，配 main.css 状态色）。 */
-export function agentStateClass(state: AgentBadgeState): string {
-  return `agent-state-${state}`
-}
-
-/** 徽标态 → NTag 状态色（票 #94 列表/详情共用，颜色编码不漂移）：
+/** 徽标态 → NTag 状态色（票 #94 列表/详情/升级页共用，颜色编码不漂移）：
  *  online=绿 / offline=红 / draining=黄 / incompatible=灰；停用（独立
  *  管理态）同为灰，靠文案区分。 */
 export function agentStateTagType(

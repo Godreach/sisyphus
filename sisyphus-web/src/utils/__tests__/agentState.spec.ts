@@ -2,14 +2,13 @@
 // - deriveAgentState：由 online + draining + version_compatible 派生四态
 //   （incompatible > draining > online > offline）。
 // - agentBadgeState：停用优先（停用即踢线，不展示在线态以免误导）。
-// - agentStateLabelKey / agentStateClass：徽标态 → i18n key / CSS 类。
+// - agentStateLabelKey：徽标态 → i18n key。
 // - agentStateTagType：徽标态 → NTag 状态色（票 #94 AC 颜色编码）。
 
 import { describe, expect, it } from 'vitest'
 
 import {
   agentBadgeState,
-  agentStateClass,
   agentStateLabelKey,
   agentStateTagType,
   deriveAgentState,
@@ -82,20 +81,13 @@ describe('agentBadgeState 停用优先', () => {
   })
 })
 
-describe('agentStateLabelKey / agentStateClass', () => {
+describe('agentStateLabelKey', () => {
   it('label key 形态：agents.state{Online|Offline|Draining|Incompatible|Disabled}', () => {
     expect(agentStateLabelKey('online')).toBe('agents.stateOnline')
     expect(agentStateLabelKey('offline')).toBe('agents.stateOffline')
     expect(agentStateLabelKey('draining')).toBe('agents.stateDraining')
     expect(agentStateLabelKey('incompatible')).toBe('agents.stateIncompatible')
     expect(agentStateLabelKey('disabled')).toBe('agents.stateDisabled')
-  })
-
-  it('class 形态：agent-state-{state}', () => {
-    expect(agentStateClass('online')).toBe('agent-state-online')
-    expect(agentStateClass('draining')).toBe('agent-state-draining')
-    expect(agentStateClass('incompatible')).toBe('agent-state-incompatible')
-    expect(agentStateClass('disabled')).toBe('agent-state-disabled')
   })
 })
 
