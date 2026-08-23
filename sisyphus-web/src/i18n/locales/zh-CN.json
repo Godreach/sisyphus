@@ -489,6 +489,7 @@
     "reload": "重新加载",
     "saved": "已保存（revision {revision}，操作人 {operator}）",
     "conflict": "并发保存冲突：你加载的版本为 revision {loaded}，期间已被他人保存至 revision {prev}，本次保存已覆盖为 revision {revision}。建议重新加载以确认他人改动。",
+    "conflictTitle": "并发保存冲突",
     "saveAdminOnly": "保存需项目 admin 档（403）。",
     "projectNotFound": "项目不存在或不可见（404）。",
     "tabJobs": "任务",

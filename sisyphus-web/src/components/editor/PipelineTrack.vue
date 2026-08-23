@@ -5,8 +5,12 @@
 //
 // 纯展示+事件：结构变更（增删/重排/选中）一律 emit 给父（PipelineEditorView）
 // 处理，本组件只渲染阶段名/when 的就地编辑（v-model 改属性，同 JobFormPanel 纪律）。
+// #96: 迁移 Naive UI——任务 chip 改 NTag（checkable+checked 表达选中态高亮，
+// 有错附 chip-error 类红边）、阶段名/when 改 NInput、增删/重排按钮改 NButton，
+// 交互不变。
 
 import { useI18n } from 'vue-i18n'
+import { NButton, NInput, NTag } from 'naive-ui'
 
 import type { Pipeline, Stage } from '@/model/pipeline'
 import { errorsForStage, errorsForJob } from '@/model/editor'
@@ -30,7 +34,7 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 function isSelected(si: number, ji: number): boolean {
-  return props.selection?.stageIndex === si && props.selection?.jobIndex === ji
+  return props.selection?.stageIndex === si && props.selection.jobIndex === ji
 }
 
 // 阶段 when：空 = undefined（空串会被 when 校验判 when_syntax）。
@@ -46,9 +50,9 @@ function setStageWhen(stage: Stage, v: string): void {
   <aside class="editor-track">
     <div class="track-toolbar">
       <span class="track-title">{{ t('editor.trackTitle') }}</span>
-      <button type="button" class="btn btn-primary" name="track-add-stage" @click="emit('add-stage')">
+      <n-button size="small" type="primary" name="track-add-stage" @click="emit('add-stage')">
         {{ t('editor.addStage') }}
-      </button>
+      </n-button>
     </div>
     <p class="form-hint">{{ t('editor.trackHint') }}</p>
 
@@ -62,46 +66,41 @@ function setStageWhen(stage: Stage, v: string): void {
         :class="{ 'stage-has-error': errorsForStage(errors, si).length > 0 }"
       >
         <div class="stage-column-head">
-          <input
+          <n-input
+            v-model:value="stage.name"
             class="stage-name-input"
-            :name="`stage-${si}-name`"
-            v-model="stage.name"
+            :input-props="{ name: `stage-${si}-name` }"
             :placeholder="t('editor.stage')"
-            autocomplete="off"
+            size="small"
           />
           <div class="stage-controls">
-            <button
-              type="button"
-              class="btn chip-mini"
+            <n-button
+              size="tiny"
               :name="`stage-${si}-up`"
               :disabled="si === 0"
               :title="t('editor.moveUp')"
               @click="emit('move-stage', si, -1)"
-            >↑</button>
-            <button
-              type="button"
-              class="btn chip-mini"
+            >↑</n-button>
+            <n-button
+              size="tiny"
               :name="`stage-${si}-down`"
               :disabled="si === pipeline.stages.length - 1"
               :title="t('editor.moveDown')"
               @click="emit('move-stage', si, 1)"
-            >↓</button>
-            <button
-              type="button"
-              class="btn chip-mini"
-              :name="`stage-${si}-delete`"
-              @click="emit('delete-stage', si)"
-            >{{ t('editor.deleteStage') }}</button>
+            >↓</n-button>
+            <n-button size="tiny" :name="`stage-${si}-delete`" @click="emit('delete-stage', si)">
+              {{ t('editor.deleteStage') }}
+            </n-button>
           </div>
-          <label class="field stage-when-field">
-            <span>{{ t('editor.stageWhen') }}</span>
-            <input
-              :name="`stage-${si}-when`"
+          <div class="stage-when-field">
+            <span class="stage-when-label">{{ t('editor.stageWhen') }}</span>
+            <n-input
               :value="stageWhenText(stage)"
-              @input="setStageWhen(stage, ($event.target as HTMLInputElement).value)"
-              autocomplete="off"
+              :input-props="{ name: `stage-${si}-when` }"
+              size="small"
+              @update:value="setStageWhen(stage, $event)"
             />
-          </label>
+          </div>
           <ul v-if="errorsForStage(errors, si).length > 0" class="field-errors" role="alert">
             <li v-for="(e, ei) in errorsForStage(errors, si)" :key="ei">
               <code class="err-path">{{ e.path }}</code> {{ e.message }}
@@ -111,15 +110,18 @@ function setStageWhen(stage: Stage, v: string): void {
 
         <ul class="track-jobs">
           <li v-for="(job, ji) in stage.jobs" :key="ji" class="track-job-row">
-            <button
-              type="button"
+            <!-- checkable NTag：点击（update:checked）即选中导航；checked = 选中态
+                 高亮（主题 primary）；有错附 chip-error 红边。 -->
+            <n-tag
+              checkable
+              :checked="isSelected(si, ji)"
               class="job-chip"
               :class="{
                 'chip-selected': isSelected(si, ji),
                 'chip-error': errorsForJob(errors, si, ji).length > 0,
               }"
               :name="`chip-${si}-${ji}`"
-              @click="emit('select', si, ji)"
+              @update:checked="emit('select', si, ji)"
             >
               <span class="chip-name">{{ job.name || t('editor.unnamedJob') }}</span>
               <span v-if="(job.retry_count ?? 0) > 0" class="chip-badge chip-retry">
@@ -132,41 +134,197 @@ function setStageWhen(stage: Stage, v: string): void {
                 v-if="job.exec_env?.type === 'container'"
                 class="chip-badge chip-container"
               >{{ t('editor.containerBadge') }}</span>
-            </button>
+            </n-tag>
             <div class="chip-controls">
-              <button
-                type="button"
-                class="btn chip-mini"
+              <n-button
+                size="tiny"
                 :name="`job-${si}-${ji}-up`"
                 :disabled="ji === 0"
                 @click="emit('move-job', si, ji, -1)"
-              >↑</button>
-              <button
-                type="button"
-                class="btn chip-mini"
+              >↑</n-button>
+              <n-button
+                size="tiny"
                 :name="`job-${si}-${ji}-down`"
                 :disabled="ji === stage.jobs.length - 1"
                 @click="emit('move-job', si, ji, 1)"
-              >↓</button>
-              <button
-                type="button"
-                class="btn chip-mini"
+              >↓</n-button>
+              <n-button
+                size="tiny"
                 :name="`job-${si}-${ji}-delete`"
                 :title="t('editor.deleteJob')"
                 :aria-label="t('editor.deleteJob')"
                 @click="emit('delete-job', si, ji)"
-              >✕</button>
+              >✕</n-button>
             </div>
           </li>
         </ul>
 
-        <button
-          type="button"
-          class="btn"
-          :name="`stage-${si}-add-job`"
-          @click="emit('add-job', si)"
-        >{{ t('editor.addJob') }}</button>
+        <n-button size="small" dashed :name="`stage-${si}-add-job`" @click="emit('add-job', si)">
+          {{ t('editor.addJob') }}
+        </n-button>
       </div>
     </div>
   </aside>
 </template>
+
+<style scoped>
+.editor-track {
+  flex: 0 0 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  background: var(--sisy-color-surface);
+}
+
+.track-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.track-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sisy-color-text-secondary);
+}
+
+.track-columns {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.stage-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  background: #fbfcfd;
+}
+
+.stage-column.stage-has-error {
+  border-color: var(--sisy-color-danger);
+}
+
+.stage-column-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stage-name-input {
+  font-weight: 600;
+}
+
+.stage-controls {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.stage-when-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stage-when-label {
+  font-size: 12px;
+  color: var(--sisy-color-text-secondary);
+}
+
+/* 任务 chip（NTag）：占满行宽、可点。 */
+.track-jobs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.track-job-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.job-chip {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  cursor: pointer;
+  height: auto;
+  min-height: 28px;
+  padding: 2px 10px;
+}
+
+.job-chip.chip-error:not(.chip-selected) {
+  border-color: var(--sisy-color-danger);
+  color: var(--sisy-color-danger);
+}
+
+.chip-name {
+  font-weight: 600;
+}
+
+.chip-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--sisy-color-border);
+  background: rgba(128, 128, 128, 0.08);
+  color: var(--sisy-color-text-secondary);
+}
+
+.chip-badge.chip-retry {
+  border-color: #b7dfc2;
+  background: #e6f4ea;
+  color: #1b6b34;
+}
+
+.chip-badge.chip-allow-failure {
+  border-color: #e2a56a;
+  background: #fdf1e3;
+  color: #8a4b08;
+}
+
+.chip-badge.chip-container {
+  border-color: #7ab3e8;
+  background: #e8f3fd;
+  color: #0b5cad;
+}
+
+.chip-controls {
+  display: flex;
+  gap: 2px;
+}
+
+/* 内联字段错误清单（阶段 when 定位）。 */
+.field-errors {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--sisy-color-danger);
+}
+
+.err-path {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--sisy-color-text-secondary);
+  border: 1px solid var(--sisy-color-border);
+  border-radius: 3px;
+  padding: 0 4px;
+  margin-right: 4px;
+}
+</style>

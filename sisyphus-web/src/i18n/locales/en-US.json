@@ -489,6 +489,7 @@
     "reload": "Reload",
     "saved": "Saved (revision {revision}, by {operator})",
     "conflict": "Concurrent save conflict: you loaded revision {loaded}, but it was since saved by someone else up to revision {prev}; your save has overwritten it to revision {revision}. Reload to review their changes.",
+    "conflictTitle": "Concurrent save conflict",
     "saveAdminOnly": "Saving requires project admin role (403).",
     "projectNotFound": "Project does not exist or is not visible (404).",
     "tabJobs": "Jobs",

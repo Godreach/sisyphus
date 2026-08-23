@@ -1,15 +1,21 @@
 // 混合式 pipeline 编辑器行为测试（票 B4-T8，ADR-0020 变体 C）。
 //
 // 只测外部行为：轨道导航表单、字段联动、增删/重排、保存校验整组展示 + 字段定位、
-// PUT 原样提交 + revision、并发冲突、服务端 422、404 空定义、参数/环境变量页签。
+// PUT 原样提交 + revision、并发冲突弹窗、服务端 422、404 空定义、参数/环境变量页签。
 // API 层以 fetch mock（method + URL 前缀路由，最长前缀匹配）驱动——同 SecretsView 纪律。
 //
 // 关键：mount 须在 fetch mock 路由设好之后（onMounted 即发 GET 定义）。
+// #96: 编辑器迁移 Naive UI——chip 改 NTag（update:checked 驱动选中）、数字输入改
+// NInputNumber、开关改 NSwitch、页签改 NTabs、成功 toast / 冲突弹窗 teleport 不在
+// wrapper 内——toast 文案与 NModal 弹层经 document 断言（同 UsersView.spec 纪律）；
+// NSelect 经 findComponent + $emit 驱动（无原生 select，同 SecretsView.spec）。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
+import { NMessageProvider, NInputNumber, NSelect } from 'naive-ui'
+import { defineComponent, h } from 'vue'
 
 import PipelineEditorView from '@/views/PipelineEditorView.vue'
 import { i18n, setLocale } from '@/i18n'
@@ -47,6 +53,14 @@ function saveResp(revision: number) {
   return { revision, operator: 'alice', updated_at: 1700000000001 }
 }
 
+/** 包装组件：NMessageProvider + 编辑器，保证 useMessage 注入可用。 */
+const EditorWrapper = defineComponent({
+  name: 'EditorWrapper',
+  setup(_, { attrs }) {
+    return () => h(NMessageProvider, () => h(PipelineEditorView, { ...attrs }))
+  },
+})
+
 describe('PipelineEditorView 混合式编辑器', () => {
   let pinia: Pinia
   let router: Router
@@ -74,7 +88,21 @@ describe('PipelineEditorView 混合式编辑器', () => {
   }
 
   function mountView(): VueWrapper {
-    return mount(PipelineEditorView, { global: { plugins: [pinia, router, i18n] } })
+    return mount(EditorWrapper, { global: { plugins: [pinia, router, i18n] } })
+  }
+
+  /** 切换 NTabs 页签（按标签文本点击 tab）。 */
+  async function switchTab(w: VueWrapper, label: string): Promise<void> {
+    const tab = w.findAll('.n-tabs-tab').find((el) => el.text() === label)
+    expect(tab, `页签 ${label}`).toBeTruthy()
+    await tab!.trigger('click')
+  }
+
+  /** 按 name 定位 NSelect 并以 update:value 事件驱动（无原生 select）。 */
+  async function selectByNName(w: VueWrapper, name: string, value: string): Promise<void> {
+    const sel = w.findAllComponents(NSelect).find((c) => c.attributes('name') === name)
+    expect(sel, `NSelect ${name}`).toBeTruthy()
+    await sel!.vm.$emit('update:value', value)
   }
 
   beforeEach(async () => {
@@ -107,7 +135,7 @@ describe('PipelineEditorView 混合式编辑器', () => {
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.stage-column').length).toBe(1))
 
-    // 两个任务 chip；首任务自动选中，表单名称字段 = compile。
+    // 两个任务 chip（NTag）；首任务自动选中，表单名称字段 = compile。
     expect(wrapper.findAll('.job-chip').length).toBe(2)
     await vi.waitFor(() =>
       expect((wrapper.find('input[name="job-name"]').element as HTMLInputElement).value).toBe(
@@ -117,7 +145,7 @@ describe('PipelineEditorView 混合式编辑器', () => {
     wrapper.unmount()
   })
 
-  it('点击 chip → 表单导航到该任务（字段联动）', async () => {
+  it('点击 chip → 表单导航到该任务（字段联动）+ 选中态高亮', async () => {
     setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp()))
 
     const wrapper = mountView()
@@ -130,8 +158,9 @@ describe('PipelineEditorView 混合式编辑器', () => {
         'test',
       ),
     )
-    // 选中态落在第二个 chip。
+    // 选中态落在第二个 chip（NTag checked + chip-selected 类）。
     expect(wrapper.find('[name="chip-0-1"]').classes()).toContain('chip-selected')
+    expect(wrapper.find('[name="chip-0-1"]').classes()).toContain('n-tag--checked')
     wrapper.unmount()
   })
 
@@ -147,14 +176,17 @@ describe('PipelineEditorView 混合式编辑器', () => {
       expect(wrapper.find('[name="chip-0-0"]').text()).toContain('renamed'),
     )
 
-    // 设重试次数 → chip 出现「重试 2」角标。
-    await wrapper.find('input[name="job-retry-count"]').setValue('2')
+    // 设重试次数（NInputNumber——原生 input 事件不提交值，经组件 emit 驱动；
+    // 表单内首个即重试，第二个为超时）→ chip 出现「重试 2」角标。
+    const retryInput = wrapper.findAllComponents(NInputNumber)[0]!
+    expect(retryInput, 'NInputNumber 重试').toBeTruthy()
+    await retryInput.vm.$emit('update:value', 2)
     await vi.waitFor(() =>
       expect(wrapper.find('[name="chip-0-0"]').text()).toContain('重试 2'),
     )
 
-    // 勾选 allow_failure → chip 出现角标。
-    await wrapper.find('input[name="job-allow-failure"]').setValue(true)
+    // 勾选 allow_failure（NSwitch）→ chip 出现角标。
+    await wrapper.find('[name="job-allow-failure"]').trigger('click')
     await vi.waitFor(() =>
       expect(wrapper.find('[name="chip-0-0"]').text()).toContain('允许失败'),
     )
@@ -203,13 +235,17 @@ describe('PipelineEditorView 混合式编辑器', () => {
       'stages[0].jobs[0].steps[0].command',
     )
     expect(wrapper.find('[name="chip-0-0"]').classes()).toContain('chip-error')
+    // NForm validation 模式：步骤命令字段的 NFormItem feedback 就近红显同一错误。
+    expect(wrapper.find('.n-form-item-feedback').text()).toContain(
+      'stages[0].jobs[0].steps[0].command',
+    )
     expect(fetchMock.mock.calls.some((c) => (c[1] as RequestInit | undefined)?.method === 'PUT')).toBe(
       false,
     )
     wrapper.unmount()
   })
 
-  it('保存合法定义 → PUT 原样提交 model JSON（剥离 revision）+ 成功 + revision', async () => {
+  it('保存合法定义 → PUT 原样提交 model JSON（剥离 revision）+ 成功 toast + revision', async () => {
     setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp(1)))
     setRoute('PUT', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, saveResp(2)))
 
@@ -217,7 +253,8 @@ describe('PipelineEditorView 混合式编辑器', () => {
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
 
     await wrapper.find('[name="editor-save"]').trigger('click')
-    await vi.waitFor(() => expect(wrapper.text()).toContain('已保存'))
+    // 成功 toast teleport 到 body（NMessage）。
+    await vi.waitFor(() => expect(document.body.textContent).toContain('已保存'))
 
     // PUT 形态：URL + 原样 definition（无 revision）。
     const put = fetchMock.mock.calls.find(
@@ -226,12 +263,13 @@ describe('PipelineEditorView 混合式编辑器', () => {
     expect(put[0]).toBe('/api/v1/projects/proj-a/pipelines/main')
     expect(JSON.parse(put[1].body as string)).toEqual(defResp(1).definition)
 
-    // 成功回执含新 revision；revision 区显示新版本。
-    expect(wrapper.text()).toContain('revision 2')
+    // 成功回执含新 revision（toast）；revision 区更新为新版本。
+    expect(document.body.textContent).toContain('revision 2')
+    expect(wrapper.find('.editor-rev-value').text()).toBe('2')
     wrapper.unmount()
   })
 
-  it('并发保存冲突：加载 revision 3，PUT 返回 revision 5 → 冲突提示', async () => {
+  it('并发保存冲突：加载 revision 3，PUT 返回 revision 5 → 冲突弹窗（可重新加载）', async () => {
     setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp(3)))
     setRoute('PUT', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, saveResp(5)))
 
@@ -239,11 +277,24 @@ describe('PipelineEditorView 混合式编辑器', () => {
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
 
     await wrapper.find('[name="editor-save"]').trigger('click')
-    await vi.waitFor(() => expect(wrapper.find('.editor-conflict').exists()).toBe(true))
-    const msg = wrapper.find('.editor-conflict').text()
+    // 冲突 NModal teleport 到 body。
+    await vi.waitFor(() => expect(document.querySelector('.n-modal')).toBeTruthy())
+    const msg = document.querySelector('.n-modal')?.textContent ?? ''
     expect(msg).toContain('revision 3')
     expect(msg).toContain('revision 4')
     expect(msg).toContain('revision 5')
+
+    // 弹窗内「重新加载」→ 重新 GET 定义（fetch 第二次）。
+    const getsBefore = fetchMock.mock.calls.filter(
+      (c) => (c[1] as RequestInit | undefined)?.method !== 'PUT',
+    ).length
+    await (document.querySelector('.n-modal button[name="conflict-reload"]') as HTMLElement).click()
+    await vi.waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method !== 'PUT')
+          .length,
+      ).toBe(getsBefore + 1),
+    )
     wrapper.unmount()
   })
 
@@ -296,18 +347,18 @@ describe('PipelineEditorView 混合式编辑器', () => {
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
 
     // 切到参数页签 + 新增参数。
-    await wrapper.find('[name="tab-params"]').trigger('click')
+    await switchTab(wrapper, '参数')
     await wrapper.find('[name="param-add"]').trigger('click')
     expect(wrapper.findAll('.param-card').length).toBe(1)
 
-    // 类型切到 enum → 候选项 textarea 出现。
-    await wrapper.find('select[name="param-0-type"]').setValue('enum')
+    // 类型切到 enum（NSelect）→ 候选项 textarea 出现。
+    await selectByNName(wrapper, 'param-0-type', 'enum')
     expect(wrapper.find('textarea[name="param-0-choices"]').exists()).toBe(true)
 
-    // 切到 number + 必填 + 清默认 → 保存触发 R1（必填参数必须带默认值）。
-    await wrapper.find('select[name="param-0-type"]').setValue('number')
+    // 切到 number + 必填（NSwitch）+ 清默认 → 保存触发 R1（必填参数必须带默认值）。
+    await selectByNName(wrapper, 'param-0-type', 'number')
     await wrapper.find('input[name="param-0-name"]').setValue('target')
-    await wrapper.find('input[name="param-0-required"]').setValue(true)
+    await wrapper.find('[name="param-0-required"]').trigger('click')
     // 默认值字段保持空（= undefined）。
     await wrapper.find('[name="editor-save"]').trigger('click')
     await vi.waitFor(() => expect(wrapper.find('.editor-errors').exists()).toBe(true))
@@ -325,13 +376,13 @@ describe('PipelineEditorView 混合式编辑器', () => {
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
 
-    await wrapper.find('[name="tab-env"]').trigger('click')
+    await switchTab(wrapper, '环境变量')
     await wrapper.find('[name="pipe-env-add"]').trigger('click')
     await wrapper.find('input[name="pipe-env-0-name"]').setValue('RUST_LOG')
     await wrapper.find('input[name="pipe-env-0-value"]').setValue('debug')
 
     await wrapper.find('[name="editor-save"]').trigger('click')
-    await vi.waitFor(() => expect(wrapper.text()).toContain('已保存'))
+    await vi.waitFor(() => expect(document.body.textContent).toContain('已保存'))
 
     const put = fetchMock.mock.calls.find(
       (c) => (c[1] as RequestInit | undefined)?.method === 'PUT',
@@ -351,7 +402,7 @@ describe('PipelineEditorView 混合式编辑器', () => {
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
 
     // 任务页签 + 选中首任务（job.env 缺省 undefined）。
-    await wrapper.find('[name="tab-jobs"]').trigger('click')
+    await switchTab(wrapper, '任务')
     expect(wrapper.find('input[name="job-env-0-name"]').exists()).toBe(false)
 
     // 新增任务级 env + 填值 → 行渲染（push 落回 job.env）。
@@ -360,7 +411,7 @@ describe('PipelineEditorView 混合式编辑器', () => {
     await wrapper.find('input[name="job-env-0-value"]').setValue('1')
 
     await wrapper.find('[name="editor-save"]').trigger('click')
-    await vi.waitFor(() => expect(wrapper.text()).toContain('已保存'))
+    await vi.waitFor(() => expect(document.body.textContent).toContain('已保存'))
 
     // PUT 体含任务级 env（落回 job，非临时数组）。
     const put = fetchMock.mock.calls.find(

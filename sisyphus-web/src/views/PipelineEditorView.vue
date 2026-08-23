@@ -7,13 +7,16 @@
 // - 保存校验消费 B4-T7 对账校验（`validatePipeline`，单一事实源）：保存时本地校验
 //   非空即整组展示 + 字段路径定位、不提交；服务端 422 的 `detail.errors` 同形 path，
 //   一并按字段定位展示（与 server 结论一致）。
-// - revision 展示 + 并发保存冲突可见：保存响应 revision 与「加载版本 +1」不符即提示
-//   （期间被他人保存），本次保存已覆盖，建议重新加载确认。
+// - revision 展示 + 并发保存冲突可见：保存响应 revision 与「加载版本 +1」不符即弹
+//   冲突弹窗（期间被他人保存），本次保存已覆盖，建议重新加载确认。
 // - 三页签：任务（左轨道 + 右表单）/ 参数（四类型）/ 环境变量。
+// #96: 迁移 Naive UI——页签改 NTabs、保存成功改 NMessage toast、错误面板改
+// NAlert、并发冲突改 NModal、保存/重载改 NButton，交互不变。
 
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { NAlert, NButton, NModal, NTabs, NTabPane, useMessage } from 'naive-ui'
 
 import { pipelinesApi } from '@/api/client'
 import { ApiError } from '@/api/http'
@@ -29,6 +32,7 @@ import EnvListEditor from '@/components/editor/EnvListEditor.vue'
 
 const route = useRoute()
 const { t } = useI18n()
+const message = useMessage()
 
 const project = computed(() => String(route.params.name ?? ''))
 const pipelineName = computed(() => String(route.params.pipeline ?? ''))
@@ -45,7 +49,6 @@ const activeTab = ref<'jobs' | 'params' | 'env'>('jobs')
 const showErrorPanel = ref(false)
 const serverErrors = ref<ValidationIssue[]>([])
 const saving = ref(false)
-const saveMessage = ref('')
 const saveError = ref('')
 const conflictMessage = ref('')
 
@@ -81,7 +84,6 @@ async function load(): Promise<void> {
   loadError.value = ''
   serverErrors.value = []
   showErrorPanel.value = false
-  saveMessage.value = ''
   saveError.value = ''
   conflictMessage.value = ''
   try {
@@ -187,7 +189,6 @@ function removePipeEnv(i: number): void {
 async function save(): Promise<void> {
   if (!pipeline.value) return
   saveError.value = ''
-  saveMessage.value = ''
   conflictMessage.value = ''
   serverErrors.value = []
   // 本地校验先行：非空即整组展示 + 字段定位，不提交（与 server 422 同源结论）。
@@ -213,10 +214,12 @@ async function save(): Promise<void> {
         revision: resp.revision,
       })
     } else {
-      saveMessage.value = t('editor.saved', {
-        revision: resp.revision,
-        operator: resp.operator,
-      })
+      message.success(
+        t('editor.saved', {
+          revision: resp.revision,
+          operator: resp.operator,
+        }),
+      )
     }
     loadedRevision.value = resp.revision
     loadedOperator.value = resp.operator
@@ -238,6 +241,14 @@ async function save(): Promise<void> {
     saving.value = false
   }
 }
+
+/** 冲突弹窗显隐：消息非空即弹；关闭/取消清消息（load 亦会清）。 */
+const showConflict = computed({
+  get: () => conflictMessage.value !== '',
+  set: (show: boolean) => {
+    if (!show) conflictMessage.value = ''
+  },
+})
 </script>
 
 <template>
@@ -246,7 +257,7 @@ async function save(): Promise<void> {
   </div>
 
   <div v-else-if="status === 'error'" class="editor-page">
-    <p class="form-error" role="alert">{{ loadError || t('editor.loadError') }}</p>
+    <n-alert type="error" :title="loadError || t('editor.loadError')" role="alert" />
   </div>
 
   <div v-else-if="pipeline" class="editor-page">
@@ -260,105 +271,207 @@ async function save(): Promise<void> {
         </span>
       </div>
       <div class="editor-header-actions">
-        <button type="button" class="btn" name="editor-reload" :disabled="saving" @click="load">
+        <n-button name="editor-reload" :disabled="saving" @click="load">
           {{ t('editor.reload') }}
-        </button>
-        <button
-          type="button"
-          class="btn btn-primary"
+        </n-button>
+        <n-button
+          type="primary"
           name="editor-save"
+          :loading="saving"
           :disabled="saving"
           @click="save"
         >
           {{ saving ? t('editor.saving') : t('editor.save') }}
-        </button>
+        </n-button>
       </div>
     </header>
 
     <p v-if="loadedRevision === null" class="form-hint">{{ t('editor.notFound') }}</p>
-    <p v-if="saveMessage" class="editor-save-ok" role="status">{{ saveMessage }}</p>
-    <p v-if="conflictMessage" class="editor-conflict" role="alert">{{ conflictMessage }}</p>
-    <p v-if="saveError" class="form-error" role="alert">{{ saveError }}</p>
+    <n-alert v-if="saveError" type="error" :title="saveError" role="alert" />
 
     <!-- 整组校验错误面板（本地 + 服务端，含字段路径定位）。 -->
-    <section v-if="displayErrors.length > 0" class="editor-errors" role="alert">
-      <h3>
-        {{ serverErrors.length > 0
-          ? t('editor.serverErrorsTitle', { count: displayErrors.length })
-          : t('editor.errorsTitle', { count: displayErrors.length }) }}
-      </h3>
-      <ul>
+    <n-alert
+      v-if="displayErrors.length > 0"
+      type="error"
+      class="editor-errors"
+      role="alert"
+      :title="serverErrors.length > 0
+        ? t('editor.serverErrorsTitle', { count: displayErrors.length })
+        : t('editor.errorsTitle', { count: displayErrors.length })"
+    >
+      <ul class="editor-errors-list">
         <li v-for="(e, i) in displayErrors" :key="i">
           <code class="err-path">{{ e.path }}</code> {{ e.message }}
         </li>
       </ul>
-    </section>
+    </n-alert>
 
-    <!-- 页签 -->
-    <nav class="editor-tabs" role="tablist">
-      <button
-        type="button"
-        role="tab"
-        name="tab-jobs"
-        :aria-selected="activeTab === 'jobs'"
-        :class="{ active: activeTab === 'jobs' }"
-        @click="activeTab = 'jobs'"
-      >{{ t('editor.tabJobs') }}</button>
-      <button
-        type="button"
-        role="tab"
-        name="tab-params"
-        :aria-selected="activeTab === 'params'"
-        :class="{ active: activeTab === 'params' }"
-        @click="activeTab = 'params'"
-      >{{ t('editor.tabParams') }}</button>
-      <button
-        type="button"
-        role="tab"
-        name="tab-env"
-        :aria-selected="activeTab === 'env'"
-        :class="{ active: activeTab === 'env' }"
-        @click="activeTab = 'env'"
-      >{{ t('editor.tabEnv') }}</button>
-    </nav>
+    <!-- 页签（display-directive=show：同旧 v-show，三页签常驻不卸载）。 -->
+    <n-tabs
+      class="editor-tabs"
+      type="line"
+      display-directive="show"
+      :value="activeTab"
+      @update:value="activeTab = $event as 'jobs' | 'params' | 'env'"
+    >
+      <!-- 任务页签：左轨道 + 右表单 -->
+      <n-tab-pane name="jobs" :tab="t('editor.tabJobs')">
+        <div class="editor-jobs-pane">
+          <PipelineTrack
+            :pipeline="pipeline"
+            :selection="selection"
+            :errors="displayErrors"
+            @select="onSelect"
+            @add-stage="onAddStage"
+            @delete-stage="onDeleteStage"
+            @move-stage="onMoveStage"
+            @add-job="onAddJob"
+            @delete-job="onDeleteJob"
+            @move-job="onMoveJob"
+          />
+          <JobFormPanel :job="selectedJob" :job-path="jobPath" :errors="displayErrors" />
+        </div>
+      </n-tab-pane>
 
-    <!-- 任务页签：左轨道 + 右表单 -->
-    <div v-show="activeTab === 'jobs'" class="editor-jobs-pane">
-      <PipelineTrack
-        :pipeline="pipeline"
-        :selection="selection"
-        :errors="displayErrors"
-        @select="onSelect"
-        @add-stage="onAddStage"
-        @delete-stage="onDeleteStage"
-        @move-stage="onMoveStage"
-        @add-job="onAddJob"
-        @delete-job="onDeleteJob"
-        @move-job="onMoveJob"
-      />
-      <JobFormPanel :job="selectedJob" :job-path="jobPath" :errors="displayErrors" />
-    </div>
+      <!-- 参数页签 -->
+      <n-tab-pane name="params" :tab="t('editor.tabParams')">
+        <ParametersTab :parameters="pipeline.parameters" :errors="displayErrors" />
+      </n-tab-pane>
 
-    <!-- 参数页签 -->
-    <section v-show="activeTab === 'params'" class="editor-tab-pane">
-      <ParametersTab :parameters="pipeline.parameters" :errors="displayErrors" />
-    </section>
+      <!-- 环境变量页签 -->
+      <n-tab-pane name="env" :tab="t('editor.tabEnv')">
+        <section class="editor-tab-pane">
+          <h2>{{ t('editor.envTabTitle') }}</h2>
+          <p class="form-hint">{{ t('editor.envTabHint') }}</p>
+          <EnvListEditor
+            :env="pipeline.env"
+            name-attr="pipe-env"
+            :add-label="t('editor.envTabAdd')"
+            :remove-label="t('editor.envRemove')"
+            :empty-label="t('editor.envTabEmpty')"
+            :name-label="t('editor.envName')"
+            :value-label="t('editor.envValue')"
+            @add="addPipeEnv"
+            @remove="removePipeEnv"
+          />
+        </section>
+      </n-tab-pane>
+    </n-tabs>
 
-    <!-- 环境变量页签 -->
-    <section v-show="activeTab === 'env'" class="editor-tab-pane">
-      <h2>{{ t('editor.envTabTitle') }}</h2>
-      <p class="form-hint">{{ t('editor.envTabHint') }}</p>
-      <EnvListEditor
-        :env="pipeline.env"
-        name-attr="pipe-env"
-        :add-label="t('editor.envTabAdd')"
-        :remove-label="t('editor.envRemove')"
-        :empty-label="t('editor.envTabEmpty')"
-        :name-label="t('editor.envName')"
-        :value-label="t('editor.envValue')"
-        @add="addPipeEnv"
-        @remove="removePipeEnv"
-      />
-    </section>
+    <!-- 并发保存冲突弹窗：本次保存已覆盖他人版本，建议重新加载确认。
+         禁 mask/esc 误关（冲突信息仅此一处，误触即丢）。 -->
+    <n-modal
+      v-model:show="showConflict"
+      preset="card"
+      :title="t('editor.conflictTitle')"
+      style="width: 480px"
+      :bordered="false"
+      :mask-closable="false"
+      :close-on-esc="false"
+      role="alert"
+    >
+      <p class="editor-conflict-text">{{ conflictMessage }}</p>
+      <div class="modal-actions">
+        <n-button @click="showConflict = false">{{ t('common.cancel') }}</n-button>
+        <n-button type="primary" name="conflict-reload" :disabled="saving" @click="load">
+          {{ t('editor.reload') }}
+        </n-button>
+      </div>
+    </n-modal>
   </div>
 </template>
+
+<style scoped>
+.editor-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.editor-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.editor-header h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.editor-revision {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--sisy-color-text-secondary);
+}
+
+.editor-rev-value {
+  font-weight: 600;
+  color: var(--sisy-color-text);
+}
+
+.editor-rev-op {
+  color: var(--sisy-color-text-secondary);
+}
+
+.editor-header-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.editor-errors-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.err-path {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--sisy-color-text-secondary);
+  border: 1px solid var(--sisy-color-border);
+  border-radius: 3px;
+  padding: 0 4px;
+  margin-right: 4px;
+}
+
+/* 任务页签：左轨道 + 右表单并排。 */
+.editor-jobs-pane {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  padding-top: 12px;
+}
+
+.editor-tab-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  padding-top: 12px;
+}
+
+.editor-tab-pane h2 {
+  margin: 0;
+}
+
+.editor-conflict-text {
+  margin: 0 0 4px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+</style>

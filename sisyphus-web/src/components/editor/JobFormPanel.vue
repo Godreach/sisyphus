@@ -5,9 +5,13 @@
 //
 // 反应式约定：`job` 是父持有的响应式任务对象（`pipeline.stages[si].jobs[ji]`），
 // 就地 mutate（v-model 改属性 + 数组 push/splice）——不替换 prop 绑定本身。
-// 校验错误按 `jobPath` 前缀定位到字段（本地校验与服务端 422 同形 path）。
+// 校验错误按 `jobPath` 前缀定位到字段（本地校验与服务端 422 同形 path），
+// 经 NFormItem validation-status + feedback 插槽就地红显（输入框同步染红）。
+// #96: 迁移 Naive UI——输入改 NInput、解释器改 NSelect、开关改 NSwitch、
+// 数字改 NInputNumber、增删/重排按钮改 NButton，交互不变。
 
 import { useI18n } from 'vue-i18n'
+import { NButton, NForm, NFormItem, NInput, NInputNumber, NRadio, NRadioGroup, NSelect, NSwitch } from 'naive-ui'
 
 import type { Job, Step, Shell, CacheSpec } from '@/model/pipeline'
 import {
@@ -32,8 +36,18 @@ const { t } = useI18n()
 
 const SHELLS: Shell[] = ['sh', 'bash', 'pwsh', 'cmd']
 
+const shellOptions = [
+  { label: t('editor.stepShellDefault'), value: '' },
+  ...SHELLS.map((sh) => ({ label: sh, value: sh })),
+]
+
 function errs(prefix: string): { path: string; message: string }[] {
   return errorsForField(props.errors, prefix)
+}
+
+/** NFormItem 校验态：有错 → 'error'（输入框红边 + feedback 区红字），否则不定。 */
+function statusOf(prefix: string): 'error' | undefined {
+  return errs(prefix).length > 0 ? 'error' : undefined
 }
 
 // 执行环境 -----------------------------------------------------------------
@@ -96,20 +110,12 @@ function removeSecret(job: Job, i: number): void {
   job.secrets?.splice(i, 1)
 }
 
-// retry / timeout（空 = undefined；0 视为不设——model skip_if_zero）----------
-function retryText(job: Job): string {
-  return job.retry_count != null ? String(job.retry_count) : ''
+// retry / timeout（NInputNumber null = 不设——model skip_if_zero；负数归不设）
+function setRetry(job: Job, v: number | null): void {
+  job.retry_count = v == null || v < 0 ? undefined : Math.floor(v)
 }
-function setRetry(job: Job, v: string): void {
-  const n = Number(v)
-  job.retry_count = v === '' || !Number.isFinite(n) || n < 0 ? undefined : Math.floor(n)
-}
-function timeoutText(job: Job): string {
-  return job.timeout_minutes != null ? String(job.timeout_minutes) : ''
-}
-function setTimeoutMin(job: Job, v: string): void {
-  const n = Number(v)
-  job.timeout_minutes = v === '' || !Number.isFinite(n) || n < 0 ? undefined : Math.floor(n)
+function setTimeoutMin(job: Job, v: number | null): void {
+  job.timeout_minutes = v == null || v < 0 ? undefined : Math.floor(v)
 }
 
 // 产物上传 -----------------------------------------------------------------
@@ -137,9 +143,6 @@ function addCache(job: Job): void {
 }
 function removeCache(job: Job, i: number): void {
   job.caches?.splice(i, 1)
-}
-function cacheErrors(cacheIndex: number): { path: string; message: string }[] {
-  return errs(`${props.jobPath}.caches[${cacheIndex}]`)
 }
 function pathsText(c: CacheSpec): string {
   return linesToText(c.paths)
@@ -186,9 +189,9 @@ function shellShell(step: Step): Shell | null {
 function setShellShell(step: Step, v: Shell | null): void {
   if (step.type === 'shell') step.config.shell = v
 }
-/** select 值（'' = 默认解释器 → null）转 Shell|null。 */
-function shellFromSelect(v: string): Shell | null {
-  return v === '' ? null : (v as Shell)
+/** NSelect 值（'' = 默认解释器 → null）。 */
+function onShellSelect(step: Step, v: string | number | null): void {
+  setShellShell(step, v === '' ? null : (v as Shell))
 }
 // checkout 配置
 function checkoutSubmodules(step: Step): boolean {
@@ -197,88 +200,79 @@ function checkoutSubmodules(step: Step): boolean {
 function setCheckoutSubmodules(step: Step, v: boolean): void {
   if (step.type === 'checkout') step.config.submodules = v
 }
-function stepErrors(i: number): { path: string; message: string }[] {
-  return errs(`${props.jobPath}.steps[${i}]`)
-}
 </script>
 
 <template>
   <div v-if="!job" class="form-hint editor-select-prompt">{{ t('editor.selectPrompt') }}</div>
 
-  <form v-else class="job-form" @submit.prevent>
+  <n-form v-else class="job-form" label-placement="top" @submit.prevent>
     <!-- 名称 + 标签 -->
-    <label class="field">
-      <span>{{ t('editor.jobName') }}</span>
-      <input name="job-name" v-model="job.name" autocomplete="off" />
-    </label>
-    <label class="field">
-      <span>{{ t('editor.labels') }}</span>
-      <textarea
-        name="job-labels"
+    <n-form-item :label="t('editor.jobName')" :show-require-mark="true">
+      <n-input v-model:value="job.name" :input-props="{ name: 'job-name' }" />
+    </n-form-item>
+    <n-form-item :label="t('editor.labels')">
+      <n-input
+        type="textarea"
+        :rows="3"
         :value="labelsText(job)"
-        @input="setLabels(job, ($event.target as HTMLTextAreaElement).value)"
-        rows="3"
+        :input-props="{ name: 'job-labels' }"
         :placeholder="t('editor.labelsPlaceholder')"
-      ></textarea>
-      <p class="form-hint">{{ t('editor.labelsHint') }}</p>
-    </label>
+        @update:value="setLabels(job, $event)"
+      />
+    </n-form-item>
+    <p class="form-hint">{{ t('editor.labelsHint') }}</p>
 
     <!-- 执行环境 -->
     <fieldset class="form-fieldset">
       <legend>{{ t('editor.execEnv') }}</legend>
-      <label class="inline-field">
-        <input
-          type="radio"
-          name="job-exec-env"
-          value="host"
-          :checked="!isContainer(job)"
-          @change="setExecType(job, 'host')"
-        />
-        {{ t('editor.execHost') }}
-      </label>
-      <label class="inline-field">
-        <input
-          type="radio"
-          name="job-exec-env"
-          value="container"
-          :checked="isContainer(job)"
-          @change="setExecType(job, 'container')"
-        />
-        {{ t('editor.execContainer') }}
-      </label>
-      <label v-if="isContainer(job)" class="field">
-        <span>{{ t('editor.containerImage') }}</span>
-        <input
-          name="job-container-image"
+      <n-radio-group
+        name="job-exec-env"
+        :value="isContainer(job) ? 'container' : 'host'"
+        @update:value="setExecType(job, $event as 'host' | 'container')"
+      >
+        <n-radio value="host">{{ t('editor.execHost') }}</n-radio>
+        <n-radio value="container">{{ t('editor.execContainer') }}</n-radio>
+      </n-radio-group>
+      <n-form-item
+        v-if="isContainer(job)"
+        :label="t('editor.containerImage')"
+        :validation-status="statusOf(`${jobPath}.exec_env.image`)"
+      >
+        <n-input
           :value="containerImage(job)"
-          @input="setContainerImage(job, ($event.target as HTMLInputElement).value)"
+          :input-props="{ name: 'job-container-image' }"
           :placeholder="t('editor.containerImagePlaceholder')"
-          autocomplete="off"
+          @update:value="setContainerImage(job, $event)"
         />
-        <ul v-if="errs(`${jobPath}.exec_env.image`).length" class="field-errors" role="alert">
-          <li v-for="(e, ei) in errs(`${jobPath}.exec_env.image`)" :key="ei">
-            <code class="err-path">{{ e.path }}</code> {{ e.message }}
-          </li>
-        </ul>
-      </label>
+        <template v-if="errs(`${jobPath}.exec_env.image`).length" #feedback>
+          <ul class="field-errors" role="alert">
+            <li v-for="(e, ei) in errs(`${jobPath}.exec_env.image`)" :key="ei">
+              <code class="err-path">{{ e.path }}</code> {{ e.message }}
+            </li>
+          </ul>
+        </template>
+      </n-form-item>
     </fieldset>
 
     <!-- when -->
-    <label class="field">
-      <span>{{ t('editor.when') }}</span>
-      <input
-        name="job-when"
+    <n-form-item
+      :label="t('editor.when')"
+      :validation-status="statusOf(`${jobPath}.when`)"
+    >
+      <n-input
         :value="whenText(job)"
-        @input="setWhen(job, ($event.target as HTMLInputElement).value)"
-        autocomplete="off"
+        :input-props="{ name: 'job-when' }"
+        @update:value="setWhen(job, $event)"
       />
-      <p class="form-hint">{{ t('editor.whenHint') }}</p>
-      <ul v-if="errs(`${jobPath}.when`).length" class="field-errors" role="alert">
-        <li v-for="(e, ei) in errs(`${jobPath}.when`)" :key="ei">
-          <code class="err-path">{{ e.path }}</code> {{ e.message }}
-        </li>
-      </ul>
-    </label>
+      <template v-if="errs(`${jobPath}.when`).length" #feedback>
+        <ul class="field-errors" role="alert">
+          <li v-for="(e, ei) in errs(`${jobPath}.when`)" :key="ei">
+            <code class="err-path">{{ e.path }}</code> {{ e.message }}
+          </li>
+        </ul>
+      </template>
+    </n-form-item>
+    <p class="form-hint">{{ t('editor.whenHint') }}</p>
 
     <!-- env -->
     <fieldset class="form-fieldset">
@@ -294,6 +288,12 @@ function stepErrors(i: number): { path: string; message: string }[] {
         @add="addJobEnv(job)"
         @remove="removeJobEnv(job, $event)"
       />
+      <!-- env 键 × 机密名冲突（R7）：path 按 env 键名定位（跨行），列于清单下。 -->
+      <ul v-if="errs(`${jobPath}.env`).length" class="field-errors" role="alert">
+        <li v-for="(e, ei) in errs(`${jobPath}.env`)" :key="ei">
+          <code class="err-path">{{ e.path }}</code> {{ e.message }}
+        </li>
+      </ul>
     </fieldset>
 
     <!-- 机密引用 -->
@@ -302,47 +302,48 @@ function stepErrors(i: number): { path: string; message: string }[] {
       <p class="form-hint">{{ t('editor.secretsHint') }}</p>
       <p v-if="(job.secrets ?? []).length === 0" class="form-hint">{{ t('editor.secretsEmpty') }}</p>
       <div v-for="(s, i) in job.secrets ?? []" :key="i" class="secret-row">
-        <input
-          :name="`job-secret-${i}`"
+        <n-input
           :value="s"
-          @input="setSecret(job, i, ($event.target as HTMLInputElement).value)"
+          :input-props="{ name: `job-secret-${i}` }"
           :placeholder="t('editor.secretName')"
-          autocomplete="off"
+          @update:value="setSecret(job, i, $event)"
         />
-        <button type="button" class="btn" :name="`job-secret-${i}-remove`" @click="removeSecret(job, i)">
+        <n-button size="small" :name="`job-secret-${i}-remove`" @click="removeSecret(job, i)">
           {{ t('editor.secretRemove') }}
-        </button>
+        </n-button>
       </div>
-      <button type="button" class="btn" name="job-secret-add" @click="addSecret(job)">
+      <n-button size="small" dashed name="job-secret-add" @click="addSecret(job)">
         {{ t('editor.secretAdd') }}
-      </button>
+      </n-button>
     </fieldset>
 
     <!-- allow_failure / retry / timeout -->
     <fieldset class="form-fieldset">
-      <label class="inline-field">
-        <input type="checkbox" name="job-allow-failure" v-model="job.allow_failure" />
-        {{ t('editor.allowFailure') }}
-      </label>
-      <label class="field">
-        <span>{{ t('editor.retryCount') }}</span>
-        <input
-          type="number"
-          name="job-retry-count"
-          :value="retryText(job)"
-          @input="setRetry(job, ($event.target as HTMLInputElement).value)"
+      <div class="inline-field">
+        <n-switch v-model:value="job.allow_failure" name="job-allow-failure" />
+        <span>{{ t('editor.allowFailure') }}</span>
+      </div>
+      <n-form-item :label="t('editor.retryCount')">
+        <n-input-number
+          class="job-number-input"
+          :value="job.retry_count ?? null"
+          :input-props="{ name: 'job-retry-count' }"
+          :min="0"
+          :precision="0"
+          @update:value="setRetry(job, $event)"
         />
-        <p class="form-hint">{{ t('editor.retryHint') }}</p>
-      </label>
-      <label class="field">
-        <span>{{ t('editor.timeoutMinutes') }}</span>
-        <input
-          type="number"
-          name="job-timeout-minutes"
-          :value="timeoutText(job)"
-          @input="setTimeoutMin(job, ($event.target as HTMLInputElement).value)"
+      </n-form-item>
+      <p class="form-hint">{{ t('editor.retryHint') }}</p>
+      <n-form-item :label="t('editor.timeoutMinutes')">
+        <n-input-number
+          class="job-number-input"
+          :value="job.timeout_minutes ?? null"
+          :input-props="{ name: 'job-timeout-minutes' }"
+          :min="0"
+          :precision="0"
+          @update:value="setTimeoutMin(job, $event)"
         />
-      </label>
+      </n-form-item>
     </fieldset>
 
     <!-- 产物上传 -->
@@ -352,30 +353,30 @@ function stepErrors(i: number): { path: string; message: string }[] {
         {{ t('editor.artifactUploadsEmpty') }}
       </p>
       <div v-for="(u, i) in job.artifact_uploads ?? []" :key="i" class="kv-row">
-        <input
-          :name="`job-upload-${i}-name`"
-          v-model="u.name"
+        <n-input
+          v-model:value="u.name"
+          :input-props="{ name: `job-upload-${i}-name` }"
           :placeholder="t('editor.artifactUploadName')"
-          autocomplete="off"
+          :status="uploadErrors(i).length ? 'error' : undefined"
         />
-        <input
-          :name="`job-upload-${i}-path`"
-          v-model="u.path"
+        <n-input
+          v-model:value="u.path"
+          :input-props="{ name: `job-upload-${i}-path` }"
           :placeholder="t('editor.artifactUploadPath')"
-          autocomplete="off"
+          :status="uploadErrors(i).length ? 'error' : undefined"
         />
-        <button type="button" class="btn" :name="`job-upload-${i}-remove`" @click="removeUpload(job, i)">
+        <n-button size="small" :name="`job-upload-${i}-remove`" @click="removeUpload(job, i)">
           {{ t('editor.envRemove') }}
-        </button>
+        </n-button>
         <ul v-if="uploadErrors(i).length" class="field-errors" role="alert">
           <li v-for="(e, ei) in uploadErrors(i)" :key="ei">
             <code class="err-path">{{ e.path }}</code> {{ e.message }}
           </li>
         </ul>
       </div>
-      <button type="button" class="btn" name="job-upload-add" @click="addUpload(job)">
+      <n-button size="small" dashed name="job-upload-add" @click="addUpload(job)">
         {{ t('editor.artifactUploadAdd') }}
-      </button>
+      </n-button>
     </fieldset>
 
     <!-- 产物下载 -->
@@ -385,31 +386,28 @@ function stepErrors(i: number): { path: string; message: string }[] {
         {{ t('editor.artifactDownloadsEmpty') }}
       </p>
       <div v-for="(d, i) in job.artifact_downloads ?? []" :key="i" class="kv-row kv-row-3">
-        <input
-          :name="`job-download-${i}-job`"
-          v-model="d.job"
+        <n-input
+          v-model:value="d.job"
+          :input-props="{ name: `job-download-${i}-job` }"
           :placeholder="t('editor.artifactDownloadJob')"
-          autocomplete="off"
         />
-        <input
-          :name="`job-download-${i}-name`"
-          v-model="d.name"
+        <n-input
+          v-model:value="d.name"
+          :input-props="{ name: `job-download-${i}-name` }"
           :placeholder="t('editor.artifactDownloadName')"
-          autocomplete="off"
         />
-        <input
-          :name="`job-download-${i}-path`"
-          v-model="d.path"
+        <n-input
+          v-model:value="d.path"
+          :input-props="{ name: `job-download-${i}-path` }"
           :placeholder="t('editor.artifactDownloadPath')"
-          autocomplete="off"
         />
-        <button type="button" class="btn" :name="`job-download-${i}-remove`" @click="removeDownload(job, i)">
+        <n-button size="small" :name="`job-download-${i}-remove`" @click="removeDownload(job, i)">
           {{ t('editor.envRemove') }}
-        </button>
+        </n-button>
       </div>
-      <button type="button" class="btn" name="job-download-add" @click="addDownload(job)">
+      <n-button size="small" dashed name="job-download-add" @click="addDownload(job)">
         {{ t('editor.artifactDownloadAdd') }}
-      </button>
+      </n-button>
     </fieldset>
 
     <!-- 缓存 -->
@@ -417,41 +415,65 @@ function stepErrors(i: number): { path: string; message: string }[] {
       <legend>{{ t('editor.caches') }}</legend>
       <p v-if="(job.caches ?? []).length === 0" class="form-hint">{{ t('editor.cachesEmpty') }}</p>
       <div v-for="(c, i) in job.caches ?? []" :key="i" class="cache-card">
-        <label class="field">
-          <span>{{ t('editor.cacheKey') }}</span>
-          <input :name="`job-cache-${i}-key`" v-model="c.key" autocomplete="off" />
-          <p class="form-hint">{{ t('editor.cacheKeyHint') }}</p>
-          <ul v-if="cacheErrors(i).length" class="field-errors" role="alert">
-            <li v-for="(e, ei) in cacheErrors(i)" :key="ei">
-              <code class="err-path">{{ e.path }}</code> {{ e.message }}
-            </li>
-          </ul>
-        </label>
-        <label class="field">
-          <span>{{ t('editor.cachePaths') }}</span>
-          <textarea
-            :name="`job-cache-${i}-paths`"
+        <n-form-item
+          :label="t('editor.cacheKey')"
+          :validation-status="statusOf(`${jobPath}.caches[${i}].key`)"
+        >
+          <n-input v-model:value="c.key" :input-props="{ name: `job-cache-${i}-key` }" />
+          <template v-if="errs(`${jobPath}.caches[${i}].key`).length" #feedback>
+            <ul class="field-errors" role="alert">
+              <li v-for="(e, ei) in errs(`${jobPath}.caches[${i}].key`)" :key="ei">
+                <code class="err-path">{{ e.path }}</code> {{ e.message }}
+              </li>
+            </ul>
+          </template>
+        </n-form-item>
+        <n-form-item
+          :label="t('editor.cachePaths')"
+          :validation-status="statusOf(`${jobPath}.caches[${i}].paths`)"
+        >
+          <n-input
+            type="textarea"
+            :rows="2"
             :value="pathsText(c)"
-            @input="setPaths(c, ($event.target as HTMLTextAreaElement).value)"
-            rows="2"
-          ></textarea>
-        </label>
-        <label class="field">
-          <span>{{ t('editor.cacheFiles') }}</span>
-          <textarea
-            :name="`job-cache-${i}-files`"
+            :input-props="{ name: `job-cache-${i}-paths` }"
+            @update:value="setPaths(c, $event)"
+          />
+          <template v-if="errs(`${jobPath}.caches[${i}].paths`).length" #feedback>
+            <ul class="field-errors" role="alert">
+              <li v-for="(e, ei) in errs(`${jobPath}.caches[${i}].paths`)" :key="ei">
+                <code class="err-path">{{ e.path }}</code> {{ e.message }}
+              </li>
+            </ul>
+          </template>
+        </n-form-item>
+        <n-form-item
+          :label="t('editor.cacheFiles')"
+          :validation-status="statusOf(`${jobPath}.caches[${i}].files`)"
+        >
+          <n-input
+            type="textarea"
+            :rows="2"
             :value="filesText(c)"
-            @input="setFiles(c, ($event.target as HTMLTextAreaElement).value)"
-            rows="2"
-          ></textarea>
-        </label>
-        <button type="button" class="btn" :name="`job-cache-${i}-remove`" @click="removeCache(job, i)">
+            :input-props="{ name: `job-cache-${i}-files` }"
+            @update:value="setFiles(c, $event)"
+          />
+          <template v-if="errs(`${jobPath}.caches[${i}].files`).length" #feedback>
+            <ul class="field-errors" role="alert">
+              <li v-for="(e, ei) in errs(`${jobPath}.caches[${i}].files`)" :key="ei">
+                <code class="err-path">{{ e.path }}</code> {{ e.message }}
+              </li>
+            </ul>
+          </template>
+        </n-form-item>
+        <p class="form-hint">{{ t('editor.cacheKeyHint') }}</p>
+        <n-button size="small" :name="`job-cache-${i}-remove`" @click="removeCache(job, i)">
           {{ t('editor.envRemove') }}
-        </button>
+        </n-button>
       </div>
-      <button type="button" class="btn" name="job-cache-add" @click="addCache(job)">
+      <n-button size="small" dashed name="job-cache-add" @click="addCache(job)">
         {{ t('editor.cacheAdd') }}
-      </button>
+      </n-button>
     </fieldset>
 
     <!-- 步骤 -->
@@ -464,78 +486,261 @@ function stepErrors(i: number): { path: string; message: string }[] {
             {{ step.type === 'shell' ? t('editor.stepShell') : t('editor.stepCheckout') }}
           </span>
           <div class="step-controls">
-            <button type="button" class="btn" :name="`job-step-${i}-up`" @click="moveStep(job, i, -1)">
+            <n-button size="tiny" :name="`job-step-${i}-up`" @click="moveStep(job, i, -1)">
               ↑
-            </button>
-            <button type="button" class="btn" :name="`job-step-${i}-down`" @click="moveStep(job, i, 1)">
+            </n-button>
+            <n-button size="tiny" :name="`job-step-${i}-down`" @click="moveStep(job, i, 1)">
               ↓
-            </button>
-            <button type="button" class="btn" :name="`job-step-${i}-remove`" @click="removeStep(job, i)">
+            </n-button>
+            <n-button size="tiny" :name="`job-step-${i}-remove`" @click="removeStep(job, i)">
               {{ t('editor.stepRemove') }}
-            </button>
+            </n-button>
           </div>
         </div>
 
         <!-- shell 配置 -->
         <template v-if="step.type === 'shell'">
-          <label class="field">
-            <span>{{ t('editor.stepCommand') }}</span>
-            <textarea
-              :name="`job-step-${i}-command`"
+          <n-form-item
+            :label="t('editor.stepCommand')"
+            :validation-status="statusOf(`${jobPath}.steps[${i}].command`)"
+          >
+            <n-input
+              type="textarea"
+              :rows="2"
               :value="shellCommand(step)"
-              @input="setShellCommand(step, ($event.target as HTMLTextAreaElement).value)"
-              rows="2"
-            ></textarea>
-          </label>
-          <label class="field">
-            <span>{{ t('editor.stepShellLabel') }}</span>
-            <select
+              :input-props="{ name: `job-step-${i}-command` }"
+              @update:value="setShellCommand(step, $event)"
+            />
+            <template v-if="errs(`${jobPath}.steps[${i}].command`).length" #feedback>
+              <ul class="field-errors" role="alert">
+                <li v-for="(e, ei) in errs(`${jobPath}.steps[${i}].command`)" :key="ei">
+                  <code class="err-path">{{ e.path }}</code> {{ e.message }}
+                </li>
+              </ul>
+            </template>
+          </n-form-item>
+          <n-form-item :label="t('editor.stepShellLabel')">
+            <n-select
+              class="job-shell-select"
               :name="`job-step-${i}-shell`"
               :value="shellShell(step) ?? ''"
-              @change="setShellShell(step, shellFromSelect(($event.target as HTMLSelectElement).value))"
-            >
-              <option value="">{{ t('editor.stepShellDefault') }}</option>
-              <option v-for="sh in SHELLS" :key="sh" :value="sh">{{ sh }}</option>
-            </select>
-          </label>
+              :options="shellOptions"
+              :virtual-scroll="false"
+              @update:value="onShellSelect(step, $event)"
+            />
+          </n-form-item>
         </template>
 
         <!-- checkout 配置 -->
-        <label v-if="step.type === 'checkout'" class="inline-field">
-          <input
-            type="checkbox"
+        <div v-if="step.type === 'checkout'" class="inline-field">
+          <n-switch
+            :value="checkoutSubmodules(step)"
             :name="`job-step-${i}-submodules`"
-            :checked="checkoutSubmodules(step)"
-            @change="setCheckoutSubmodules(step, ($event.target as HTMLInputElement).checked)"
+            @update:value="setCheckoutSubmodules(step, $event)"
           />
-          {{ t('editor.stepSubmodules') }}
-        </label>
+          <span>{{ t('editor.stepSubmodules') }}</span>
+        </div>
 
         <!-- when（两型皆有） -->
-        <label class="field">
-          <span>{{ t('editor.stepWhen') }}</span>
-          <input
-            :name="`job-step-${i}-when`"
+        <n-form-item
+          :label="t('editor.stepWhen')"
+          :validation-status="statusOf(`${jobPath}.steps[${i}].when`)"
+        >
+          <n-input
             :value="stepWhen(step)"
-            @input="setStepWhen(step, ($event.target as HTMLInputElement).value)"
-            autocomplete="off"
+            :input-props="{ name: `job-step-${i}-when` }"
+            @update:value="setStepWhen(step, $event)"
           />
-        </label>
-
-        <ul v-if="stepErrors(i).length" class="field-errors" role="alert">
-          <li v-for="(e, ei) in stepErrors(i)" :key="ei">
-            <code class="err-path">{{ e.path }}</code> {{ e.message }}
-          </li>
-        </ul>
+          <template v-if="errs(`${jobPath}.steps[${i}].when`).length" #feedback>
+            <ul class="field-errors" role="alert">
+              <li v-for="(e, ei) in errs(`${jobPath}.steps[${i}].when`)" :key="ei">
+                <code class="err-path">{{ e.path }}</code> {{ e.message }}
+              </li>
+            </ul>
+          </template>
+        </n-form-item>
       </div>
       <div class="step-add-row">
-        <button type="button" class="btn" name="job-step-add-shell" @click="addShell(job)">
+        <n-button size="small" dashed name="job-step-add-shell" @click="addShell(job)">
           {{ t('editor.stepAddShell') }}
-        </button>
-        <button type="button" class="btn" name="job-step-add-checkout" @click="addCheckout(job)">
+        </n-button>
+        <n-button size="small" dashed name="job-step-add-checkout" @click="addCheckout(job)">
           {{ t('editor.stepAddCheckout') }}
-        </button>
+        </n-button>
       </div>
     </fieldset>
-  </form>
+  </n-form>
 </template>
+
+<style scoped>
+.editor-select-prompt {
+  flex: 1;
+  padding: 24px;
+  text-align: center;
+}
+
+.job-form {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  background: var(--sisy-color-surface);
+}
+
+.form-fieldset {
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  padding: 10px 12px;
+  margin: 8px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.form-fieldset legend {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sisy-color-text-secondary);
+  padding: 0 4px;
+}
+
+/* fieldset 纵排 + flex-start 下，NFormItem 显式占满宽（输入框随行拉通）。 */
+.form-fieldset :deep(.n-form-item) {
+  width: 100%;
+}
+
+.inline-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.job-number-input {
+  width: 160px;
+}
+
+/* 键值行（env / 产物上传）：名 + 值 + 移除。 */
+.kv-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 6px;
+  align-items: center;
+  width: 100%;
+}
+
+.kv-row-3 {
+  grid-template-columns: 1fr 1fr 1fr auto;
+}
+
+.kv-row .field-errors {
+  grid-column: 1 / -1;
+}
+
+.secret-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  align-items: center;
+  width: 100%;
+}
+
+.cache-card {
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+  width: 100%;
+  background: #fbfcfd;
+}
+
+/* 步骤卡 */
+.step-card {
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+  width: 100%;
+  background: #fbfcfd;
+}
+
+.step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.step-type-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--sisy-color-border);
+  background: var(--sisy-color-surface);
+  color: var(--sisy-color-text-secondary);
+}
+
+.step-type-badge.step-type-shell {
+  border-color: #7ab3e8;
+  background: #e8f3fd;
+  color: #0b5cad;
+}
+
+.step-type-badge.step-type-checkout {
+  border-color: #b7dfc2;
+  background: #e6f4ea;
+  color: #1b6b34;
+}
+
+.step-controls {
+  display: flex;
+  gap: 4px;
+}
+
+.step-add-row {
+  display: flex;
+  gap: 8px;
+}
+
+.job-shell-select {
+  width: 160px;
+}
+
+/* 内联字段错误清单（表单内就近定位）。 */
+.field-errors {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--sisy-color-danger);
+}
+
+.field-errors li {
+  line-height: 1.4;
+}
+
+.err-path {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--sisy-color-text-secondary);
+  border: 1px solid var(--sisy-color-border);
+  border-radius: 3px;
+  padding: 0 4px;
+  margin-right: 4px;
+}
+</style>
