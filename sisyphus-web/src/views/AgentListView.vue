@@ -332,6 +332,7 @@ const rowKey = (row: AgentResponse): string => row.name
       :bordered="false"
       :single-line="true"
       size="small"
+      :scroll-x="700"
       class="agents-table"
     />
 

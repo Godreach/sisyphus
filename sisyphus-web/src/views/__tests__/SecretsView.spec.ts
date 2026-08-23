@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import { NMessageProvider, NSelect } from 'naive-ui'
+import { NDataTable, NMessageProvider, NSelect } from 'naive-ui'
 import { defineComponent, h } from 'vue'
 
 import SecretsView from '@/views/SecretsView.vue'
@@ -133,6 +133,8 @@ describe('SecretsView 机密只列名 + 写覆写/删 + 切换项目', () => {
     // 机密名清单只列名（无值形态展示）。
     expect(w.text()).toContain('DEPLOY_KEY')
     expect(w.text()).toContain('TOKEN')
+    // 平板窄视口：机密表设最小表宽，容器更窄时横向滚动而非挤压列。
+    expect(w.findComponent(NDataTable).props('scrollX')).toBe(420)
     // 语义提示在位（值只写不读 + ${} 不解析）。
     expect(w.text()).toContain('值只写不读')
     expect(w.text()).toContain('${}')

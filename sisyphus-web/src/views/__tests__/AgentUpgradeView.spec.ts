@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import { NMessageProvider, NProgress, NTag } from 'naive-ui'
+import { NDataTable, NMessageProvider, NProgress, NTag } from 'naive-ui'
 import { defineComponent, h } from 'vue'
 
 import AgentUpgradeView from '@/views/AgentUpgradeView.vue'
@@ -133,6 +133,9 @@ describe('AgentUpgradeView 升级端点已交付', () => {
     // 升级包清单区 + Agent 状态区各一表。
     expect(w.text()).toContain('sisyphus-agent-1.0.0-linux-x86_64.tar.gz')
     expect(w.text()).toContain('linux-1')
+    // 平板窄视口：两表各设最小表宽（包清单 / Agent 状态），容器更窄时横向滚动。
+    const scrollXs = w.findAllComponents(NDataTable).map((table) => table.props('scrollX'))
+    expect(scrollXs).toEqual([680, 760])
     // 两个 GET 都发出。
     const urls = fetchMock.mock.calls.map((c) => String(c[0]))
     expect(urls.some((u) => u === '/api/v1/agents')).toBe(true)

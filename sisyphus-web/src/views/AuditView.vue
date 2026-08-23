@@ -242,6 +242,7 @@ function detailText(detail: AuditEntryResponse['detail']): string {
         :bordered="false"
         :single-line="true"
         size="small"
+        :scroll-x="800"
         class="audit-table"
       />
 

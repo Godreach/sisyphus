@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
+import { NDataTable } from 'naive-ui'
 
 import AgentDetailView from '@/views/AgentDetailView.vue'
 import { i18n, setLocale } from '@/i18n'
@@ -153,6 +154,8 @@ describe('AgentDetailView 详情（标签 + 槽位 + 磁盘 + 工作区/缓存�
     expect(rows[0]!.text()).toContain('97.7 KB') // total 100_000
     expect(rows[0]!.text()).toContain('39.1 KB') // free 40_000
     expect(rows[1]!.text()).toContain('D:')
+    // 平板窄视口：卷级表设最小表宽，容器更窄时横向滚动而非挤压列。
+    expect(wrapper!.findComponent(NDataTable).props('scrollX')).toBe(480)
     expect(wrapper!.text()).toContain('缓存占用')
     expect(wrapper!.text()).toContain('4.9 KB') // cache 5_000
     expect(wrapper!.text()).toContain('工作区占用')
@@ -186,6 +189,8 @@ describe('AgentDetailView 详情（标签 + 槽位 + 磁盘 + 工作区/缓存�
       expect(wrapper!.findAll('.cleanup-card .n-data-table-tbody .n-data-table-tr')).toHaveLength(1),
     )
     expect(wrapper!.findAll('.cleanup-card .n-data-table-tbody .n-data-table-tr')[0]!.text()).toContain('/ws/demo/compile')
+    // 工作区表（path 列为长路径）设最小表宽：窄视口横滚不挤压。
+    expect(wrapper!.findComponent(NDataTable).props('scrollX')).toBe(640)
     expect(
       fetchMock.mock.calls.some(
         (c) => String(c[0]) === '/api/v1/agents/demo/workspace/list' && (c[1]?.method ?? 'POST') === 'POST',
@@ -236,6 +241,8 @@ describe('AgentDetailView 详情（标签 + 槽位 + 磁盘 + 工作区/缓存�
       expect(wrapper!.findAll('.cleanup-card .n-data-table-tbody .n-data-table-tr')).toHaveLength(1),
     )
     expect(wrapper!.findAll('.cleanup-card .n-data-table-tbody .n-data-table-tr')[0]!.text()).toContain('cargo-abc')
+    // 缓存表（key 列为长键）设最小表宽：窄视口横滚不挤压（与工作区表同纪律）。
+    expect(wrapper!.findComponent(NDataTable).props('scrollX')).toBe(640)
 
     await wrapper!.get('input[name="cache-key"]').setValue('cargo-abc')
     await wrapper!.get('button[name="cache-delete"]').trigger('click')

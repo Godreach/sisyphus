@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
+import { NDataTable } from 'naive-ui'
 
 import BuildListView from '@/views/BuildListView.vue'
 import { i18n, setLocale } from '@/i18n'
@@ -108,6 +109,9 @@ describe('BuildListView（分页 + 状态过滤）', () => {
     expect(successTag?.attributes('style')).toContain('24, 160, 88')
     const runningTag = wrapper.findAll('.build-list-row .n-tag').find((x) => x.text() === '运行中')
     expect(runningTag?.attributes('style')).toContain('32, 128, 240')
+
+    // 平板窄视口：七列表格设最小表宽，容器更窄时横向滚动而非挤压列。
+    expect(wrapper.findComponent(NDataTable).props('scrollX')).toBe(840)
   })
 
   it('状态过滤：NSelect 选择 failed 后重新请求带 status 参数', async () => {

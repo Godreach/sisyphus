@@ -322,6 +322,7 @@ const recentBuildRowKey = (row: RecentBuildDto): string =>
           :bordered="false"
           :single-line="true"
           size="small"
+          :scroll-x="720"
           class="recent-builds-table"
         />
         <div v-else class="recent-builds-empty">

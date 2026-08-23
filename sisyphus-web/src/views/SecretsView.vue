@@ -289,6 +289,7 @@ watch(selectedProject, () => {
         :bordered="false"
         :single-line="true"
         size="small"
+        :scroll-x="420"
         class="secrets-table"
       />
     </template>

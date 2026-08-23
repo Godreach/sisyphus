@@ -398,6 +398,7 @@ async function deletePackage(packageName: string): Promise<void> {
           :bordered="false"
           :single-line="true"
           size="small"
+          :scroll-x="680"
           class="upgrade-packages-table"
         />
         <!-- 首载中不闪空态文案（loading 结束后才回落「暂无包」）。 -->
@@ -420,6 +421,7 @@ async function deletePackage(packageName: string): Promise<void> {
           :bordered="false"
           :single-line="true"
           size="small"
+          :scroll-x="760"
           class="upgrade-agents-table"
         />
       </n-card>

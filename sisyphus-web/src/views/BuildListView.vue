@@ -243,6 +243,7 @@ watch(
       :bordered="false"
       :single-line="true"
       size="small"
+      :scroll-x="840"
       class="build-list-table"
     />
 

@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
+import { NDataTable } from 'naive-ui'
 
 import OverviewView from '@/views/OverviewView.vue'
 import { i18n, setLocale } from '@/i18n'
@@ -171,6 +172,8 @@ describe('OverviewView 概览页（stat 卡 + 警示态 + 最近构建）', () =
     expect(wrapper.text()).toContain('#12')
     expect(wrapper.text()).toContain('成功')
     expect(wrapper.text()).toContain('手动')
+    // 平板窄视口：NDataTable 最小表宽，容器更窄时横向滚动而非挤压列。
+    expect(wrapper.findComponent(NDataTable).props('scrollX')).toBe(720)
     wrapper.unmount()
   })
 

@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import { NMessageProvider, NTag } from 'naive-ui'
+import { NDataTable, NMessageProvider, NTag } from 'naive-ui'
 import { defineComponent, h } from 'vue'
 
 import UsersView from '@/views/UsersView.vue'
@@ -150,6 +150,9 @@ describe('UsersView 用户生命周期 + PAT 一次明文', () => {
       'default', 'success',
       'default', 'error',
     ])
+
+    // 平板窄视口：用户表设最小表宽，容器更窄时横向滚动而非挤压列。
+    expect(w.findComponent(NDataTable).props('scrollX')).toBe(560)
   })
 
   it('建号：POST /users { username, password, is_admin }（建号时设全局 admin）+ 刷新', async () => {
@@ -340,6 +343,11 @@ describe('UsersView 用户生命周期 + PAT 一次明文', () => {
     )
     // 刷新后列表含新令牌名。
     await vi.waitFor(() => expect(w.text()).toContain('ci-deploy'))
+    // PAT 表同样设最小表宽（平板窄视口横向滚动，与用户表同纪律）。本用例
+    // users=[] 走空态、PAT 表为唯一 NDataTable；按 DOM 序取末表断言，避免
+    // 将来 users 非空时错位到用户表（560）。
+    const tables = w.findAllComponents(NDataTable)
+    expect(tables[tables.length - 1]!.props('scrollX')).toBe(640)
   })
 
   it('PAT 吊销：NPopconfirm 确认 → DELETE /auth/tokens/{id}（204）+ 刷新', async () => {

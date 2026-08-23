@@ -299,6 +299,7 @@ async function testCredential(): Promise<void> {
             :bordered="false"
             :single-line="true"
             size="small"
+            :scroll-x="480"
             class="member-table"
           />
 

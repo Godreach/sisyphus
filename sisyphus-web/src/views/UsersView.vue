@@ -397,6 +397,7 @@ async function revokeToken(id: number): Promise<void> {
           :bordered="false"
           :single-line="true"
           size="small"
+          :scroll-x="560"
           class="users-table"
         />
       </n-card>
@@ -434,6 +435,7 @@ async function revokeToken(id: number): Promise<void> {
           :bordered="false"
           :single-line="true"
           size="small"
+          :scroll-x="640"
           class="tokens-table"
         />
       </n-card>

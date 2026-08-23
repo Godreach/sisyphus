@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import { NMessageProvider } from 'naive-ui'
+import { NDataTable, NMessageProvider } from 'naive-ui'
 import { defineComponent, h } from 'vue'
 
 import ProjectDetailView from '@/views/ProjectDetailView.vue'
@@ -167,6 +167,8 @@ describe('ProjectDetailView 项目详情（pipeline 探测 + 成员角色）', (
     const tab = wrapper.findAll('.n-tabs-tab').find((x) => x.text().trim() === '成员')!
     await tab.trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('bob'))
+    // 平板窄视口：成员表设最小表宽，容器更窄时横向滚动而非挤压列。
+    expect(wrapper.findComponent(NDataTable).props('scrollX')).toBe(480)
 
     // 从目录下拉选新成员 carol + 角色 runner → 保存（PUT 整组替换）。
     // NSelect 下拉：点开菜单再点选项（jsdom 下需 virtual-scroll 关闭）。

@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import { NMessageProvider, NTag } from 'naive-ui'
+import { NDataTable, NMessageProvider, NTag } from 'naive-ui'
 import { defineComponent, h } from 'vue'
 
 import AgentListView from '@/views/AgentListView.vue'
@@ -143,6 +143,9 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
     const types = tags.map((tag) => tag.props('type'))
     expect(texts).toEqual(['在线', '离线', '停用', '排空', '版本不兼容'])
     expect(types).toEqual(['success', 'error', 'default', 'warning', 'default'])
+
+    // 平板窄视口：Agent 表设最小表宽，容器更窄时横向滚动而非挤压列。
+    expect(wrapper!.findComponent(NDataTable).props('scrollX')).toBe(700)
   })
 
   it('无 Agent：NEmpty 空态 + 注册引导 + 新建入口', async () => {

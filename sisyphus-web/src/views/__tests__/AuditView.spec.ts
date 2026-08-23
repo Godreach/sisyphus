@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import { NDatePicker, NMessageProvider, NSelect, NTag } from 'naive-ui'
+import { NDataTable, NDatePicker, NMessageProvider, NSelect, NTag } from 'naive-ui'
 import { defineComponent, h } from 'vue'
 
 import AuditView from '@/views/AuditView.vue'
@@ -117,6 +117,9 @@ describe('AuditView 过滤回放 + 分页 + 退化态', () => {
     await vi.waitFor(() =>
       expect(w.findAll('.n-data-table-tbody .n-data-table-tr')).toHaveLength(3),
     )
+
+    // 平板窄视口：审计表设最小表宽，容器更窄时横向滚动而非挤压列。
+    expect(w.findComponent(NDataTable).props('scrollX')).toBe(800)
 
     // 事件类型 NTag 按 auditEvent.* 翻译；行序与响应序一致（时间倒序）。
     const tags = w.findAllComponents(NTag)

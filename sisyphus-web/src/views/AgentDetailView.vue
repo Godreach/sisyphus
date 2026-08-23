@@ -300,6 +300,7 @@ const cacheRowKey = (e: CacheEntry): string => e.key
           :bordered="false"
           :single-line="true"
           size="small"
+          :scroll-x="480"
           class="agent-volume-table"
         />
         <p v-else class="form-hint">{{ t('agents.diskNotReported') }}</p>
@@ -325,6 +326,7 @@ const cacheRowKey = (e: CacheEntry): string => e.key
             :bordered="false"
             :single-line="true"
             size="small"
+            :scroll-x="640"
           />
           <p v-else-if="workspace && workspace.length === 0" class="form-hint">{{ t('agents.wsEmpty') }}</p>
           <div class="cleanup-form">
@@ -369,6 +371,7 @@ const cacheRowKey = (e: CacheEntry): string => e.key
             :bordered="false"
             :single-line="true"
             size="small"
+            :scroll-x="640"
           />
           <p v-else-if="cache && cache.length === 0" class="form-hint">{{ t('agents.cacheEmpty') }}</p>
           <div class="cleanup-form">
