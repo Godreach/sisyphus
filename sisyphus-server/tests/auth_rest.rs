@@ -249,6 +249,15 @@ async fn business_endpoints_require_auth_but_public_surface_open() {
     // 静态面走根 fallback）。
     let resp = get(&app, "/healthz").await;
     assert_eq!(resp.status(), StatusCode::OK);
+    // 静态面放行：往覆盖目录放一个 index.html 作探针（不依赖前端构建产物
+    // ——内嵌产物面由 static_web/web_handshake 在注入真实 dist 后覆盖）；
+    // 认证中间件不得拦静态资源面。
+    std::fs::create_dir_all(&app.web).unwrap();
+    std::fs::write(
+        app.web.join("index.html"),
+        "<!doctype html><p>static-ok</p>",
+    )
+    .unwrap();
     let resp = get(&app, "/").await;
     assert_eq!(
         resp.status(),

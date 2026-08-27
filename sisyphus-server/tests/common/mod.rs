@@ -144,6 +144,16 @@ pub fn cookie_of(resp: &Response) -> Option<String> {
         .map(|kv| kv.trim().to_string())
 }
 
+/// sisyphus-web/dist 是否已构建（index.html 在）。dist 不入 git（构建产物，
+/// CI 经 frontend job 的 artifact 注入）：本地只跑 Rust 不建前端时内嵌资源面
+/// 为空，依赖内嵌产物的用例据此跳过（CONTRIBUTING：Node 仅前端改动需要；
+/// CI 的 build-and-test 注入真实产物，这些用例始终以真实产物运行）。
+pub fn dist_built() -> bool {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../sisyphus-web/dist/index.html")
+        .is_file()
+}
+
 /// 进程内请求（默认直连地址、无附加头）。
 pub async fn req(app: &TestApp, method: &str, path: &str, body: Option<String>) -> Response {
     custom_req(app, method, path, body, None, &[], DEFAULT_PEER).await

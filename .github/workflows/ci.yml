@@ -8,7 +8,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # server 静态面测试（static_web/web_handshake）在 debug 下运行时读盘
+  # sisyphus-web/dist（rust-embed；ADR-0005）——dist 不入 git，须注入 frontend
+  # job 构建的真实产物（与 cross-compile-matrix / release 的注入同道）。
   build-and-test:
+    needs: frontend
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,6 +23,13 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
+
+      # 前端产物注入（rust-embed debug 运行时读盘）：server 测试需真实 dist。
+      - name: 下载前端产物（server 测试需真实 dist）
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: sisyphus-web/dist
 
       # vendored protoc：无需系统 protoc（ADR-0009）
       - name: Build workspace

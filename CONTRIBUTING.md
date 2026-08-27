@@ -30,7 +30,7 @@ cargo clippy --workspace -- -D warnings        # lint（警告即错）
 
 CI（`.github/workflows/ci.yml`）跑这些检查；本地先过一遍省一轮 CI 红灯：
 
-- `cargo test --workspace` —— Rust 全量测试
+- `cargo test --workspace` —— Rust 全量测试。依赖前端构建产物的内嵌面用例（`static_web` / `web_handshake`）在 `sisyphus-web/dist` 未构建时跳过并在输出留痕（Node 仅前端改动需要）；CI 的 build-and-test 经 frontend job 产物注入真实 dist，这些用例始终真跑——本地要跑全量先在 `sisyphus-web/` 执行 `npm run build`
 - `cargo clippy --workspace -- -D warnings` —— lint
 - `cargo run -p sisyphus-codegen -- check` —— 生成产物未漂移（model 改后未 gen 或被手改即红；需重生成跑 `cargo run -p sisyphus-codegen`）
 - 改前端时在 `sisyphus-web/` 跑 `npm ci && npm run check`（= typecheck + vitest + i18n 对账），再 `npm run build` 与 `npm run smoke`（headless 12 页冒烟）

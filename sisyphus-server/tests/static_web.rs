@@ -13,6 +13,21 @@ mod common;
 
 use common::test_app;
 
+/// 内嵌产物面是否可测（sisyphus-web/dist 已构建）。dist 不入 git：本地
+/// 只跑 Rust 时内嵌面为空，内嵌用例跳过并在输出留痕；CI 的 build-and-test
+/// 经 frontend job 的 artifact 注入真实 dist，内嵌用例始终真跑（见
+/// `common::dist_built`）。
+fn skip_unless_dist_built() -> bool {
+    if common::dist_built() {
+        return false;
+    }
+    eprintln!(
+        "跳过：sisyphus-web/dist 未构建（sisyphus-web/ 下 npm run build）；\
+         CI 注入真实产物运行本用例"
+    );
+    true
+}
+
 /// 内嵌构建产物 index.html 的可断言标记（sisyphus-web/dist/index.html）。
 /// 从占位页换成真实前端构建后（票 B4-T1），用 Vue 挂载点 `<div id="app">`
 /// 作稳定标记：Vite 产物里的资源 URL 带内容哈希（每次构建变化），
@@ -56,6 +71,9 @@ fn assert_content_type(resp: &Response, prefix: &str) {
 /// AC1：非 `/api` 未命中路径与根路径都返回内嵌 index.html。
 #[tokio::test]
 async fn non_api_miss_returns_embedded_index_html() {
+    if skip_unless_dist_built() {
+        return;
+    }
     let app = test_app().await;
 
     for path in ["/", "/some-frontend-path", "/deep/nested/route"] {
@@ -161,6 +179,15 @@ async fn healthz_and_swagger_unaffected_by_static_layer() {
 async fn path_traversal_cannot_escape_override_dir() {
     let app = test_app().await;
 
+    // SPA 入口探针：覆盖目录放 index.html（不依赖前端构建产物）——穿越形态
+    // 应落回 SPA 入口页（此处置为覆盖版），而非错误页/目录外文件。
+    std::fs::create_dir_all(&app.web).unwrap();
+    std::fs::write(
+        app.web.join("index.html"),
+        "<!doctype html><p>traversal-fallback-home</p>",
+    )
+    .unwrap();
+
     // 覆盖目录同级的诱饵文件（web/ 之外、数据目录之内）。
     let data_dir = app.web.parent().expect("web 收在数据目录内").to_path_buf();
     std::fs::write(data_dir.join("secret.txt"), "outside-secret").unwrap();
@@ -192,5 +219,5 @@ async fn path_traversal_cannot_escape_override_dir() {
     let resp = get(&app, "/../secret.txt").await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_content_type(&resp, "text/html");
-    assert!(body_text(resp).await.contains(EMBEDDED_MARKER));
+    assert!(body_text(resp).await.contains("traversal-fallback-home"));
 }

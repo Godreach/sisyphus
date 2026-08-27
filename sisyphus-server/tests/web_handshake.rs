@@ -30,6 +30,21 @@ mod common;
 
 use common::{TestApp, body_json, req_with_cookie, test_app};
 
+/// 本用例验证「真实前端构建产物 × server 组合根」的握手链，必须有已构建的
+/// dist（sisyphus-web/dist，不入 git）：本地未建前端时跳过并留痕，CI 的
+/// build-and-test 经 frontend job 的 artifact 注入真实产物始终真跑（见
+/// `common::dist_built`）。
+fn skip_unless_dist_built() -> bool {
+    if common::dist_built() {
+        return false;
+    }
+    eprintln!(
+        "跳过：sisyphus-web/dist 未构建（sisyphus-web/ 下 npm run build）；\
+         CI 注入真实产物运行本用例"
+    );
+    true
+}
+
 /// 内嵌构建产物 index.html 的可断言标记（与 `static_web.rs` 同源）：Vite 产物
 /// 资源 URL 带内容哈希（每次构建变化），`<div id="app">` 是构建模板固定结构。
 const APP_MOUNT_MARKER: &str = "id=\"app\"";
@@ -87,6 +102,9 @@ fn extract_main_bundle_src(index_html: &str) -> String {
 /// AC1+2+3：构建产物随 server 嵌入伺服——入口页、主包可达、深链 SPA fallback。
 #[tokio::test]
 async fn built_dist_serves_via_combo_root() {
+    if skip_unless_dist_built() {
+        return;
+    }
     let app = test_app().await;
 
     // 1. 根路径回内嵌入口页（Vue 挂载点在）。
