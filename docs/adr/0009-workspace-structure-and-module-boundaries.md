@@ -26,7 +26,7 @@
 
 - **模块不预升 crate**：自有代码量摊不满，pub 仪式与环依赖（engine↔sched 共享状态）是实代价。哪一模块长出第二个消费者（如 scm 被 agent 复用）再升。
 - **事件总线只做热通知**：SSE 收到通知后按 Last-Event-ID/offset 从 DB 读增量（ADR-0005 重放兜底），broadcast 丢消息无害；事件类型是进程管线 enum，不进 model。
-- **迁移 SQL** 放 `sisyphus-server/src/store/migrations/`，`sqlx::migrate!` 编译期嵌入（单二进制自带迁移）；**`.sqlx` 离线校验文件进 git**（CI 免 DATABASE_URL 直接构建）。
+- **迁移 SQL** 放 `sisyphus-server/src/store/migrations/`，`sqlx::migrate!` 编译期嵌入（单二进制自带迁移）；store 层查询全部走运行时 `sqlx::query()`（参数绑定防注入），不用 `query!` 编译期宏——无 `DATABASE_URL`/`.sqlx` 离线缓存依赖，CI 免数据库直接构建。
 
 ### Agent 模块（crate 内模块）
 
