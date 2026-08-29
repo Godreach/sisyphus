@@ -213,8 +213,15 @@ fn bare_repo() -> (tempfile::TempDir, PathBuf, String) {
 // 进程内组合根 harness
 // ---------------------------------------------------------------------------
 
+/// 进程级串行锁：metrics recorder 全进程唯一，gauge 是 last-writer-wins——
+/// 多套测试 server 并发跑时各自 periodic_pass 的 report_snapshot 会互相覆盖
+/// gauge，b5 对 agents_online 的断言因此非确定（CI 上红过一次）。六个用例
+/// 统一在 harness() 拿锁、随 Harness drop 释放，全程串行。
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// 真实 store + REST router + 真实调度循环 + 真实 tonic gRPC + 触发引擎（poll）。
 struct Harness {
+    _serial: tokio::sync::MutexGuard<'static, ()>,
     _dir: tempfile::TempDir,
     app: TestApp,
     _sched: tokio::task::JoinHandle<()>,
@@ -226,7 +233,18 @@ struct Harness {
     probe: Arc<FakeProbe>,
 }
 
+/// 用例收尾必须杀掉调度/gRPC 任务：JoinHandle drop 是 detach，僵尸调度循环
+/// 会永久继续 periodic_pass → report_snapshot 覆盖进程级 gauge（正是 CI 红灯
+/// 的竞争源）。abort 幂等——部分用例里显式 abort 的调用不受影响。
+impl Drop for Harness {
+    fn drop(&mut self) {
+        self._sched.abort();
+        self.grpc_handle.abort();
+    }
+}
+
 async fn harness() -> Harness {
+    let _serial = SERIAL.lock().await;
     let dir = tempfile::tempdir().expect("临时数据目录");
     let pool = store::bootstrap(dir.path()).await.expect("bootstrap");
     let master_key = sisyphus_server::secrets::ensure_master_key(
@@ -287,6 +305,7 @@ async fn harness() -> Harness {
     ));
 
     Harness {
+        _serial,
         _dir: dir,
         app,
         _sched: sched_task,
