@@ -20,4 +20,4 @@ Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agent
 
 ### Commit messages
 
-Commit subjects follow Conventional Commits (`<type>[(<scope>)][!]: <Chinese subject>`). A local `commit-msg` hook (`.githooks/`, enable with `git config core.hooksPath .githooks`) and a CI job enforce the prefix. See `docs/agents/commit-messages.md`.
+Commit subjects follow Conventional Commits (`<type>[(<scope>)][!]: <Chinese subject>`). This is a convention only — no local hook or CI job enforces it. See `docs/agents/commit-messages.md`.

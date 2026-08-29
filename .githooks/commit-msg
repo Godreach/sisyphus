@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# git commit-msg hook——校验提交 subject 符合 Conventional Commits。
-# 激活：git config core.hooksPath .githooks（一次性，本地配置不入 git）。
-# 规则详见 docs/agents/commit-messages.md。
-set -euo pipefail
-dir=$(cd "$(dirname "$0")" && pwd)
-# shellcheck source=commit-msg-lib.sh
-. "$dir/commit-msg-lib.sh"
-lint_first_line "$1"

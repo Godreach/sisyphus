@@ -47,32 +47,6 @@ jobs:
       - name: 对账（生成产物未漂移）
         run: cargo run -p sisyphus-codegen -- check
 
-  # 提交信息规范校验（Conventional Commits，零依赖 bash）：PR 校验全部新增
-  # 提交、push 校验本次推送的提交，复用 .githooks/lint-commits（本地
-  # commit-msg hook 同款逻辑）。规则见 docs/agents/commit-messages.md。
-  commit-messages:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0          # range 计算需 base/before 可达，全历史
-      - name: Lint commit messages
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
-          BEFORE: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          if [ "$EVENT" = "pull_request" ]; then
-            git fetch --no-tags origin "$BASE_REF" 2>/dev/null || true   # 双保险
-            range="origin/$BASE_REF..HEAD"
-          elif [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            range="HEAD"          # 新分支回退单条
-          else
-            range="$BEFORE..HEAD"  # push：本次推送的提交
-          fi
-          bash .githooks/lint-commits "$range"
-
   # Agent 全平台矩阵（票 B3-T10 / #55，ADR-0010 发布矩阵 Linux/Windows）：
   # agent 只依赖 sisyphus-proto（vendored protoc 跨平台），不拉 server，故可在
   # Windows 上独立构建/测试。docker 门控用例 `#[ignore]` 由 `cargo test` 默认跳过

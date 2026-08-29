@@ -169,13 +169,7 @@ fix(web): headless 冒烟钉中文 locale——修 CI en-US 红灯
 docs: 补五 crate README——proto/model/codegen/server/agent 各一份 crate 根文档
 ```
 
-本地 commit-msg hook 与 CI 会拦下缺 `type:` 前缀的 subject（如 `产物链路：…`）。启用本地 hook（一次性，本地配置不入 git）：
-
-```bash
-git config core.hooksPath .githooks
-```
-
-完整规则与正例反例见 [docs/agents/commit-messages.md](docs/agents/commit-messages.md)。
+约定无自动强制（本地无钩子、CI 无校验），提交前请自查 subject 前缀。完整规则与正例反例见 [docs/agents/commit-messages.md](docs/agents/commit-messages.md)。
 
 ### 数据库迁移工作流
 

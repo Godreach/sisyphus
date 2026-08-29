@@ -46,11 +46,7 @@ feat: 产物链路——存储/端点/Agent 传输/前端产物区（票 #74）
 fix(web): headless 冒烟钉中文 locale——修 CI en-US 红灯
 ```
 
-本地 commit-msg hook 与 CI 会拦下缺 `type:` 前缀的 subject。启用本地 hook（一次性，本地配置不入 git）：
-
-```bash
-git config core.hooksPath .githooks
-```
+约定无自动强制（本地无钩子、CI 无校验），提交前请自查 subject 前缀。
 
 完整规则、正例反例、正则见 [docs/agents/commit-messages.md](docs/agents/commit-messages.md)。
 
