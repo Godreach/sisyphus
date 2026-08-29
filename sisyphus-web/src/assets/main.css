@@ -627,12 +627,16 @@ body.sidebar-resizing {
   margin: 4px 0 0;
 }
 
-/* 登录页。 */
+/* 登录页（全屏无侧栏形态，居中卡片——spec #100 story 21）。 */
 .login-page {
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 70vh;
+}
+
+.login-card {
+  width: min(420px, 100%);
 }
 
 .login-tagline {
