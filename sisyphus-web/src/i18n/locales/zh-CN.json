@@ -4,7 +4,8 @@
     "langSwitch": "EN",
     "openMenu": "打开菜单",
     "langLabel": "语言",
-    "sidebarResize": "调整侧栏宽度（左右方向键微调，双击复位）"
+    "sidebarResize": "调整侧栏宽度（左右方向键微调，双击复位）",
+    "darkMode": "深色模式"
   },
   "common": {
     "confirm": "确认",

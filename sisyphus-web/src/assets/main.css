@@ -334,8 +334,6 @@ body.sidebar-resizing {
 
 .app-footer {
   padding: 12px 24px;
-  border-top: 1px solid var(--sisy-color-border);
-  background: var(--sisy-color-surface);
   display: flex;
   justify-content: flex-end;
   align-items: center;

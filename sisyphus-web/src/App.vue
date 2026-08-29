@@ -22,6 +22,8 @@ import {
   DocumentText,
   CloudUpload,
   People,
+  MoonOutline,
+  SunnyOutline,
 } from '@vicons/ionicons5'
 
 import { currentLocale, setLocale } from '@/i18n'
@@ -33,7 +35,7 @@ const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
-const { theme, themeOverrides } = useDarkMode()
+const { theme, themeOverrides, isDark, setTheme } = useDarkMode()
 const { isNarrow } = useBreakpoint()
 
 const locale = computed(() => currentLocale())
@@ -276,6 +278,22 @@ function toggleLocale(): void {
             <RouterView />
           </main>
           <footer class="app-footer">
+            <!-- 主题切换（浅/深，显式覆盖 localStorage；null 跟随系统的语义
+                 由开关二值化：切过即落覆盖）。 -->
+            <n-switch
+              :value="isDark"
+              size="small"
+              :aria-label="t('app.darkMode')"
+              data-testid="theme-toggle"
+              @update:value="(v: boolean) => setTheme(v ? 'dark' : 'light')"
+            >
+              <template #checked>
+                <n-icon :component="MoonOutline" />
+              </template>
+              <template #unchecked>
+                <n-icon :component="SunnyOutline" />
+              </template>
+            </n-switch>
             <n-switch :value="isZh" @update:value="toggleLocale">
               <template #checked>中</template>
               <template #unchecked>EN</template>
