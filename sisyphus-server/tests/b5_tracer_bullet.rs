@@ -1211,10 +1211,14 @@ async fn b5_full_chain_trigger_to_metrics() {
             >= 2,
         "本次两次成功构建应计入终态计数：\n{text}"
     );
-    assert!(
-        metric_value(&text, "sisyphus_agents_online").unwrap_or(0) >= 1,
-        "至少一台 Agent 在线（gauge 为进程级当前值）：\n{text}"
-    );
+    // gauge 由调度循环每秒 periodic_pass 灌入（touch/gauge 都在 pass 尾部）：
+    // CI 慢盘上单轮 pass 可拖过 1s、后续 tick 被 Skip，Agent 注册前的首 tick
+    // 写下的 0 会短暂残留——故重试抓取，等 b5 自己的 server 灌入在线值。
+    wait_until(|| async {
+        let text = metrics_get(&h.app, &pat).await;
+        metric_value(&text, "sisyphus_agents_online").unwrap_or(0) >= 1
+    })
+    .await;
 
     // 16. 概览页全卡真值无退化（票 #81 AC）。
     // 先坐实两台 Agent 都在线（升级重连后 upgrader-1 须已注册在线），再断言
