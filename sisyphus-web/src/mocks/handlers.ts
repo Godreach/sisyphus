@@ -75,9 +75,16 @@ export function createHandlers(options: MockHandlerOptions) {
     login: http.post('/api/v1/auth/login', async ({ request }) => {
       await delay(300)
       const body = (await request.json()) as { username?: string; password?: string }
-      const user = db.USERS.find((u) => u.username === body.username && u.password === body.password)
-      if (user == null) {
+      // 演示便利：任意非空账号密码均可登录（仍是真实 POST 往返；空凭据
+      // 走 401 失败路径）。固定演示账号见 db.USERS（admin 为管理员）。
+      const username = body.username?.trim() ?? ''
+      if (username === '' || !body.password) {
         return jsonError(401, 'INVALID_CREDENTIALS', '用户名或密码错误')
+      }
+      const user = db.USERS.find((u) => u.username === username) ?? {
+        username,
+        password: '',
+        is_admin: username === 'admin',
       }
       sessions.add(user.username)
       return HttpResponse.json(

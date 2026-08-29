@@ -38,12 +38,14 @@ rust-embed 内嵌该目录产物对外提供静态服务与 SPA fallback（relea
 ## 脚本
 
 - `npm run dev`：Vite dev server（`/api` 代理到本机 server 默认 8080 端口，
-  开发期前后端同源，cookie 会话与 CSRF 语义一致）。`VITE_ENABLE_MOCK=1`
-  时改为挂载 MSW worker + SSE 日志流替身，全应用在 mock 数据上可用
-  （登录账号 `admin/admin123`，见 `src/mocks/`）；关闭开关（缺省）走
-  proxy 连真后端，行为与现状一致。handler/fixture 代码经动态 import +
-  `import.meta.env.DEV` 守卫不进生产产物；`public/mockServiceWorker.js`
-  会被原样复制进 `dist/`，但生产无 `setupWorker` 注册，纯惰性文件无行为。
+  开发期前后端同源，cookie 会话与 CSRF 语义一致）。
+- `npm run demo`：演示模式（ADR-0024，票 #101）——经 `.env.demo` 打开
+  `VITE_ENABLE_MOCK`，挂载 MSW worker + SSE 日志流替身，全应用在 mock
+  数据上可用且无需本机后端（登录页任意非空账号密码即可进入；空凭据可
+  演示登录失败路径）。关闭开关的 `npm run dev` 走 proxy 连真后端，行为
+  与现状一致。handler/fixture 代码经动态 import + `import.meta.env.DEV`
+  守卫不进生产产物；`public/mockServiceWorker.js` 会被原样复制进 `dist/`，
+  但生产无 `setupWorker` 注册，纯惰性文件无行为。
 - `npm run build`：vue-tsc 类型 + vite 构建，产物进 `dist/`。
 - `npm run preview`：预览构建产物。
 - `npm run typecheck` / `npm test` / `npm run i18n:check`：CI 三件套
