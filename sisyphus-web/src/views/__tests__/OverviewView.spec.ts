@@ -1,6 +1,8 @@
 // 工作台行为测试（原型页一重构，spec #99；数据面仍是 ADR-0019 概览快照）。
-// 只测外部行为（用户可见状态、DOM 事件、网络请求形态断言），API 层以
-// fetch mock 驱动。视图在 onMounted 即发请求：mount 须在设置 fetch mock 之后。
+// 数据驱动：MSW node 模式（ADR-0024 单一缝，票 #101）——组件经真实 http
+// client 打 src/mocks handlers，per-test 用 server.use 覆盖概览端点响应。
+// 只测外部行为（用户可见状态、DOM 事件、网络请求形态断言）。视图在
+// onMounted 即发请求：mount 须在 handler 覆盖之后。
 // - 指标卡：在途任务（槽位占用）/ 构建（终态合计 + 成功/失败副标）/
 //   队列深度（首要原因副标）/ 在线构建机（可用率）
 // - 最近构建行：pipeline #号 + 项目副行、状态徽章、触发、耗时、相对时间；
@@ -9,21 +11,17 @@
 // - 右栏 最近流水线：去重前 3；名称 → 构建列表；运行按钮 → POST trigger
 // - 快照失败：loadError 报错 + 重试按钮；首载骨架屏
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { NMessageProvider } from 'naive-ui'
 import { defineComponent, h } from 'vue'
+import { http, HttpResponse } from 'msw'
 
 import OverviewView from '@/views/OverviewView.vue'
 import { i18n, setLocale } from '@/i18n'
-
-/** 构造 mock JSON 响应（jsdom 无 fetch，需自造 Response 壳）。 */
-function jsonResponse(status: number, body: unknown): Response {
-  const headers = new Headers({ 'Content-Type': 'application/json' })
-  return new Response(JSON.stringify(body), { status, headers })
-}
+import { server } from '@/mocks/node'
 
 /** 一个概览快照响应（最小可被统计消费的形态，全零）。 */
 function emptySnapshot(): Record<string, unknown> {
@@ -42,6 +40,13 @@ function emptySnapshot(): Record<string, unknown> {
   }
 }
 
+/** 覆盖概览端点响应（一次性；未覆盖时回落 mocks 全量 fixture）。 */
+function mockOverview(body: Record<string, unknown>, status = 200): void {
+  server.use(
+    http.get('/api/v1/overview', () => HttpResponse.json(body, { status })),
+  )
+}
+
 /** 包装组件：NMessageProvider + OverviewView（useMessage 注入可用）。 */
 const Host = defineComponent({
   name: 'OverviewHost',
@@ -55,7 +60,8 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
   let router: Router
   let wrapper: VueWrapper | null = null
 
-  const fetchMock = vi.fn()
+  /** 经 MSW 观测到的请求（method + path，网络请求形态断言面）。 */
+  let requests: string[]
 
   function mountView(): VueWrapper {
     wrapper = mount(Host, {
@@ -63,6 +69,10 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     })
     return wrapper
   }
+
+  beforeAll(() => {
+    server.listen({ onUnhandledRequest: 'error' })
+  })
 
   beforeEach(async () => {
     setLocale('zh-CN')
@@ -87,27 +97,34 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     })
     await router.push('/')
     await router.isReady()
-    globalThis.fetch = fetchMock
+    requests = []
+    server.events.on('request:start', ({ request }) => {
+      requests.push(`${request.method} ${new URL(request.url).pathname}`)
+    })
   })
 
   afterEach(() => {
     wrapper?.unmount()
     wrapper = null
     vi.restoreAllMocks()
+    server.resetHandlers()
+    server.events.removeAllListeners()
+  })
+
+  afterAll(() => {
+    server.close()
   })
 
   it('指标卡四张同排：在途任务/构建/队列深度/Agent 健康（GET /overview 单一来源）', async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, {
-        ...emptySnapshot(),
-        agents_online: 1,
-        agents_total: 2,
-        slots_used: 1,
-        slots_total: 2,
-        queue_depth: 0,
-        builds_terminal: { succeeded: 5, failed: 1, cancelled: 2, timeout: 0 },
-      }),
-    )
+    mockOverview({
+      ...emptySnapshot(),
+      agents_online: 1,
+      agents_total: 2,
+      slots_used: 1,
+      slots_total: 2,
+      queue_depth: 0,
+      builds_terminal: { succeeded: 5, failed: 1, cancelled: 2, timeout: 0 },
+    })
 
     const w = mountView()
     await vi.waitFor(() => expect(w.text()).toContain('在途任务'))
@@ -125,22 +142,19 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     expect(w.text()).toContain('/ 2台')
     expect(w.findAll('.health-badges .badge').map((b) => b.text())).toEqual(['全部正常'])
 
-    // 请求形态：GET /api/v1/overview（唯一数据源）。
-    const calls = fetchMock.mock.calls.map((c) => (c as [string, RequestInit])[0])
-    expect(calls).toEqual(['/api/v1/overview'])
+    // 请求形态：GET /api/v1/overview（唯一数据源，经真实 http client 打 MSW）。
+    await vi.waitFor(() => expect(requests).toEqual(['GET /api/v1/overview']))
   })
 
   it('队列深度副标：有排队给首要原因（queue_reasons[0]）', async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, {
-        ...emptySnapshot(),
-        queue_depth: 2,
-        queue_reasons: [
-          { reason: 'no_online_agent', depth: 1 },
-          { reason: 'missing_labels', depth: 1 },
-        ],
-      }),
-    )
+    mockOverview({
+      ...emptySnapshot(),
+      queue_depth: 2,
+      queue_reasons: [
+        { reason: 'no_online_agent', depth: 1 },
+        { reason: 'missing_labels', depth: 1 },
+      ],
+    })
 
     const w = mountView()
     await vi.waitFor(() => expect(w.text()).toContain('队列深度'))
@@ -148,22 +162,20 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
   })
 
   it('最近构建行：pipeline #号/项目/状态徽章/触发/耗时/相对时间；点击行 → 构建详情', async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, {
-        ...emptySnapshot(),
-        recent_builds: [
-          {
-            project: 'demo',
-            pipeline: 'release',
-            number: 12,
-            status: 'succeeded',
-            trigger: 'manual',
-            started_at: 1_700_000_000_000,
-            finished_at: 1_700_000_060_000,
-          },
-        ],
-      }),
-    )
+    mockOverview({
+      ...emptySnapshot(),
+      recent_builds: [
+        {
+          project: 'demo',
+          pipeline: 'release',
+          number: 12,
+          status: 'succeeded',
+          trigger: 'manual',
+          started_at: 1_700_000_000_000,
+          finished_at: 1_700_000_060_000,
+        },
+      ],
+    })
 
     const w = mountView()
     await vi.waitFor(() => expect(w.find('.run-row').exists()).toBe(true))
@@ -185,18 +197,16 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
   })
 
   it('Agent 健康卡（与指标同行）：在线比 + 事实警示徽章（异常/正常）', async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, {
-        ...emptySnapshot(),
-        agents_online: 1,
-        agents_total: 1,
-        alerts: {
-          has_no_match: true,
-          has_offline_agent: true,
-          has_draining_incompatible: false,
-        },
-      }),
-    )
+    mockOverview({
+      ...emptySnapshot(),
+      agents_online: 1,
+      agents_total: 1,
+      alerts: {
+        has_no_match: true,
+        has_offline_agent: true,
+        has_draining_incompatible: false,
+      },
+    })
 
     const w = mountView()
     // 健康卡在线 1/1 台（全部在线 → 数值转绿类）。
@@ -212,7 +222,7 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
   })
 
   it('零 Agent：健康卡给「尚未注册构建机」行（不再用 NAlert info）', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, emptySnapshot()))
+    mockOverview(emptySnapshot())
 
     const w = mountView()
     await vi.waitFor(() => expect(w.text()).toContain('尚未注册构建机'))
@@ -220,44 +230,43 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
   })
 
   it('最近流水线卡：去重取前 3；名称 → 构建列表；运行按钮 → POST trigger', async () => {
-    fetchMock
-      .mockResolvedValueOnce(
-        jsonResponse(200, {
-          ...emptySnapshot(),
-          recent_builds: [
-            {
-              project: 'demo',
-              pipeline: 'release',
-              number: 12,
-              status: 'succeeded',
-              trigger: 'manual',
-              started_at: 1_700_000_000_000,
-              finished_at: 1_700_000_060_000,
-            },
-            {
-              project: 'demo',
-              pipeline: 'release',
-              number: 11,
-              status: 'succeeded',
-              trigger: 'manual',
-              started_at: 1_699_000_000_000,
-              finished_at: 1_699_000_060_000,
-            },
-            {
-              project: 'demo',
-              pipeline: 'nightly',
-              number: 3,
-              status: 'failed',
-              trigger: 'cron',
-              started_at: 1_700_000_000_000,
-              finished_at: 1_700_000_060_000,
-            },
-          ],
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse(202, { number: 13, build_id: 1, attempt: 1, status: 'queued' }),
-      )
+    mockOverview({
+      ...emptySnapshot(),
+      recent_builds: [
+        {
+          project: 'demo',
+          pipeline: 'release',
+          number: 12,
+          status: 'succeeded',
+          trigger: 'manual',
+          started_at: 1_700_000_000_000,
+          finished_at: 1_700_000_060_000,
+        },
+        {
+          project: 'demo',
+          pipeline: 'release',
+          number: 11,
+          status: 'succeeded',
+          trigger: 'manual',
+          started_at: 1_699_000_000_000,
+          finished_at: 1_699_000_060_000,
+        },
+        {
+          project: 'demo',
+          pipeline: 'nightly',
+          number: 3,
+          status: 'failed',
+          trigger: 'cron',
+          started_at: 1_700_000_000_000,
+          finished_at: 1_700_000_060_000,
+        },
+      ],
+    })
+    server.use(
+      http.post('/api/v1/projects/demo/pipelines/release/builds', () =>
+        HttpResponse.json({ number: 13, build_id: 1, attempt: 1, status: 'queued' }, { status: 202 }),
+      ),
+    )
 
     const w = mountView()
     await vi.waitFor(() => expect(w.findAll('.fav-row')).toHaveLength(2))
@@ -277,18 +286,25 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     // 运行按钮 → POST /api/v1/projects/demo/pipelines/release/builds（空参数体）。
     await w.findAll('.fav-row')[0]!.find('.btn-outline').trigger('click')
     await vi.waitFor(() => {
-      const post = fetchMock.mock.calls.find(
-        (c) => (c[1] as RequestInit | undefined)?.method === 'POST',
-      ) as [string, RequestInit]
-      expect(post[0]).toBe('/api/v1/projects/demo/pipelines/release/builds')
-      expect(JSON.parse(post[1].body as string)).toEqual({})
+      expect(requests).toContain('POST /api/v1/projects/demo/pipelines/release/builds')
     })
   })
 
   it('快照失败：整页报错 + 重试；重试成功后恢复', async () => {
-    fetchMock
-      .mockResolvedValueOnce(jsonResponse(500, { code: 'INTERNAL', message: '服务内部错误' }))
-      .mockResolvedValueOnce(jsonResponse(200, emptySnapshot()))
+    // server.use 的 handler 持续生效（非一次性）：首请求 500，之后恢复 200。
+    let overviewCalls = 0
+    server.use(
+      http.get('/api/v1/overview', () => {
+        overviewCalls += 1
+        if (overviewCalls === 1) {
+          return HttpResponse.json(
+            { code: 'INTERNAL', message: '服务内部错误', detail: null },
+            { status: 500 },
+          )
+        }
+        return HttpResponse.json(emptySnapshot())
+      }),
+    )
 
     const w = mountView()
     await vi.waitFor(() => expect(w.find('[data-testid="overview-error"]').exists()).toBe(true))
@@ -299,7 +315,9 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
   })
 
   it('首载骨架屏（数据未到时无内容、无错误）', async () => {
-    fetchMock.mockImplementation(() => new Promise(() => {}))
+    server.use(
+      http.get('/api/v1/overview', () => new Promise<Response>(() => {})),
+    )
 
     const w = mountView()
     await vi.waitFor(() => expect(w.find('[data-testid="overview-skeleton"]').exists()).toBe(true))
@@ -307,7 +325,7 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
   })
 
   it('「查看全部」链接指向流水线页', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, emptySnapshot()))
+    mockOverview(emptySnapshot())
 
     const w = mountView()
     await vi.waitFor(() => expect(w.text()).toContain('查看全部'))

@@ -31,6 +31,7 @@
     "@vitejs/plugin-vue": "^5.2.1",
     "@vue/test-utils": "^2.4.6",
     "jsdom": "^25.0.1",
+    "msw": "^2.15.0",
     "playwright": "^1.62.1",
     "typescript": "~5.7.2",
     "unplugin-auto-import": "^21.1.0",
@@ -38,5 +39,10 @@
     "vite": "^6.0.5",
     "vitest": "^3.2.7",
     "vue-tsc": "^2.2.0"
+  },
+  "msw": {
+    "workerDirectory": [
+      "public"
+    ]
   }
 }

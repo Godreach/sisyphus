@@ -23,6 +23,12 @@ rust-embed 内嵌该目录产物对外提供静态服务与 SPA fallback（relea
 - `src/components/`：页面组件（侧栏、轨道、表单、日志流等，页面票落地）。
 - `src/router/`：路由表（ADR-0020 12 页 IA）+ 守卫（会话恢复 `/auth/me`
   锚点、未认证重定向登录 + 回跳、`/setup` 引导位）。
+- `src/mocks/`：MSW 契约 mock 底座（ADR-0024，票 #101）——`db.ts`（确定性
+  fixture：真实规模项目/流水线/构建/Agent + 空态/错误态钩子）、`engine.ts`
+  （动态构建生命周期：触发/重跑排队 → 运行 → 步骤/输出推送 → 终态）、
+  `handlers.ts`（核心链路 REST handlers，dev worker 与 vitest node 共用）、
+  `eventSource.ts`（SSE 日志流替身——MSW 拦不到 EventSource）。后端每就绪
+  一个端点即删除对应 handler，mock 层随后端进度收敛为零。
 
 ## 依赖纪律
 
@@ -32,7 +38,12 @@ rust-embed 内嵌该目录产物对外提供静态服务与 SPA fallback（relea
 ## 脚本
 
 - `npm run dev`：Vite dev server（`/api` 代理到本机 server 默认 8080 端口，
-  开发期前后端同源，cookie 会话与 CSRF 语义一致）。
+  开发期前后端同源，cookie 会话与 CSRF 语义一致）。`VITE_ENABLE_MOCK=1`
+  时改为挂载 MSW worker + SSE 日志流替身，全应用在 mock 数据上可用
+  （登录账号 `admin/admin123`，见 `src/mocks/`）；关闭开关（缺省）走
+  proxy 连真后端，行为与现状一致。handler/fixture 代码经动态 import +
+  `import.meta.env.DEV` 守卫不进生产产物；`public/mockServiceWorker.js`
+  会被原样复制进 `dist/`，但生产无 `setupWorker` 注册，纯惰性文件无行为。
 - `npm run build`：vue-tsc 类型 + vite 构建，产物进 `dist/`。
 - `npm run preview`：预览构建产物。
 - `npm run typecheck` / `npm test` / `npm run i18n:check`：CI 三件套
@@ -47,5 +58,7 @@ rust-embed 内嵌该目录产物对外提供静态服务与 SPA fallback（relea
 ## 测试纪律
 
 Vitest + Vue Test Utils，只测外部行为（用户可见状态、DOM 事件、网络请求/
-响应形态断言），不测组件内部结构；API 层 mock（fetch 替身）驱动（Spec B4）。
+响应形态断言），不测组件内部结构。组件挂载测试的驱动缝按 ADR-0024 收敛：
+经真实 http client 打 MSW node handlers（`src/mocks/node.ts`，fixture 即
+测试数据），新 spec 优先走该缝，逐票淘汰手写 fetch mock。
 headless 冒烟补 jsdom 测不到的构建/路由/历史 API 面（真实浏览器驱动）。
