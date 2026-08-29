@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// Headless 冒烟（票 B4-T9 / #71 AC）：构建产物 + 预览端口点击走通 12 页主路径。
+// Headless 冒烟（票 B4-T9 / #71 AC）：构建产物 + 预览端口点击走通 14 条主路径（spec #99 新 IA：工作台/流水线/构建机 + 详情/管理页）。
 //
 // 形态基准：原型 `prototype/web-ui-ia` 分支 `web/scripts/smoke.mjs`（playwright
 // + 预览端口点击）。本脚本是其真实前端版：`vite preview` 伺服 `dist/` 构建产物，
 // playwright 在真实浏览器里驱动 SPA——测的是「构建产物在真实浏览器里能启动、
-// 12 条路由能解析渲染、i18n 能切、无运行期崩溃」，这是 vitest（jsdom、源码
+// 14 条路由能解析渲染、i18n 能切、无运行期崩溃」，这是 vitest（jsdom、源码
 // 变换）覆盖不到的构建/路由/历史 API 面。
 //
 // 后端由 playwright `page.route` 在浏览器侧拦截 `/api/v1/**` 注入 mock（替代
@@ -13,7 +13,7 @@
 // 纪律；本冒烟为真实浏览器驱动，起预览端口与浏览器进程是原型同款形态）。两个
 // 上下文：
 //   - authed：mock `/auth/me`→admin、`/auth/setup`→404（非空库，引导已完成），
-//     走 12 条受保护路由，断言页标题渲染。
+//     走 14 条受保护路由（含 /agents→/machines 重定向），断言顶栏标题或页内 h1 渲染。
 //   - guest：mock `/auth/me`→401（未登录）、`/auth/setup`→422（空库，需引导），
 //     走受保护页触发守卫 setup-needed 重定向到 `/setup`，断言引导页渲染；
 //     另直访 `/login` 断言登录表单渲染。
@@ -280,7 +280,7 @@ async function waitReady(deadline) {
 async function visit(page, path, h1Text, name) {
   try {
     await page.goto(`${BASE}${path}`, { waitUntil: 'domcontentloaded' })
-    await page.locator('h1', { hasText: h1Text }).first().waitFor({ timeout: 10000 })
+    await page.locator('h1, .app-topbar-title', { hasText: h1Text }).first().waitFor({ timeout: 10000 })
     ok(name, true)
   } catch (err) {
     const body = await page.locator('body').innerText().catch(() => '<unreachable>')
@@ -302,8 +302,9 @@ async function runAuthed(browser) {
   page.on('pageerror', (e) => errors.push(String(e)))
   await context.route('**/api/v1/**', mockApi(true))
 
-  // 12 页主路径（zh-CN 源语言，页标题文案见 i18n/locales/zh-CN.json routes.*）。
-  await visit(page, '/', '概览', 'overview')
+  // 14 条主路径（zh-CN 源语言；列表页标题在顶栏，详情页保留页内 h1）。
+  await visit(page, '/', '工作台', 'workbench')
+  await visit(page, '/pipelines', '流水线', 'pipelines')
   await visit(page, '/projects', '项目', 'projects')
   await visit(page, '/projects/demo', 'demo', 'project-detail')
   await visit(page, '/projects/demo/pipelines/release', 'release', 'pipeline-edit')
@@ -314,7 +315,8 @@ async function runAuthed(browser) {
     'release #1',
     'build-detail',
   )
-  await visit(page, '/agents', 'Agent', 'agents')
+  await visit(page, '/machines', '构建机', 'machines')
+  await visit(page, '/agents', '构建机', 'agents-redirect')
   await visit(page, '/agents/linux-1', 'linux-1', 'agent-detail')
   await visit(page, '/admin/secrets', '机密', 'admin-secrets')
   await visit(page, '/admin/audit', '审计日志', 'admin-audit')
@@ -325,7 +327,7 @@ async function runAuthed(browser) {
   // NDataTable 包表出现且含包名）。B5-T4 起升级端点已交付，页不再退化。
   try {
     await page.goto(`${BASE}/admin/upgrade`, { waitUntil: 'domcontentloaded' })
-    await page.locator('h1', { hasText: 'Agent 升级' }).first().waitFor({ timeout: 10000 })
+    await page.locator('.app-topbar-title', { hasText: 'Agent 升级' }).first().waitFor({ timeout: 10000 })
     await page
       .locator('.upgrade-packages-table td', { hasText: 'sisyphus-agent-1.0.0-linux-x86_64.tar.gz' })
       .first()
@@ -340,7 +342,7 @@ async function runAuthed(browser) {
   // mock 回的 head + 预填默认分支。
   try {
     await page.goto(`${BASE}/projects`, { waitUntil: 'domcontentloaded' })
-    await page.locator('h1', { hasText: '项目' }).first().waitFor({ timeout: 10000 })
+    await page.locator('.app-topbar-title', { hasText: '项目' }).first().waitFor({ timeout: 10000 })
     await page.locator('button[name="project-new"]').click()
     await page.locator('input[name="project-url"]').waitFor({ timeout: 5000 })
     await page.locator('input[name="project-url"]').fill('https://example.com/demo')
@@ -365,9 +367,9 @@ async function runAuthed(browser) {
   // 升级页占位态消除由动作 1（升级包表渲染）守、测试连接由动作 2 守。
   try {
     await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
-    await page.locator('h1', { hasText: '概览' }).first().waitFor({ timeout: 10000 })
-    await page.locator('.stat-card').first().waitFor({ timeout: 5000 })
-    const cardCount = await page.locator('.stat-card').count()
+    await page.locator('.app-topbar-title', { hasText: '工作台' }).first().waitFor({ timeout: 10000 })
+    await page.locator('.metric-card').first().waitFor({ timeout: 5000 })
+    const cardCount = await page.locator('.metric-card').count()
     const hasError = await page.locator('[data-testid="overview-error"]').count()
     ok(
       'overview no-degradation (real stat cards, no error)',
@@ -378,14 +380,14 @@ async function runAuthed(browser) {
     ok('overview no-degradation (real stat cards, no error)', false, err.message)
   }
 
-  // i18n 即时切换：概览页 h1 概览 → Overview → 概览。
+  // i18n 即时切换：工作台顶栏标题 工作台 → Dashboard → 工作台。
   try {
     await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
-    await page.locator('h1', { hasText: '概览' }).first().waitFor({ timeout: 10000 })
-    await page.locator('.app-footer .n-switch').click()
-    await page.locator('h1', { hasText: 'Overview' }).first().waitFor({ timeout: 5000 })
-    await page.locator('.app-footer .n-switch').click()
-    await page.locator('h1', { hasText: '概览' }).first().waitFor({ timeout: 5000 })
+    await page.locator('.app-topbar-title', { hasText: '工作台' }).first().waitFor({ timeout: 10000 })
+    await page.locator('.app-topbar .n-switch').click()
+    await page.locator('.app-topbar-title', { hasText: 'Dashboard' }).first().waitFor({ timeout: 5000 })
+    await page.locator('.app-topbar .n-switch').click()
+    await page.locator('.app-topbar-title', { hasText: '工作台' }).first().waitFor({ timeout: 5000 })
     ok('i18n zh→en→zh', true)
   } catch (err) {
     ok('i18n zh→en→zh', false, err.message)
