@@ -1,32 +1,65 @@
-/* 全局基础样式（ADR-0020 双语布局纪律）。#97: 各页面已全量迁移 Naive UI
- * （#88–#96），组件视觉由 themeOverrides 驱动；本文件仅保留 body 基础
- * 排版、应用壳布局、通用页头/提示，以及无 Naive UI 对应物的页面骨架
- * （登录 / 初始化引导 / 面包屑 / 管理四页纵排）。#98: 项目表单与
- * 项目详情的页面级规则已收进各自视图 scoped 样式。
- * --sisy-* 变量仍被 Pipeline 编辑器等手写 scoped 样式引用，勿删。 */
+/* 全局基础样式。按 prototype/ 设计稿重构设计 Token（ADR-0023 产品化改造
+ * 的视觉基线落定）：主蓝 #0066CC、页面底 #F5F5F7、深侧栏 #1D1D1F、胶囊
+ * 状态徽章、双层进度条、指标卡。组件视觉由 themeOverrides + 本文件共享
+ * 组件类共同驱动；页面专属规则收在各自视图 scoped 样式。
+ * --sisy-* 变量仍被 Pipeline 编辑器等手写 scoped 样式引用，勿改名。 */
 
 :root {
-  --sisy-color-bg: #f5f6f8;
+  --sisy-color-bg: #f5f5f7;
   --sisy-color-surface: #ffffff;
-  --sisy-color-border: #d9dce1;
-  --sisy-color-text: #1f2328;
-  --sisy-color-text-secondary: #59636e;
-  --sisy-color-primary: #4f46e5;
-  --sisy-color-danger: #c62828;
-  --sisy-radius: 6px;
-  --sisy-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+  --sisy-color-border: #e8e8ed;
+  --sisy-color-border-light: #ececf0;
+  --sisy-color-text: #1d1d1f;
+  --sisy-color-text-secondary: #86868b;
+  --sisy-color-text-tertiary: #a1a1a6;
+  --sisy-color-primary: #0066cc;
+  --sisy-color-primary-hover: #0059b3;
+  --sisy-color-primary-soft: #e8f1ff;
+  --sisy-color-success: #1e8e3e;
+  --sisy-color-success-soft: #d9f2e1;
+  --sisy-color-danger: #ff3b30;
+  --sisy-color-danger-text: #d70015;
+  --sisy-color-danger-soft: #ffeae9;
+  --sisy-color-warning: #ff9500;
+  --sisy-color-warning-text: #ca3400;
+  --sisy-color-warning-soft: #fff3e0;
+  --sisy-color-offline: #a1a1a6;
+  --sisy-color-offline-soft: #ededef;
+  --sisy-color-sidebar: #1d1d1f;
+  --sisy-color-sidebar-active: #2c2c2e;
+  --sisy-color-accent: #5e5ce6;
+  --sisy-radius: 8px;
+  --sisy-radius-card: 12px;
+  --sisy-radius-small: 6px;
+  --sisy-radius-pill: 9999px;
+  --sisy-font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
     'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
 }
 
+/* 深色跟随系统；`html[data-theme="light"]` 为显式浅色覆盖（useDarkMode
+ * 维护，预览/验收用），命中时整组深色变量不生效。 */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --sisy-color-bg: #0c0c0e;
     --sisy-color-surface: #18181b;
     --sisy-color-border: #27272a;
-    --sisy-color-text: #e4e4e7;
+    --sisy-color-border-light: #232326;
+    --sisy-color-text: #fafafa;
     --sisy-color-text-secondary: #a1a1aa;
-    --sisy-color-primary: #6366f1;
-    --sisy-color-danger: #ef5350;
+    --sisy-color-text-tertiary: #71717a;
+    --sisy-color-primary: #2997ff;
+    --sisy-color-primary-hover: #4da3ff;
+    --sisy-color-primary-soft: rgba(41, 151, 255, 0.16);
+    --sisy-color-success: #34c759;
+    --sisy-color-success-soft: rgba(52, 199, 89, 0.16);
+    --sisy-color-danger: #ff453a;
+    --sisy-color-danger-text: #ff6961;
+    --sisy-color-danger-soft: rgba(255, 69, 58, 0.16);
+    --sisy-color-warning: #ff9f0a;
+    --sisy-color-warning-text: #ffb340;
+    --sisy-color-warning-soft: rgba(255, 159, 10, 0.16);
+    --sisy-color-offline: #8e8e93;
+    --sisy-color-offline-soft: rgba(142, 142, 147, 0.18);
   }
 }
 
@@ -47,6 +80,7 @@ body {
   font-size: 14px;
   color: var(--sisy-color-text);
   background: var(--sisy-color-bg);
+  -webkit-font-smoothing: antialiased;
 }
 
 h1,
@@ -55,32 +89,247 @@ h3 {
   font-weight: 600;
 }
 
-/* 应用壳：侧栏 + 主内容 + 底部语言切换（ADR-0020 四区侧栏）。 */
+/* ===== 应用壳：深侧栏 + 顶栏 + 内容区（prototype 外壳） ===== */
+
 .app-shell {
   display: flex;
-  min-height: 100%;
+  height: 100vh;
 }
 
 .app-sidebar {
-  flex: 0 0 200px;
-  background: var(--sisy-color-surface);
-  border-right: 1px solid var(--sisy-color-border);
-  padding: 8px 0;
+  flex: 0 0 232px;
+  display: flex;
+  flex-direction: column;
+  background: var(--sisy-color-sidebar);
+  height: 100%;
+  position: relative;
 }
 
+/* 拖拽调宽手柄：右缘 8px 热区，hover/拖拽时显示高亮线。 */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 20;
+}
+
+.sidebar-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer:focus-visible::after,
+.app-sidebar.dragging .sidebar-resizer::after {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+body.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.sidebar-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 20px 24px;
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px;
+}
+
+.nav-group-label {
+  padding: 12px 12px 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.4);
+  letter-spacing: 0.5px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 52px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 12px;
+  background: none;
+  cursor: pointer;
+  color: var(--sisy-color-text-tertiary);
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: left;
+  width: 100%;
+  transition: background 0.15s, color 0.15s;
+  user-select: none;
+}
+
+.nav-item svg {
+  flex-shrink: 0;
+  color: var(--sisy-color-text-tertiary);
+  transition: color 0.15s;
+}
+
+.nav-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #d1d1d6;
+}
+
+.nav-item.active {
+  background: var(--sisy-color-sidebar-active);
+  color: #ffffff;
+}
+
+.nav-item.active svg {
+  color: #2997ff;
+}
+
+.sidebar-spacer {
+  flex: 1;
+}
+
+.sidebar-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 20px;
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: none;
+  width: 100%;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.user-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #2997ff, #5e5ce6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.user-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.user-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ffffff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-role {
+  font-size: 11px;
+  color: var(--sisy-color-text-tertiary);
+}
+
+.user-logout {
+  border: none;
+  background: none;
+  padding: 4px;
+  border-radius: var(--sisy-radius-small);
+  color: var(--sisy-color-text-tertiary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s, background 0.15s;
+}
+
+.user-logout:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* 主区：顶栏固定，内容区独立滚动（原型的固定壳形态）。 */
 .app-body {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
+  overflow: hidden;
+}
+
+.app-topbar {
+  height: 60px;
+  background: var(--sisy-color-surface);
+  border-bottom: 1px solid var(--sisy-color-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 32px;
+  flex-shrink: 0;
+}
+
+.app-topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.app-topbar-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--sisy-color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
 
 .app-main {
   flex: 1;
-  padding: 24px;
-  max-width: 1100px;
+  padding: 24px 32px;
   width: 100%;
-  margin: 0 auto;
+  overflow-y: auto;
+}
+
+/* 未登录（登录/初始化引导/404）：无壳居中布局。 */
+.app-bare {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .app-footer {
@@ -88,7 +337,7 @@ h3 {
   border-top: 1px solid var(--sisy-color-border);
   background: var(--sisy-color-surface);
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
@@ -98,6 +347,262 @@ h3 {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* ===== 共享组件类（prototype 设计语言） ===== */
+
+/* 指标卡。 */
+.metric-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.metric-card {
+  flex: 1;
+  min-width: 160px;
+  background: var(--sisy-color-surface);
+  border-radius: var(--sisy-radius-card);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.metric-label {
+  font-size: 12px;
+  color: var(--sisy-color-text-secondary);
+}
+
+.metric-value {
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--sisy-color-text);
+  line-height: 1.1;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.metric-value .unit {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--sisy-color-text-secondary);
+}
+
+.metric-value.green {
+  color: var(--sisy-color-success);
+}
+
+.metric-value.red {
+  color: var(--sisy-color-danger-text);
+}
+
+.metric-value.gray {
+  color: var(--sisy-color-text-secondary);
+}
+
+.metric-sub {
+  font-size: 11px;
+  color: var(--sisy-color-text-tertiary);
+}
+
+.metric-sub.blue {
+  color: var(--sisy-color-primary);
+}
+
+.metric-sub.green {
+  color: var(--sisy-color-success);
+}
+
+.metric-sub.red {
+  color: var(--sisy-color-danger-text);
+}
+
+/* 通用卡片。 */
+.sisy-card {
+  background: var(--sisy-color-surface);
+  border-radius: var(--sisy-radius-card);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+}
+
+.card-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--sisy-color-text);
+  margin: 0;
+}
+
+.card-link {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--sisy-color-primary);
+}
+
+/* 胶囊状态徽章（圆点 + 柔和底色）。 */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--sisy-radius-pill);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.badge.running,
+.badge.building,
+.badge.info {
+  background: var(--sisy-color-primary-soft);
+  color: var(--sisy-color-primary);
+}
+
+.badge.running::before,
+.badge.building::before,
+.badge.info::before {
+  background: var(--sisy-color-primary);
+}
+
+.badge.success,
+.badge.online {
+  background: var(--sisy-color-success-soft);
+  color: var(--sisy-color-success);
+}
+
+.badge.success::before,
+.badge.online::before {
+  background: var(--sisy-color-success);
+}
+
+.badge.failed,
+.badge.error {
+  background: var(--sisy-color-danger-soft);
+  color: var(--sisy-color-danger-text);
+}
+
+.badge.failed::before,
+.badge.error::before {
+  background: var(--sisy-color-danger);
+}
+
+.badge.warning,
+.badge.draining {
+  background: var(--sisy-color-warning-soft);
+  color: var(--sisy-color-warning-text);
+}
+
+.badge.warning::before,
+.badge.draining::before {
+  background: var(--sisy-color-warning);
+}
+
+.badge.offline,
+.badge.neutral {
+  background: var(--sisy-color-offline-soft);
+  color: var(--sisy-color-text-secondary);
+}
+
+.badge.offline::before,
+.badge.neutral::before {
+  background: var(--sisy-color-offline);
+}
+
+/* 双层进度条（轨道 + 填充 + 数值）。 */
+.usage-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.usage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.usage-row .track {
+  width: 72px;
+  height: 6px;
+  border-radius: var(--sisy-radius-pill);
+  background: var(--sisy-color-border);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.usage-row .fill {
+  height: 100%;
+  border-radius: var(--sisy-radius-pill);
+  background: var(--sisy-color-primary);
+}
+
+.usage-row .fill.red {
+  background: var(--sisy-color-danger);
+}
+
+.usage-row .pct {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--sisy-color-text);
+}
+
+.usage-row .pct.red {
+  color: var(--sisy-color-danger-text);
+}
+
+/* 描边小按钮（列表行内动作）。 */
+.btn-outline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--sisy-radius-small);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  background: var(--sisy-color-surface);
+  border: 1px solid var(--sisy-color-border);
+  color: var(--sisy-color-text);
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.btn-outline.blue {
+  border-color: var(--sisy-color-primary);
+  color: var(--sisy-color-primary);
+}
+
+.btn-outline.blue:hover {
+  background: var(--sisy-color-primary-soft);
+}
+
+.btn-outline.red {
+  border-color: var(--sisy-color-danger);
+  color: var(--sisy-color-danger-text);
+}
+
+.btn-outline.red:hover {
+  background: var(--sisy-color-danger-soft);
 }
 
 /* 通用页头 / 表单提示（各页面共用；按钮已由 NButton 接管）。 */
@@ -110,6 +615,10 @@ h3 {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+}
+
+.page-header.header-end {
+  justify-content: flex-end;
 }
 
 .form-hint {
@@ -196,7 +705,7 @@ h3 {
 
 .setup-creds-warn {
   margin: 8px 0 0;
-  color: var(--sisy-color-danger);
+  color: var(--sisy-color-danger-text);
   font-size: 12px;
 }
 
@@ -261,37 +770,28 @@ h3 {
   font-weight: 600;
 }
 
-/* 管理四页（机密 / 审计 / Agent 升级 / 用户与 PAT，票 B4-T6）：页面已全量
- * 迁移 Naive UI（票 #95），仅保留 `.admin-page` 页面骨架（纵排 + 间距，
- * 四页共用；其余视觉由 Naive UI 主题 Token 驱动）。 */
+/* 管理四页（机密 / 审计 / Agent 升级 / 用户与 PAT，票 B4-T6）：页面骨架
+ * （纵排 + 间距，四页共用；其余视觉由 Naive UI 主题 Token 驱动）。 */
 .admin-page {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-/* 窄屏顶部栏（#87）。 */
-.app-topbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--sisy-color-border);
-  background: var(--sisy-color-surface);
-}
+/* 窄屏：顶栏间距收紧。 */
+@media (max-width: 767px) {
+  .app-topbar {
+    padding: 0 16px;
+  }
 
-.app-topbar-title {
-  font-weight: 600;
-  font-size: 15px;
+  .app-main {
+    padding: 16px;
+  }
 }
 
 /* 768px - 1024px 过渡区间：内容区不溢出（#87）。 */
 @media (min-width: 768px) and (max-width: 1024px) {
   .app-main {
     padding: 16px;
-  }
-
-  .app-footer {
-    padding: 10px 16px;
   }
 }

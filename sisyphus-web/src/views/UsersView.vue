@@ -359,10 +359,6 @@ async function revokeToken(id: number): Promise<void> {
 
 <template>
   <div class="admin-page users-page">
-    <div class="page-header">
-      <h1 class="page-title">{{ t('routes.adminUsers') }}</h1>
-    </div>
-
     <!-- 403 退化态：仅全局管理员可见。 -->
     <p v-if="adminOnly" class="form-hint">{{ t('admin.adminOnly') }}</p>
 

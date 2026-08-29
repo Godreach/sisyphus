@@ -206,10 +206,6 @@ watch(selectedProject, () => {
 
 <template>
   <div class="admin-page secrets-page">
-    <div class="page-header">
-      <h1 class="page-title">{{ t('routes.adminSecrets') }}</h1>
-    </div>
-
     <n-alert v-if="projectError" type="error" :title="projectError" role="alert" />
 
     <!-- 无项目空态：引导先建项目（机密挂在项目下）。 -->

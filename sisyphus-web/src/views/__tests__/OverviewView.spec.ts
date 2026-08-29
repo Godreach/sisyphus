@@ -1,18 +1,20 @@
-// 概览页行为测试（ADR-0019，票 B5-T7）：stat 卡 + 事实型警示态 + 最近构建。
-// 数据源 = 概览快照端点 `GET /api/v1/overview`（单一来源，B4-T3 退化面已移除）。
+// 工作台行为测试（原型页一重构，spec #99；数据面仍是 ADR-0019 概览快照）。
 // 只测外部行为（用户可见状态、DOM 事件、网络请求形态断言），API 层以
-// fetch mock 驱动。
-// - stat 卡：Agent 在线/总数、槽位占用、队列深度、构建终态、存储占用
-// - 警示态：无匹配任务 / 有离线 Agent / 排空或不兼容 Agent（快照 alerts）
-// - 最近构建：快照 recent_builds 表格
-// - 失败：loadError 报错 + 重试按钮；无静默部分值
-// 视图在 onMounted 即发请求：mount 须在设置 fetch mock 之后（先设 mock 再挂载）。
+// fetch mock 驱动。视图在 onMounted 即发请求：mount 须在设置 fetch mock 之后。
+// - 指标卡：在途任务（槽位占用）/ 构建（终态合计 + 成功/失败副标）/
+//   队列深度（首要原因副标）/ 在线构建机（可用率）
+// - 最近构建行：pipeline #号 + 项目副行、状态徽章、触发、耗时、相对时间；
+//   点击行 → 构建详情
+// - 右栏 Agent 健康：在线比 + 三类事实警示（异常/正常徽章）；零 Agent 行
+// - 右栏 最近流水线：去重前 3；名称 → 构建列表；运行按钮 → POST trigger
+// - 快照失败：loadError 报错 + 重试按钮；首载骨架屏
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import { NDataTable } from 'naive-ui'
+import { NMessageProvider } from 'naive-ui'
+import { defineComponent, h } from 'vue'
 
 import OverviewView from '@/views/OverviewView.vue'
 import { i18n, setLocale } from '@/i18n'
@@ -40,16 +42,26 @@ function emptySnapshot(): Record<string, unknown> {
   }
 }
 
-describe('OverviewView 概览页（stat 卡 + 警示态 + 最近构建）', () => {
+/** 包装组件：NMessageProvider + OverviewView（useMessage 注入可用）。 */
+const Host = defineComponent({
+  name: 'OverviewHost',
+  setup() {
+    return () => h(NMessageProvider, () => h(OverviewView))
+  },
+})
+
+describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => {
   let pinia: Pinia
   let router: Router
+  let wrapper: VueWrapper | null = null
 
   const fetchMock = vi.fn()
 
   function mountView(): VueWrapper {
-    return mount(OverviewView, {
+    wrapper = mount(Host, {
       global: { plugins: [pinia, router, i18n] },
     })
+    return wrapper
   }
 
   beforeEach(async () => {
@@ -58,7 +70,20 @@ describe('OverviewView 概览页（stat 卡 + 警示态 + 最近构建）', () =
     setActivePinia(pinia)
     router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', name: 'overview', component: { template: '<div />' } }],
+      routes: [
+        { path: '/', name: 'overview', component: { template: '<div />' } },
+        { path: '/pipelines', name: 'pipelines', component: { template: '<div />' } },
+        {
+          path: '/projects/:name/pipelines/:pipeline/builds',
+          name: 'build-list',
+          component: { template: '<div />' },
+        },
+        {
+          path: '/projects/:name/pipelines/:pipeline/builds/:number',
+          name: 'build-detail',
+          component: { template: '<div />' },
+        },
+      ],
     })
     await router.push('/')
     await router.isReady()
@@ -66,10 +91,12 @@ describe('OverviewView 概览页（stat 卡 + 警示态 + 最近构建）', () =
   })
 
   afterEach(() => {
+    wrapper?.unmount()
+    wrapper = null
     vi.restoreAllMocks()
   })
 
-  it('加载快照：展示 Agent/槽位/队列/终态/存储 stat 卡（GET /overview）', async () => {
+  it('指标卡四张同排：在途任务/构建/队列深度/Agent 健康（GET /overview 单一来源）', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
         ...emptySnapshot(),
@@ -77,60 +104,33 @@ describe('OverviewView 概览页（stat 卡 + 警示态 + 最近构建）', () =
         agents_total: 2,
         slots_used: 1,
         slots_total: 2,
-        queue_depth: 3,
+        queue_depth: 0,
         builds_terminal: { succeeded: 5, failed: 1, cancelled: 2, timeout: 0 },
-        artifact_bytes: 1_500_000_000,
-        log_bytes: 1_500_000,
       }),
     )
 
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.text()).toContain('1 / 2'))
-    expect(wrapper.text()).toContain('3')
-    expect(wrapper.text()).toContain('成功 5')
-    expect(wrapper.text()).toContain('失败 1')
-    expect(wrapper.text()).toContain('取消 2')
-    expect(wrapper.text()).toContain('1.4 GB')
-    expect(wrapper.text()).toContain('1.4 MB')
+    const w = mountView()
+    await vi.waitFor(() => expect(w.text()).toContain('在途任务'))
+    // 在途任务 = 槽位占用 1/2，使用率 50%。
+    expect(w.text()).toContain('1')
+    expect(w.text()).toContain('/ 2')
+    expect(w.text()).toContain('使用率 50%')
+    // 构建 = 终态合计 8，副标 成功 5 · 失败 1。
+    expect(w.text()).toContain('成功 5 · 失败 1')
+    // 队列 0 → 空闲副标。
+    expect(w.text()).toContain('空闲，无排队')
+    // 顶部指标卡行 4 张：在途任务/构建/队列深度/Agent 健康（同排一行）。
+    expect(w.find('section[aria-label="metrics"]').findAll('.metric-card')).toHaveLength(4)
+    // Agent 健康卡：在线 1/2 台 + 无异常 → 单枚「全部正常」。
+    expect(w.text()).toContain('/ 2台')
+    expect(w.findAll('.health-badges .badge').map((b) => b.text())).toEqual(['全部正常'])
 
-    // 请求形态：GET /api/v1/overview（唯一数据源，不再组合 /agents /projects）。
+    // 请求形态：GET /api/v1/overview（唯一数据源）。
     const calls = fetchMock.mock.calls.map((c) => (c as [string, RequestInit])[0])
     expect(calls).toEqual(['/api/v1/overview'])
-    wrapper.unmount()
   })
 
-  it('警示态全部来自快照 alerts：离线 / 无匹配 / 排空或不兼容', async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, {
-        ...emptySnapshot(),
-        agents_total: 1,
-        alerts: {
-          has_no_match: true,
-          has_offline_agent: true,
-          has_draining_incompatible: true,
-        },
-      }),
-    )
-
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.text()).toContain('有 Agent 离线'))
-    expect(wrapper.text()).toContain('存在无匹配 Agent 的任务')
-    expect(wrapper.text()).toContain('存在排空或版本不兼容的 Agent')
-    wrapper.unmount()
-  })
-
-  it('全部在线 + 有 Agent 且无警示：不展示任何 alert', async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, { ...emptySnapshot(), agents_total: 1, agents_online: 1 }),
-    )
-
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.text()).toContain('1 / 1'))
-    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('队列原因分类展示（快照 queue_reasons）', async () => {
+  it('队列深度副标：有排队给首要原因（queue_reasons[0]）', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
         ...emptySnapshot(),
@@ -142,13 +142,12 @@ describe('OverviewView 概览页（stat 卡 + 警示态 + 最近构建）', () =
       }),
     )
 
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.text()).toContain('等待匹配 agent：无在线 agent'))
-    expect(wrapper.text()).toContain('等待匹配 agent：缺标签')
-    wrapper.unmount()
+    const w = mountView()
+    await vi.waitFor(() => expect(w.text()).toContain('队列深度'))
+    expect(w.text()).toContain('首要原因：等待匹配 agent：无在线 agent')
   })
 
-  it('最近构建表格：项目/pipeline/号/状态/触发源/时间', async () => {
+  it('最近构建行：pipeline #号/项目/状态徽章/触发/耗时/相对时间；点击行 → 构建详情', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
         ...emptySnapshot(),
@@ -166,113 +165,30 @@ describe('OverviewView 概览页（stat 卡 + 警示态 + 最近构建）', () =
       }),
     )
 
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.text()).toContain('demo'))
-    expect(wrapper.text()).toContain('release')
-    expect(wrapper.text()).toContain('#12')
-    expect(wrapper.text()).toContain('成功')
-    expect(wrapper.text()).toContain('手动')
-    // 平板窄视口：NDataTable 最小表宽，容器更窄时横向滚动而非挤压列。
-    expect(wrapper.findComponent(NDataTable).props('scrollX')).toBe(720)
-    wrapper.unmount()
-  })
+    const w = mountView()
+    await vi.waitFor(() => expect(w.find('.run-row').exists()).toBe(true))
+    expect(w.find('.run-row').text()).toContain('release')
+    expect(w.find('.run-row').text()).toContain('#12')
+    expect(w.find('.run-row').text()).toContain('demo')
+    expect(w.find('.run-row .badge').text()).toBe('成功')
+    expect(w.find('.run-row').text()).toContain('手动')
+    expect(w.find('.run-row').text()).toContain('1m 0s')
+    // 固定历史时间戳 → 相对时间「n 天前」。
+    expect(w.find('.run-row').text()).toContain('天前')
 
-  it('快照失败：整页报错 + 重试；重试成功后恢复', async () => {
-    fetchMock
-      .mockResolvedValueOnce(jsonResponse(500, { code: 'INTERNAL', message: '服务内部错误' }))
-      .mockResolvedValueOnce(jsonResponse(200, emptySnapshot()))
-
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.find('[role="alert"]').exists()).toBe(true))
-
-    // 重试：点击按钮后重新请求并恢复展示。
-    const retry = wrapper.find('button')
-    await retry.trigger('click')
-    await vi.waitFor(() => expect(wrapper.text()).toContain('0 / 0'))
-    wrapper.unmount()
-  })
-})
-
-describe('OverviewView Naive UI 迁移（#91）', () => {
-  let pinia: Pinia
-  let router: Router
-
-  const fetchMock = vi.fn()
-
-  function mountView(): VueWrapper {
-    return mount(OverviewView, {
-      global: { plugins: [pinia, router, i18n] },
+    const pushSpy = vi.spyOn(router, 'push')
+    await w.find('.run-row').trigger('click')
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'build-detail',
+      params: { name: 'demo', pipeline: 'release', number: '12' },
     })
-  }
-
-  beforeEach(async () => {
-    setLocale('zh-CN')
-    pinia = createPinia()
-    setActivePinia(pinia)
-    router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/', name: 'overview', component: { template: '<div />' } }],
-    })
-    await router.push('/')
-    await router.isReady()
-    globalThis.fetch = fetchMock
   })
 
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  it('首载中显示 NSkeleton 骨架屏（数据未到时无内容、无错误）', async () => {
-    fetchMock.mockImplementation(() => new Promise(() => {}))
-
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.find('.n-skeleton').exists()).toBe(true))
-    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('stat 卡改用 NCard + NStatistic（带图标）', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, emptySnapshot()))
-
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.text()).toContain('0 / 0'))
-    expect(wrapper.findAll('.n-card').length).toBeGreaterThanOrEqual(5)
-    expect(wrapper.findAll('.n-statistic').length).toBe(5)
-    expect(wrapper.findAll('.overview-stat-icon').length).toBeGreaterThanOrEqual(5)
-    wrapper.unmount()
-  })
-
-  it('队列原因分类使用 NTag 状态色标签（不同原因不同颜色）', async () => {
+  it('Agent 健康卡（与指标同行）：在线比 + 事实警示徽章（异常/正常）', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
         ...emptySnapshot(),
-        queue_depth: 2,
-        queue_reasons: [
-          { reason: 'no_online_agent', depth: 1 },
-          { reason: 'missing_labels', depth: 1 },
-        ],
-      }),
-    )
-
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.text()).toContain('等待匹配 agent：无在线 agent'))
-    const tags = wrapper.findAll('.queue-reason-list .n-tag')
-    expect(tags.length).toBe(2)
-    expect(tags[0]!.text()).toContain('无在线 agent')
-    // 不同原因 → 不同 NTag type（no_online_agent=error / missing_labels=warning），
-    // 主题色经 cssVars 落在 `--n-color`，各自不同。
-    const color0 = tags[0]!.attributes('style')
-    const color1 = tags[1]!.attributes('style')
-    expect(color0).toContain('--n-color:')
-    expect(color1).toContain('--n-color:')
-    expect(color0).not.toBe(color1)
-    wrapper.unmount()
-  })
-
-  it('警示态改用 NAlert（类型匹配严重程度：离线/无匹配=warning，无 Agent=info）', async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, {
-        ...emptySnapshot(),
+        agents_online: 1,
         agents_total: 1,
         alerts: {
           has_no_match: true,
@@ -282,89 +198,121 @@ describe('OverviewView Naive UI 迁移（#91）', () => {
       }),
     )
 
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.text()).toContain('有 Agent 离线'))
-    const alerts = wrapper.findAll('.n-alert')
-    expect(alerts.length).toBe(2)
-    for (const a of alerts) {
-      expect(a.classes()).toContain('n-alert--show-icon')
-    }
-    wrapper.unmount()
+    const w = mountView()
+    // 健康卡在线 1/1 台（全部在线 → 数值转绿类）。
+    await vi.waitFor(() => expect(w.find('.health-card .metric-value').classes()).toContain('green'))
+    expect(w.text()).toContain('/ 1台')
+    // 只亮异常事实（红徽章 + 完整句 title 提示）：离线/无匹配，无排空异常。
+    const badges = w.findAll('.health-badges .badge')
+    expect(badges.map((b) => b.text())).toEqual(['离线 Agent', '无匹配任务'])
+    expect(badges.every((b) => b.classes().includes('failed'))).toBe(true)
+    expect(badges[0]!.attributes('title')).toContain('有 Agent 离线')
+    // 无整页 alert（事实警示进健康卡，非 NAlert）。
+    expect(w.find('[role="alert"]').exists()).toBe(false)
   })
 
-  it('尚未注册任何 Agent → NAlert type=info 信息提示（非警示严重程度）', async () => {
+  it('零 Agent：健康卡给「尚未注册构建机」行（不再用 NAlert info）', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, emptySnapshot()))
 
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.text()).toContain('尚未注册任何 Agent'))
-    const alert = wrapper.find('.n-alert')
-    expect(alert.exists()).toBe(true)
-    expect(alert.classes()).toContain('n-alert--show-icon')
-    wrapper.unmount()
+    const w = mountView()
+    await vi.waitFor(() => expect(w.text()).toContain('尚未注册构建机'))
+    expect(w.find('.n-alert').exists()).toBe(false)
   })
 
-  it('构建终态 stat 卡用 NTag 展示四态（成功/失败/取消/超时）', async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, {
-        ...emptySnapshot(),
-        builds_terminal: { succeeded: 5, failed: 1, cancelled: 2, timeout: 0 },
-      }),
-    )
+  it('最近流水线卡：去重取前 3；名称 → 构建列表；运行按钮 → POST trigger', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          ...emptySnapshot(),
+          recent_builds: [
+            {
+              project: 'demo',
+              pipeline: 'release',
+              number: 12,
+              status: 'succeeded',
+              trigger: 'manual',
+              started_at: 1_700_000_000_000,
+              finished_at: 1_700_000_060_000,
+            },
+            {
+              project: 'demo',
+              pipeline: 'release',
+              number: 11,
+              status: 'succeeded',
+              trigger: 'manual',
+              started_at: 1_699_000_000_000,
+              finished_at: 1_699_000_060_000,
+            },
+            {
+              project: 'demo',
+              pipeline: 'nightly',
+              number: 3,
+              status: 'failed',
+              trigger: 'cron',
+              started_at: 1_700_000_000_000,
+              finished_at: 1_700_000_060_000,
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(202, { number: 13, build_id: 1, attempt: 1, status: 'queued' }),
+      )
 
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.text()).toContain('成功 5'))
-    expect(wrapper.text()).toContain('失败 1')
-    expect(wrapper.text()).toContain('取消 2')
-    expect(wrapper.text()).toContain('超时 0')
-    const outcomeTags = wrapper.findAll('.build-outcomes .n-tag')
-    expect(outcomeTags.length).toBe(4)
-    wrapper.unmount()
-  })
+    const w = mountView()
+    await vi.waitFor(() => expect(w.findAll('.fav-row')).toHaveLength(2))
+    // release 去重保留最近一次（#12）。
+    expect(w.findAll('.fav-row')[0]!.text()).toContain('release')
+    expect(w.findAll('.fav-row')[0]!.text()).toContain('#12')
+    expect(w.findAll('.fav-row')[1]!.text()).toContain('nightly')
 
-  it('最近构建改用 NDataTable，且列可排序（点击列头按构建号排序）', async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, {
-        ...emptySnapshot(),
-        recent_builds: [
-          {
-            project: 'demo',
-            pipeline: 'release',
-            number: 1,
-            status: 'succeeded',
-            trigger: 'manual',
-            started_at: 1_700_000_000_000,
-            finished_at: 1_700_000_060_000,
-          },
-          {
-            project: 'demo',
-            pipeline: 'nightly',
-            number: 2,
-            status: 'failed',
-            trigger: 'cron',
-            started_at: 1_700_000_000_000,
-            finished_at: 1_700_000_060_000,
-          },
-        ],
-      }),
-    )
-
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.find('.n-data-table').exists()).toBe(true))
-
-    // 表头按 data-col-key 标记（NDataTable 实现细节，用于驱动排序交互）。
-    const numberTh = wrapper.find('th[data-col-key="number"]')
-    expect(numberTh.exists()).toBe(true)
-
-    // 初始顺序按快照（1 在上，2 在下）。
-    const trs = () => wrapper.findAll('.n-data-table-tbody tr')
-    expect(trs()[0]!.text()).toContain('#1')
-    expect(trs()[1]!.text()).toContain('#2')
-
-    // 点击「构建号」列头 → 降序（NDataTable 默认 first click = descend）。
-    await numberTh.trigger('click')
-    await vi.waitFor(() => {
-      expect(wrapper.findAll('.n-data-table-tbody tr')[0]!.text()).toContain('#2')
+    // 名称 → 构建列表。
+    const pushSpy = vi.spyOn(router, 'push')
+    await w.findAll('.fav-row')[0]!.find('.fav-name').trigger('click')
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'build-list',
+      params: { name: 'demo', pipeline: 'release' },
     })
-    wrapper.unmount()
+
+    // 运行按钮 → POST /api/v1/projects/demo/pipelines/release/builds（空参数体）。
+    await w.findAll('.fav-row')[0]!.find('.btn-outline').trigger('click')
+    await vi.waitFor(() => {
+      const post = fetchMock.mock.calls.find(
+        (c) => (c[1] as RequestInit | undefined)?.method === 'POST',
+      ) as [string, RequestInit]
+      expect(post[0]).toBe('/api/v1/projects/demo/pipelines/release/builds')
+      expect(JSON.parse(post[1].body as string)).toEqual({})
+    })
+  })
+
+  it('快照失败：整页报错 + 重试；重试成功后恢复', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(500, { code: 'INTERNAL', message: '服务内部错误' }))
+      .mockResolvedValueOnce(jsonResponse(200, emptySnapshot()))
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.find('[data-testid="overview-error"]').exists()).toBe(true))
+
+    // 重试：点击按钮后重新请求并恢复展示（零 Agent 行出现 = 恢复）。
+    await w.find('[data-testid="overview-error"] button').trigger('click')
+    await vi.waitFor(() => expect(w.text()).toContain('尚未注册构建机'))
+  })
+
+  it('首载骨架屏（数据未到时无内容、无错误）', async () => {
+    fetchMock.mockImplementation(() => new Promise(() => {}))
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.find('[data-testid="overview-skeleton"]').exists()).toBe(true))
+    expect(w.find('[role="alert"]').exists()).toBe(false)
+  })
+
+  it('「查看全部」链接指向流水线页', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, emptySnapshot()))
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.text()).toContain('查看全部'))
+    const link = w.findAll('a').find((a) => a.text() === '查看全部')
+    expect(link).toBeDefined()
+    expect(link!.attributes('href')).toBe('/pipelines')
   })
 })

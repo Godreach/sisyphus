@@ -1,28 +1,29 @@
 import type { GlobalThemeOverrides } from 'naive-ui'
 
-// 主色 indigo-600 系（shadcn/GitHub 中性专业风）；深色模式主色整体上移一档
-// 提对比（indigo-500 起），底色走 zinc 系纯中性灰，不带蓝调。
+// 视觉基线 = prototype/ 设计稿（spec #99）：主蓝 #0066CC 系、成功绿
+// #1E8E3E、失败红 #FF3B30、重试橙 #FF9500、按钮圆角 8px。深色模式为同一
+// 色板的深色变体（主色上移提对比，底色走中性深灰）。
 const commonOverrides = {
-  primaryColor: '#4f46e5',
-  primaryColorHover: '#6366f1',
-  primaryColorPressed: '#4338ca',
-  primaryColorSuppl: '#4f46e5',
-  successColor: '#18a058',
-  successColorHover: '#36ad6a',
-  successColorPressed: '#0c7a43',
-  successColorSuppl: '#18a058',
-  errorColor: '#d03050',
-  errorColorHover: '#de5773',
-  errorColorPressed: '#ab1f3f',
-  errorColorSuppl: '#d03050',
-  warningColor: '#f0a020',
-  warningColorHover: '#fcb040',
-  warningColorPressed: '#ca9416',
-  warningColorSuppl: '#f0a020',
-  borderRadius: '6px',
-  borderRadiusSmall: '4px',
+  primaryColor: '#0066CC',
+  primaryColorHover: '#0059B3',
+  primaryColorPressed: '#004A99',
+  primaryColorSuppl: '#0066CC',
+  successColor: '#1E8E3E',
+  successColorHover: '#28A64C',
+  successColorPressed: '#17702F',
+  successColorSuppl: '#1E8E3E',
+  errorColor: '#FF3B30',
+  errorColorHover: '#FF5B52',
+  errorColorPressed: '#D70015',
+  errorColorSuppl: '#FF3B30',
+  warningColor: '#FF9500',
+  warningColorHover: '#FFAB33',
+  warningColorPressed: '#CA3400',
+  warningColorSuppl: '#FF9500',
+  borderRadius: '8px',
+  borderRadiusSmall: '6px',
   fontFamily:
-    '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif',
+    '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, "Noto Sans", sans-serif',
   fontFamilyMono:
     '"JetBrains Mono", "Fira Code", "Fira Mono", "Roboto Mono", Menlo, Monaco, Consolas, monospace',
 }
@@ -34,10 +35,22 @@ export const themeOverrides: GlobalThemeOverrides = {
 export const darkThemeOverrides: GlobalThemeOverrides = {
   common: {
     ...commonOverrides,
-    primaryColor: '#6366f1',
-    primaryColorHover: '#818cf8',
-    primaryColorPressed: '#4f46e5',
-    primaryColorSuppl: '#6366f1',
+    primaryColor: '#2997FF',
+    primaryColorHover: '#55AAFF',
+    primaryColorPressed: '#0A84FF',
+    primaryColorSuppl: '#2997FF',
+    successColor: '#30D158',
+    successColorHover: '#32D74B',
+    successColorPressed: '#28A64C',
+    successColorSuppl: '#30D158',
+    errorColor: '#FF453A',
+    errorColorHover: '#FF6961',
+    errorColorPressed: '#D70015',
+    errorColorSuppl: '#FF453A',
+    warningColor: '#FF9F0A',
+    warningColorHover: '#FFB340',
+    warningColorPressed: '#CA3400',
+    warningColorSuppl: '#FF9F0A',
     bodyColor: '#0c0c0e',
     cardColor: '#18181b',
     modalColor: '#18181b',

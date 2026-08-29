@@ -1,20 +1,19 @@
-// Agent 列表行为测试（ADR-0008/0010/0017，票 B4-T5）：只测外部行为，API 层
-// 以 fetch mock（method + URL 前缀路由）驱动。视图在 onMounted 即发列表请求：
-// mount 须在设置 fetch mock 之后。
-// - 列表四态徽标（在线/离线/停用；排空/不兼容 退化标注）：NTag 颜色编码
-//   经组件 props 断言（type 影响的是内联 CSS 变量，无 type 类可查）
-// - 建条目：POST /agents → 一次性 token + 注册码 + 按 OS 复制命令 + 刷新列表
-// - 停用/启用：NSwitch 切换 → PATCH /agents/{name} { disabled }
-// - 编辑槽位/自定义标签：编辑弹窗 → PATCH { max_concurrency, custom_labels }
+// 构建机页行为测试（原型页三重构，spec #99；数据面 = ADR-0008/0010/0017）。
+// 只测外部行为，API 层以 fetch mock（method + URL 前缀路由）驱动。
+// 视图在 onMounted 即发列表请求：mount 须在设置 fetch mock 之后。
+// - 四张指标卡：总数/在线/离线/异常（停用计数进总数副标）
+// - 状态徽章（原型胶囊形态）：构建中/在线/离线/停用/排空/版本不兼容
+// - 槽位/磁盘进度条（原型 usage-cell）
+// - 建条目（空态按钮）：POST /agents → 一次性 token + 注册码 + 刷新
+// - 停用/启用：NSwitch → PATCH { disabled }；编辑弹窗 → PATCH 槽位+标签
 // - 403（非全局 admin）→ admin-only 退化态；409 重名；422 校验
-// #94: NModal/NDataTable teleport 不在 wrapper 内——弹窗断言经
-// document.querySelector 定位（与 BuildDetailView.spec 同纪律）。
+// NModal teleport 不在 wrapper 内——弹窗断言经 document.querySelector 定位。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import { NDataTable, NMessageProvider, NTag } from 'naive-ui'
+import { NMessageProvider } from 'naive-ui'
 import { defineComponent, h } from 'vue'
 
 import AgentListView from '@/views/AgentListView.vue'
@@ -48,14 +47,14 @@ function agent(name: string, overrides: Partial<AgentResponse> = {}): AgentRespo
 }
 
 /** 包装组件：NMessageProvider + AgentListView，保证 useMessage 注入可用。 */
-const AgentListWrapper = defineComponent({
-  name: 'AgentListWrapper',
+const Host = defineComponent({
+  name: 'AgentListHost',
   setup(_, { attrs }) {
     return () => h(NMessageProvider, () => h(AgentListView, { ...attrs }))
   },
 })
 
-describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
+describe('AgentListView 构建机页（指标卡 + 资源表 + 动作流）', () => {
   let pinia: Pinia
   let router: Router
   let wrapper: VueWrapper | null = null
@@ -83,7 +82,7 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
   }
 
   function mountView(): VueWrapper {
-    wrapper = mount(AgentListWrapper, {
+    wrapper = mount(Host, {
       global: { plugins: [pinia, router, i18n] },
     })
     return wrapper
@@ -97,11 +96,11 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
     router = createRouter({
       history: createMemoryHistory(),
       routes: [
-        { path: '/agents', name: 'agents', component: { template: '<div />' } },
+        { path: '/machines', name: 'machines', component: { template: '<div />' } },
         { path: '/agents/:name', name: 'agent-detail', component: { template: '<div />' } },
       ],
     })
-    await router.push('/agents')
+    await router.push('/machines')
     await router.isReady()
     globalThis.fetch = fetchMock
   })
@@ -120,7 +119,42 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
     await el.dispatchEvent(new Event('input'))
   }
 
-  it('加载后列出 Agent + 四态徽标（在线/离线/停用/排空/不兼容，B5-T4 起全派生）', async () => {
+  it('加载后列出构建机 + 展示态徽章（构建中/在线/离线/停用/排空/版本不兼容）', async () => {
+    setRoute(
+      'GET',
+      '/api/v1/agents',
+      jsonResponse(200, [
+        agent('linux-1', { online: true, active_jobs: 1 }),
+        agent('linux-2', { online: false }),
+        agent('win-1', { online: true, disabled: true }),
+        agent('mac-1', { online: true, draining: true }),
+        agent('old-1', { online: true, version_compatible: false }),
+      ]),
+    )
+    mountView()
+    await vi.waitFor(() =>
+      expect(wrapper!.findAll('.n-data-table-tbody .n-data-table-tr')).toHaveLength(5),
+    )
+
+    // 状态列（原型胶囊徽章）：文案 + 色类。
+    const badges = wrapper!.findAll('.n-data-table-tbody .n-data-table-tr .badge')
+    expect(badges.map((b) => b.text())).toEqual([
+      '构建中',
+      '离线',
+      '停用',
+      '排空',
+      '版本不兼容',
+    ])
+    expect(badges.map((b) => b.classes().join(' '))).toEqual([
+      expect.stringContaining('building'),
+      expect.stringContaining('offline'),
+      expect.stringContaining('neutral'),
+      expect.stringContaining('draining'),
+      expect.stringContaining('failed'),
+    ])
+  })
+
+  it('四张指标卡：总数（停用副标）/在线（可用率）/离线/异常', async () => {
     setRoute(
       'GET',
       '/api/v1/agents',
@@ -133,22 +167,56 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
       ]),
     )
     mountView()
-    await vi.waitFor(() =>
-      expect(wrapper!.findAll('.n-data-table-tbody .n-data-table-tr')).toHaveLength(5),
-    )
+    // 等真实指标卡（骨架屏里也有 .metric-row 壳，须以卡片数为准）。
+    await vi.waitFor(() => expect(wrapper!.findAll('.metric-card')).toHaveLength(4))
 
-    // 状态列 NTag：文案 + 颜色编码（type → success/error/warning/default）。
-    const tags = wrapper!.findAllComponents(NTag)
-    const texts = tags.map((tag) => tag.text())
-    const types = tags.map((tag) => tag.props('type'))
-    expect(texts).toEqual(['在线', '离线', '停用', '排空', '版本不兼容'])
-    expect(types).toEqual(['success', 'error', 'default', 'warning', 'default'])
-
-    // 平板窄视口：Agent 表设最小表宽，容器更窄时横向滚动而非挤压列。
-    expect(wrapper!.findComponent(NDataTable).props('scrollX')).toBe(700)
+    const cards = wrapper!.findAll('.metric-card')
+    expect(cards).toHaveLength(4)
+    // 总数 5，副标 停用 1 台。
+    expect(cards[0]!.text()).toContain('5')
+    expect(cards[0]!.text()).toContain('停用 1 台')
+    // 在线 = 启用且 online = 3（linux-1/mac-1/old-1），可用率 75%。
+    expect(cards[1]!.text()).toContain('3')
+    expect(cards[1]!.text()).toContain('75% 可用')
+    // 离线 = 启用但非 online = 1。
+    expect(cards[2]!.text()).toContain('1')
+    // 异常 = 排空 + 不兼容 = 2。
+    expect(cards[3]!.text()).toContain('2')
   })
 
-  it('无 Agent：NEmpty 空态 + 注册引导 + 新建入口', async () => {
+  it('槽位/磁盘列渲染原型进度条（fill 宽度 + 副标）', async () => {
+    setRoute(
+      'GET',
+      '/api/v1/agents',
+      jsonResponse(200, [
+        agent('linux-1', {
+          online: true,
+          active_jobs: 1,
+          max_concurrency: 2,
+          disk_usage: {
+            volumes: [{ mount_point: '/', total_bytes: 1_000_000_000, free_bytes: 500_000_000 }],
+            cache_bytes: 0,
+            workspace_bytes: 0,
+          },
+        }),
+      ]),
+    )
+    mountView()
+    await vi.waitFor(() => expect(wrapper!.find('.usage-cell').exists()).toBe(true))
+
+    const cells = wrapper!.findAll('.usage-cell')
+    expect(cells).toHaveLength(2) // 槽位 + 磁盘
+    // 槽位 1/2 → 50%。
+    expect(cells[0]!.find('.pct').text()).toBe('50%')
+    expect(cells[0]!.find('.fill').attributes('style')).toContain('width: 50%')
+    expect(cells[0]!.text()).toContain('1 / 2')
+    // 磁盘 5e8/1e9 字节（1024 进制）→ 50%，476.8 MB / 953.7 MB。
+    expect(cells[1]!.find('.pct').text()).toBe('50%')
+    expect(cells[1]!.text()).toContain('476.8 MB')
+    expect(cells[1]!.text()).toContain('953.7 MB')
+  })
+
+  it('无 Agent：NEmpty 空态 + 注册引导 + 接入入口', async () => {
     setRoute('GET', '/api/v1/agents', jsonResponse(200, []))
     mountView()
     await vi.waitFor(() => expect(wrapper!.find('.n-empty').exists()).toBe(true))
@@ -158,7 +226,7 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
     expect(wrapper!.find('.n-data-table').exists()).toBe(false)
   })
 
-  it('403（非全局 admin）→ admin-only 退化态，不渲染列表/动作', async () => {
+  it('403（非全局 admin）→ admin-only 退化态，不渲染指标卡/列表', async () => {
     setRoute(
       'GET',
       '/api/v1/agents',
@@ -167,10 +235,10 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
     mountView()
     await vi.waitFor(() => expect(wrapper!.text()).toContain('仅全局管理员可见'))
     expect(wrapper!.find('.n-data-table').exists()).toBe(false)
-    expect(wrapper!.find('button[name="agent-new"]').exists()).toBe(false)
+    expect(wrapper!.find('.metric-row').exists()).toBe(false)
   })
 
-  it('建条目：POST /agents → 一次性 token + 注册码 + 按 OS 复制命令 + 刷新列表', async () => {
+  it('建条目（空态接入按钮）：POST /agents → 一次性 token + 注册码 + 刷新列表', async () => {
     setRoute('GET', '/api/v1/agents', jsonResponse(200, []))
     mountView()
     await vi.waitFor(() => expect(wrapper!.find('.n-empty').exists()).toBe(true))
@@ -191,7 +259,7 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
       }),
     )
 
-    await wrapper!.get('button[name="agent-new"]').trigger('click')
+    await wrapper!.get('button[name="agent-new-empty"]').trigger('click')
     await vi.waitFor(() => expect(document.querySelector('.n-modal')).toBeTruthy())
     await setModalInput('.n-modal input[name="agent-name"]', 'linux-1')
     await setModalInput('.n-modal textarea[name="agent-labels"]', 'region=cn')
@@ -199,7 +267,6 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
     await (document.querySelector('.n-modal button[name="agent-create"]') as HTMLElement).click()
 
     // 凭据弹窗：token + 注册码明文仅此一次 + 按 OS 复制命令（--reg-key 换码）。
-    // 表单弹窗关闭动画期间两者并存——按内容定位凭据弹窗。
     let credsModal: Element | undefined
     await vi.waitFor(() => {
       credsModal = [...document.querySelectorAll('.n-modal')].find((m) =>
@@ -209,9 +276,7 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
     })
     const modalText = credsModal!.textContent ?? ''
     expect(modalText).toContain('sisa_reg_C0D3')
-    expect(modalText).toContain('sisyphus-agent')
     expect(modalText).toContain('--reg-key sisa_reg_C0D3')
-    expect(modalText).not.toContain('.exe') // 默认 Linux/macOS 档
 
     // 提交形态：POST /api/v1/agents，标签解析为数组、槽位为数值。
     const post = fetchMock.mock.calls.find(
@@ -238,7 +303,7 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
       '/api/v1/agents',
       jsonResponse(409, { code: 'CONFLICT', message: 'Agent 名已存在：linux-1' }),
     )
-    await wrapper!.get('button[name="agent-new"]').trigger('click')
+    await wrapper!.get('button[name="agent-new-empty"]').trigger('click')
     await vi.waitFor(() => expect(document.querySelector('.n-modal')).toBeTruthy())
     await setModalInput('.n-modal input[name="agent-name"]', 'linux-1')
     await (document.querySelector('.n-modal button[name="agent-create"]') as HTMLElement).click()
@@ -268,7 +333,7 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
         },
       }),
     )
-    await wrapper!.get('button[name="agent-new"]').trigger('click')
+    await wrapper!.get('button[name="agent-new-empty"]').trigger('click')
     await vi.waitFor(() => expect(document.querySelector('.n-modal')).toBeTruthy())
     await setModalInput('.n-modal input[name="agent-name"]', 'linux-1')
     await setModalInput('.n-modal textarea[name="agent-labels"]', 'region')
@@ -295,7 +360,7 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
       expect(wrapper!.findAll('.n-data-table-tbody .n-data-table-tr')).toHaveLength(1),
     )
 
-    // 切换后列表回读：停用 Agent 回到列表（disabled=true）。
+    // 刷新后列表回读：停用 Agent 回到列表（disabled=true）。
     setRoute(
       'GET',
       '/api/v1/agents',
@@ -303,7 +368,7 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
     )
 
     // 初始开关 = 启用态（active）。
-    const sw = wrapper!.get('.agent-toggle')
+    const sw = wrapper!.get('.machine-toggle')
     expect(sw.classes()).toContain('n-switch--active')
     await sw.trigger('click')
 
@@ -317,7 +382,7 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
     })
     // 刷新后开关翻为停用态（非 active）。
     await vi.waitFor(() =>
-      expect(wrapper!.get('.agent-toggle').classes()).not.toContain('n-switch--active'),
+      expect(wrapper!.get('.machine-toggle').classes()).not.toContain('n-switch--active'),
     )
   })
 
@@ -337,8 +402,8 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
       expect(wrapper!.findAll('.n-data-table-tbody .n-data-table-tr')).toHaveLength(1),
     )
 
-    // 行内「编辑」按钮（动作列）→ 打开编辑弹窗（预填当前值）。
-    await wrapper!.get('.agent-row-actions button').trigger('click')
+    // 行内「编辑」按钮（动作列；NSwitch 非 button 元素，首个 button 即编辑）。
+    await wrapper!.get('.machine-row-actions button').trigger('click')
     await vi.waitFor(() => expect(document.querySelector('.n-modal')?.textContent).toContain('编辑 Agent'))
     expect((document.querySelector('.n-modal input[name="edit-concurrency"]') as HTMLInputElement)?.value).toBe('1')
     expect((document.querySelector('.n-modal textarea[name="edit-labels"]') as HTMLTextAreaElement)?.value).toBe('region=cn')
@@ -363,13 +428,13 @@ describe('AgentListView 列表 + 建条目 + 停用/启用 + 编辑', () => {
     })
   })
 
-  it('点击 Agent 名 → 跳详情页', async () => {
+  it('点击构建机名 → 跳详情页；详情按钮同效', async () => {
     setRoute('GET', '/api/v1/agents', jsonResponse(200, [agent('linux-1', { online: true })]))
     mountView()
     await vi.waitFor(() => expect(wrapper!.text()).toContain('linux-1'))
 
     const pushSpy = vi.spyOn(router, 'push')
-    await wrapper!.get('.agent-name-btn').trigger('click')
+    await wrapper!.get('.machine-name-btn').trigger('click')
     expect(pushSpy).toHaveBeenCalledWith({
       name: 'agent-detail',
       params: { name: 'linux-1' },

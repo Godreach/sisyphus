@@ -26,12 +26,33 @@ const routes: RouteRecordRaw[] = [
     meta: { public: true },
   },
   {
+    // 工作台（原型页一，spec #99）。
     path: '/',
     name: 'overview',
     component: () => import('@/views/OverviewView.vue'),
     meta: { title: 'routes.overview' },
   },
   {
+    // 流水线（原型页二，spec #99）：跨项目流水线列表（chips + 双视图）。
+    path: '/pipelines',
+    name: 'pipelines',
+    component: () => import('@/views/PipelinesView.vue'),
+    meta: { title: 'nav.pipelines' },
+  },
+  {
+    // 构建机（原型页三，spec #99）：Agent 资源表（指标卡 + 徽章/进度条）。
+    path: '/machines',
+    name: 'machines',
+    component: () => import('@/views/AgentListView.vue'),
+    meta: { title: 'nav.machines' },
+  },
+  {
+    // 旧列表入口重定向（侧栏仅三项；深链不断）。
+    path: '/agents',
+    redirect: { name: 'machines' },
+  },
+  {
+    // 项目管理页（侧栏无入口；新建流水线 CTA 与流水线页跳转消费）。
     path: '/projects',
     name: 'projects',
     component: () => import('@/views/ProjectsView.vue'),
@@ -72,8 +93,7 @@ const routes: RouteRecordRaw[] = [
     name: 'agent-detail',
     component: () => import('@/views/AgentDetailView.vue'),
     meta: { title: 'routes.agentDetail' },
-  },
-  {
+  },  {
     path: '/admin/secrets',
     name: 'admin-secrets',
     component: () => import('@/views/SecretsView.vue'),

@@ -19,6 +19,38 @@ export function formatDuration(ms: number | null | undefined): string {
   return parts.join(' ')
 }
 
+/** 相对年龄结构（`relativeAge` 产出；文案侧经 i18n `time.*` 键渲染）。 */
+export type RelativeAge = { unit: 'now' | 'min' | 'hour' | 'day'; n: number }
+
+/** Unix 毫秒时间戳 → 相对年龄（刚刚 / n 分钟 / n 小时 / n 天，向零取整）。 */
+export function relativeAge(
+  ms: number | null | undefined,
+  now: number = Date.now(),
+): RelativeAge {
+  if (ms == null || !Number.isFinite(ms)) return { unit: 'now', n: 0 }
+  const diff = Math.max(0, now - ms)
+  const minutes = Math.floor(diff / 60_000)
+  if (minutes < 1) return { unit: 'now', n: 0 }
+  if (minutes < 60) return { unit: 'min', n: minutes }
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return { unit: 'hour', n: hours }
+  return { unit: 'day', n: Math.floor(hours / 24) }
+}
+
+/** 相对年龄 → i18n 键（`time.justNow` / `time.minutesAgo` / …）。 */
+export function relativeAgeKey(age: RelativeAge): string {
+  switch (age.unit) {
+    case 'min':
+      return 'time.minutesAgo'
+    case 'hour':
+      return 'time.hoursAgo'
+    case 'day':
+      return 'time.daysAgo'
+    default:
+      return 'time.justNow'
+  }
+}
+
 /** Unix 毫秒时间戳 → 本地时间 `YYYY-MM-DD HH:mm:ss`（无时间戳返回 '-'）。 */
 export function formatDateTime(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) return '-'

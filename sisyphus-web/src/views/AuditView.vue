@@ -180,10 +180,6 @@ function detailText(detail: AuditEntryResponse['detail']): string {
 
 <template>
   <div class="admin-page audit-page">
-    <div class="page-header">
-      <h1 class="page-title">{{ t('routes.adminAudit') }}</h1>
-    </div>
-
     <!-- 403 退化态：仅全局管理员可见（审计仅全局 admin 可读）。 -->
     <p v-if="adminOnly" class="form-hint">{{ t('admin.adminOnly') }}</p>
 

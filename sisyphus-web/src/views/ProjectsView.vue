@@ -15,7 +15,7 @@
 // 通知；视觉与 #84/#86 主题一致。
 
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import {
   NCard,
@@ -41,6 +41,7 @@ import type { ProjectResponse, ScmTypeDto } from '@/api/types'
 
 const { t } = useI18n()
 const router = useRouter()
+const route = useRoute()
 const message = useMessage()
 
 const projects = ref<ProjectResponse[] | null>(null)
@@ -89,7 +90,14 @@ const rules = computed<FormRules>(() => ({
   },
 }))
 
-onMounted(load)
+onMounted(() => {
+  // 顶栏「新建流水线」CTA（?create=1）→ 直接展开新建表单并清参。
+  if (route.query.create === '1') {
+    showForm.value = true
+    void router.replace({ query: { ...route.query, create: undefined } })
+  }
+  void load()
+})
 
 /** 加载项目列表（按可见性过滤）。 */
 async function load(): Promise<void> {
@@ -208,8 +216,7 @@ function onScmTypeChange(v: ScmTypeDto): void {
 
 <template>
   <div class="projects-page">
-    <div class="page-header">
-      <h1 class="page-title">{{ t('routes.projects') }}</h1>
+    <div class="page-header header-end">
       <n-button type="primary" name="project-new" @click="toggleForm">
         <template #icon>
           <n-icon :component="CreateOutline" />

@@ -314,8 +314,7 @@ async function deletePackage(packageName: string): Promise<void> {
 
 <template>
   <div class="admin-page upgrade-page">
-    <div class="page-header">
-      <h1 class="page-title">{{ t('routes.adminUpgrade') }}</h1>
+    <div class="page-header header-end">
       <n-button name="upgrade-refresh" @click="load">
         {{ t('upgrade.refresh') }}
       </n-button>
