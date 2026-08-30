@@ -27,6 +27,7 @@ import type {
   PatchAgentRequest,
   PatchUserRequest,
   PipelineDefinitionResponse,
+  PipelineStatsResponse,
   ProjectResponse,
   PutSecretRequest,
   OverviewSnapshotResponse,
@@ -246,6 +247,15 @@ export const pipelinesApi = {
   getDefinition: (project: string, pipeline: string) =>
     http.get<PipelineDefinitionResponse>(
       `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}`,
+    ),
+
+  /** 流水线统计（viewer 档，契约票 #102）：服务端按最近 N 条构建聚合成功率
+   *  与平均耗时 + 最近一条构建概要（流水线页单请求成行）。窗口内无终态
+   *  构建 → success_rate / avg_duration_ms 为 null（页面显示「—」）。 */
+  stats: (project: string, pipeline: string, window?: number) =>
+    http.get<PipelineStatsResponse>(
+      `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/stats`,
+      { query: window != null ? { window } : {} },
     ),
 
   /** 保存 pipeline 定义（项目 admin 档，票 B4-T8 编辑器保存）：原样提交 model

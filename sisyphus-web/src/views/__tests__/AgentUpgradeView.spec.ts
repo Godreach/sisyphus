@@ -41,6 +41,8 @@ function agent(name: string, overrides: Partial<AgentResponse> = {}): AgentRespo
     draining: false,
     upgrade_phase: null,
     upgrade_error: null,
+    cpu_usage: 20,
+    memory_usage: 35,
     created_at: 0,
     updated_at: 0,
     ...overrides,

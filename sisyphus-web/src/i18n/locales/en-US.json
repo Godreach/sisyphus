@@ -256,6 +256,8 @@
     "stateBuilding": "Building",
     "colMachine": "Machine",
     "colSlots": "Slots",
+    "colCpu": "CPU",
+    "colMem": "Memory",
     "colDisk": "Disk",
     "colTask": "Current task",
     "colRuntime": "Uptime",
@@ -694,7 +696,7 @@
     "rerunRequested": "Rerun requested",
     "empty": "No pipelines yet",
     "emptyHint": "Create a project and save a pipeline definition; it will show up here.",
-    "statsHint": "Success rate and average duration are estimated from each pipeline's last 20 runs; the list is aggregated from projects and recent builds.",
+    "statsHint": "Success rate and average duration are aggregated server-side from each pipeline's last 20 builds (terminal states); the list is aggregated from projects and recent builds.",
     "totalPipelines": "{n} pipelines in total"
   }
 }

@@ -198,6 +198,11 @@ export interface AgentResponse {
   upgrade_phase?: string | null
   /** 升级失败原因（fallback 时记）。 */
   upgrade_error?: string | null
+  /** CPU 利用率（0–100 整数百分比；最近心跳值，契约票 #102）。Agent 版本
+   *  尚无此上报能力或从未收到带该字段的心跳 → null（页面显示「—」）。 */
+  cpu_usage: number | null
+  /** 内存利用率（0–100 整数百分比；口径同 cpu_usage）。 */
+  memory_usage: number | null
   created_at: number
   updated_at: number
 }
@@ -208,6 +213,49 @@ export interface CreatedAgentResponse {
   token: string
   register_code: string
   agent: AgentResponse
+}
+
+// ---------------------------------------------------------------------------
+// 流水线统计 DTO（契约票 #102：新增统计端点，非挂靠构建列表——统计窗口与
+// 分页窗口口径不同，且响应携带 latest_build 供流水线页单请求成行）。后端
+// `api/pipelines.rs` 阶段照单实现。
+// ---------------------------------------------------------------------------
+
+/** 最近一条构建概要（任意状态；流水线统计响应的行内消费形态）。 */
+export interface LatestBuildRef {
+  /** per-pipeline 构建号。 */
+  number: number
+  /** 构建状态。 */
+  status: BuildStatusDto
+  /** 触发源。 */
+  trigger: TriggerSourceDto
+  /** 开始时刻（未运行为空）。 */
+  started_at: number | null
+  /** 终态时刻。 */
+  finished_at: number | null
+}
+
+/** 流水线统计响应（服务端聚合，契约票 #102 口径冻结）：
+ *  窗口 = 最近 N 条构建（按号倒序、不分状态）；成功率分母为窗口内终态
+ *  （succeeded/failed/cancelled/timeout 四类）；平均耗时只取 started_at 与
+ *  finished_at 均非空的终态构建（含 cancelled）。取不到时字段为 null——
+ *  前端显示「—」，不造假。 */
+export interface PipelineStatsResponse {
+  /** 服务端实际裁剪后的窗口大小（= min(请求 window, total_builds, 100)）。 */
+  window: number
+  /** 该 pipeline 全部构建数（不受窗口限制）。 */
+  total_builds: number
+  /** 窗口内终态构建数（四类合计，成功率的分母）。 */
+  terminal_count: number
+  /** 窗口内 succeeded 数（成功率的分子）。 */
+  succeeded_count: number
+  /** 成功率（succeeded/terminal × 100，一位小数）；窗口内无终态构建 → null。 */
+  success_rate: number | null
+  /** 平均耗时（终态且有起止时刻的 (finished−started) 平均，整数毫秒）；
+   *  无样本 → null。 */
+  avg_duration_ms: number | null
+  /** 最近一条构建概要（任意状态）；从未运行为 null。 */
+  latest_build: LatestBuildRef | null
 }
 
 // ---------------------------------------------------------------------------

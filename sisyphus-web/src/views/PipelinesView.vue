@@ -2,12 +2,13 @@
 // 流水线页（原型页二，spec #99）：跨项目流水线列表——筛选 Chips（全部/
 // 运行中/失败/成功，含计数）+ 列表/卡片双视图 + 排序 + 行内动作。
 //
-// 数据（就近填充，后端无 pipeline 清单端点）：
+// 数据（就近填充）：
 // - 项目清单 `GET /projects` + 逐项目探测 pipeline 名（main/release，与项目
 //   详情页同一降级口径，显式标注）+ 概览快照 recent_builds 的跨项目对
 //   （非致命，失败跳过）。
-// - 每对 (project, pipeline) 拉构建列表首页（limit 20）：最近一次构建给状态/
-//   触发/时间；成功率与平均耗时按窗口内终态就近估算；取不到显示「—」。
+// - 每对 (project, pipeline) 调统计端点 `GET …/stats?window=20`（契约票
+//   #102）：成功率/平均耗时/构建总数/最近一条构建由服务端聚合；窗口内无
+//   终态构建时 success_rate / avg_duration_ms 为 null → 显示「—」。
 // - 行内动作按最近构建状态映射：运行中/排队 → 终止（红）；失败 → 重试
 //   （橙）；其余 → 运行（蓝），走既有 cancel / rerun / trigger API。
 //
@@ -18,18 +19,18 @@ import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { NAlert, NDropdown, NEmpty, NSkeleton, useMessage } from 'naive-ui'
 
-import { buildsApi, overviewApi, projectsApi } from '@/api/client'
+import { buildsApi, overviewApi, pipelinesApi, projectsApi } from '@/api/client'
 import { describeActionError, describeSubmitError } from '@/api/errors'
 import { ApiError } from '@/api/http'
 import { formatDuration, relativeAge, relativeAgeKey } from '@/utils/format'
-import type { BuildSummaryResponse } from '@/api/types'
+import type { LatestBuildRef } from '@/api/types'
 
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
 
-/** 统计窗口（成功率/平均耗时的就近估算口径，与 statsHint 文案同步）。 */
+/** 统计窗口（服务端聚合口径，契约票 #102）。 */
 const WINDOW = 20
 /** pipeline 名探测清单（与 ProjectDetailView 同一口径；端点交付后换真列表）。 */
 const PROBE_NAMES = ['main', 'release']
@@ -37,13 +38,13 @@ const PROBE_NAMES = ['main', 'release']
 interface PipelineRow {
   project: string
   pipeline: string
-  /** 最近一次构建（窗口首页第一条，按号倒序）；从未运行为 null。 */
-  latest: BuildSummaryResponse | null
-  /** 该 pipeline 构建总数（服务端 total）。 */
+  /** 最近一条构建（stats 端点 latest_build，任意状态）；从未运行为 null。 */
+  latest: LatestBuildRef | null
+  /** 该 pipeline 构建总数（服务端统计，不受窗口限制）。 */
   total: number
-  /** 窗口内终态成功率（一位小数百分号；无终态为 null）。 */
+  /** 窗口内终态成功率（服务端一位小数；无终态为 null → 「—」）。 */
   rate: string | null
-  /** 窗口内终态平均耗时毫秒（无终态为 null）。 */
+  /** 窗口内终态平均耗时毫秒（无样本为 null → 「—」）。 */
   avgMs: number | null
 }
 
@@ -115,34 +116,19 @@ async function load(): Promise<void> {
 /** 单对 (project, pipeline) → 行数据；404/403 = 无可见运行记录。 */
 async function loadRow(pair: { project: string; pipeline: string }): Promise<PipelineRow> {
   try {
-    const list = await buildsApi.list(pair.project, pair.pipeline, { page: 1, limit: WINDOW })
-    const latest = list.items[0] ?? null
-    const finished = list.items.filter((b) => isTerminal(b.status))
-    const ok = finished.filter((b) => b.status === 'succeeded').length
-    const durations = finished
-      .filter((b) => b.started_at != null && b.finished_at != null)
-      .map((b) => (b.finished_at as number) - (b.started_at as number))
+    const stats = await pipelinesApi.stats(pair.project, pair.pipeline, WINDOW)
     return {
       project: pair.project,
       pipeline: pair.pipeline,
-      latest,
-      total: list.total,
-      rate: finished.length > 0 ? `${((ok / finished.length) * 100).toFixed(1)}%` : null,
-      avgMs:
-        durations.length > 0
-          ? durations.reduce((sum, d) => sum + d, 0) / durations.length
-          : null,
+      latest: stats.latest_build,
+      total: stats.total_builds,
+      rate: stats.success_rate != null ? `${stats.success_rate}%` : null,
+      avgMs: stats.avg_duration_ms,
     }
   } catch {
-    // 清单在、构建不可见（404）或权限不足（403）：按「未运行」行展示。
+    // 清单在、统计不可见（404）或权限不足（403）：按「未运行」行展示。
     return { project: pair.project, pipeline: pair.pipeline, latest: null, total: 0, rate: null, avgMs: null }
   }
-}
-
-function isTerminal(status: BuildSummaryResponse['status']): boolean {
-  return (
-    status === 'succeeded' || status === 'failed' || status === 'cancelled' || status === 'timeout'
-  )
 }
 
 function sortRows(list: PipelineRow[]): PipelineRow[] {

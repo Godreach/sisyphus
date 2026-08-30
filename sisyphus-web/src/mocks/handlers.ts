@@ -73,6 +73,16 @@ function isErrorFixture(name: string): boolean {
   return name === 'error-demo'
 }
 
+/** fixture + 动态构建合并（同号动态优先——from_failed 重跑以动态态接管）。
+ *  构建列表与统计端点共用的单一合并点。 */
+function mergedSummaries(project: string, pipeline: string): BuildSummaryResponse[] {
+  const byNumber = new Map<number, BuildSummaryResponse>()
+  for (const s of [...db.buildSummaries(project, pipeline), ...dynamicSummaries(project, pipeline)]) {
+    byNumber.set(s.number, s)
+  }
+  return [...byNumber.values()]
+}
+
 export function createHandlers(options: MockHandlerOptions) {
   const h = {
     // ----- 认证（后端 api/auth.rs，ADR-0014）-----
@@ -174,6 +184,9 @@ export function createHandlers(options: MockHandlerOptions) {
         draining: false,
         upgrade_phase: null,
         upgrade_error: null,
+        // 未上线无心跳：利用率无值（「—」路径，契约票 #102）。
+        cpu_usage: null,
+        memory_usage: null,
         created_at: Date.now(),
         updated_at: Date.now(),
       }
@@ -252,6 +265,31 @@ export function createHandlers(options: MockHandlerOptions) {
       },
     ),
 
+    // ----- 流水线统计（契约票 #102：fixture + 动态合并聚合，口径同构建列表）-----
+    pipelineStats: http.get(
+      '/api/v1/projects/:name/pipelines/:pipeline/stats',
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const name = String(params.name)
+        const pipeline = String(params.pipeline)
+        await delay(120)
+        if (isErrorFixture(name)) {
+          return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+        }
+        if (db.findPipeline(name, pipeline) == null) {
+          return jsonError(404, 'NOT_FOUND', '流水线不存在')
+        }
+        const url = new URL(request.url)
+        const rawWindow = url.searchParams.get('window')
+        // 窗口钳制单点在 db.pipelineStatsFrom（缺省/非数值 → 缺省 20；越界 → 边界）。
+        const window =
+          rawWindow != null && rawWindow !== '' ? Number(rawWindow) : db.STATS_WINDOW_DEFAULT
+        const all = mergedSummaries(name, pipeline)
+        return HttpResponse.json(db.pipelineStatsFrom(all, all.length, window))
+      },
+    ),
+
     // ----- 构建（后端 api/builds.rs，ADR-0006/0008/0013）-----
     buildList: http.get(
       '/api/v1/projects/:name/pipelines/:pipeline/builds',
@@ -275,13 +313,7 @@ export function createHandlers(options: MockHandlerOptions) {
         const page = Math.max(1, Number(url.searchParams.get('page') ?? '1'))
         const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit') ?? '20')))
 
-        // 动态（触发/重跑）优先 + fixture，同号动态覆盖。
-        const dyn = dynamicSummaries(name, pipeline)
-        const byNumber = new Map<number, BuildSummaryResponse>()
-        for (const s of [...db.buildSummaries(name, pipeline), ...dyn]) {
-          byNumber.set(s.number, s)
-        }
-        const all = [...byNumber.values()]
+        const all = mergedSummaries(name, pipeline)
           .filter((s) => status == null || s.status === status)
           .sort((a, b) => b.number - a.number)
         const items = all.slice((page - 1) * limit, page * limit)

@@ -1,13 +1,14 @@
 <script setup lang="ts">
 // 构建机页（原型页三，spec #99，ADR-0008/0010/0017 数据面不变）：
-// 四张指标卡（总数/在线/离线/异常）+ 资源表（状态徽章 / 槽位进度 / 磁盘
-// 进度 / 当前任务 / 运行时长 / 最后心跳 / 操作）。
+// 四张指标卡（总数/在线/离线/异常）+ 资源表（状态徽章 / 槽位进度 / CPU /
+// 内存 / 磁盘进度 / 当前任务 / 运行时长 / 最后心跳 / 操作）。
 //
-// 与原型的字段就近映射（后端无 CPU/内存/温度）：
-// - 原型 CPU 列 → 槽位占用进度条（active_jobs / max_concurrency）。
+// 与原型的字段映射（CPU/内存自契约票 #102 起为真数据）：
+// - 原型 CPU 列 → cpu_usage 利用率（心跳上报真值；未上报「—」）。
+// - 原型 内存列 → memory_usage 利用率（同上）。
 // - 原型 磁盘列 → disk_usage 卷聚合进度条（used / total 字节）。
-// - 原型 内存列 → 无对应数据，不渲染（版式保持 8 列以内）。
-// - 运行时长 = now - created_at；温度类数据一律不造假。
+// - 槽位列 = active_jobs / max_concurrency（调度真值，非原型映射）。
+// - 温度类数据 v1 裁定不做（契约票 #102），不造假。
 //
 // 功能沿用既有流（票 B4-T5 / #94）：
 // - 列表 `GET /agents`（全局 admin；403 → admin-only 退化态）。
@@ -204,13 +205,28 @@ function badgeLabel(state: MachineBadge): string {
   }
 }
 
-/** 槽位占用（原型 CPU 列）：百分比 + 红色阈值 90%。 */
+/** 槽位占用（调度真值列）：百分比 + 红色阈值 90%。 */
 function slotUsage(agent: AgentResponse): { pct: number; red: boolean } {
   const pct =
     agent.max_concurrency > 0
       ? Math.round((agent.active_jobs / agent.max_concurrency) * 100)
       : 0
   return { pct: Math.min(100, pct), red: pct >= 90 }
+}
+
+/** 利用率文本（CPU/内存列，契约票 #102）：未上报（null）→「—」。 */
+function usageText(value: number | null): string {
+  return value != null ? `${value}%` : '—'
+}
+
+/** 利用率红色阈值 90%（与槽位/磁盘一致）。 */
+function usageRed(value: number | null): boolean {
+  return value != null && value >= 90
+}
+
+/** CPU/内存列单元格（契约票 #102 真形态消费；列工厂消双列逐字重复）。 */
+function usageCell(value: number | null): ReturnType<typeof h> {
+  return h('span', { class: `machine-cell${usageRed(value) ? ' red' : ''}` }, usageText(value))
 }
 
 /** 磁盘占用（卷聚合；未上报为 null）。 */
@@ -399,6 +415,18 @@ const columns = computed<DataTableColumns<AgentResponse>>(() => [
     },
   },
   {
+    title: t('agents.colCpu'),
+    key: 'cpu',
+    width: 80,
+    render: (row) => usageCell(row.cpu_usage),
+  },
+  {
+    title: t('agents.colMem'),
+    key: 'mem',
+    width: 80,
+    render: (row) => usageCell(row.memory_usage),
+  },
+  {
     title: t('agents.colDisk'),
     key: 'disk',
     width: 170,
@@ -548,7 +576,7 @@ const rowKey = (row: AgentResponse): string => row.name
             :bordered="false"
             :single-line="true"
             size="small"
-            :scroll-x="1020"
+            :scroll-x="1180"
             class="machine-data-table"
           />
         </section>
@@ -752,6 +780,11 @@ const rowKey = (row: AgentResponse): string => row.name
 
 .machine-cell.gray {
   color: var(--sisy-color-text-secondary);
+}
+
+/* CPU/内存利用率红色阈值（与进度条 pct.red 同语义色）。 */
+.machine-cell.red {
+  color: var(--sisy-color-danger-text);
 }
 
 .machine-task {

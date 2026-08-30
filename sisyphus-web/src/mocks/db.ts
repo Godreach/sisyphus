@@ -17,6 +17,7 @@ import type {
   JobStatusDto,
   ModelParameterDecl,
   OverviewSnapshotResponse,
+  PipelineStatsResponse,
   ProjectResponse,
   RecentBuildDto,
   TriggerSourceDto,
@@ -516,6 +517,11 @@ export function artifactsOf(project: string, pipeline: string, number: number): 
 
 // ---------------------------------------------------------------------------
 // Agent fixture（多状态：在线/离线/停用/排空升级中/版本不兼容）
+//
+// cpu_usage / memory_usage（契约票 #102）：随心跳上报的利用率百分比。
+// 上报能力自 Agent v1.4 起——更旧版本（build-05 v1.3.0、build-07 v0.9.5）
+// 固定 null（页面「—」路径）；离线 Agent 保留最后心跳值（与 disk_usage
+// 现状一致）。新建 Agent 条目（未上线无心跳）同样为 null。
 // ---------------------------------------------------------------------------
 
 const AGENT_VERSION_TARGET: VersionDto = { major: 1, minor: 5, patch: 0 }
@@ -548,6 +554,8 @@ export const AGENTS: AgentResponse[] = [
     draining: false,
     upgrade_phase: null,
     upgrade_error: null,
+    cpu_usage: 48,
+    memory_usage: 41,
     created_at: NOW - 60 * 86400e3,
     updated_at: NOW - 15e3,
   },
@@ -566,6 +574,8 @@ export const AGENTS: AgentResponse[] = [
     draining: false,
     upgrade_phase: null,
     upgrade_error: null,
+    cpu_usage: 3,
+    memory_usage: 12,
     created_at: NOW - 55 * 86400e3,
     updated_at: NOW - 22e3,
   },
@@ -584,6 +594,8 @@ export const AGENTS: AgentResponse[] = [
     draining: false,
     upgrade_phase: null,
     upgrade_error: null,
+    cpu_usage: 93,
+    memory_usage: 78,
     created_at: NOW - 40 * 86400e3,
     updated_at: NOW - 9e3,
   },
@@ -602,6 +614,8 @@ export const AGENTS: AgentResponse[] = [
     draining: false,
     upgrade_phase: null,
     upgrade_error: null,
+    cpu_usage: 12,
+    memory_usage: 30,
     created_at: NOW - 50 * 86400e3,
     updated_at: NOW - 2 * 3600e3,
   },
@@ -620,6 +634,8 @@ export const AGENTS: AgentResponse[] = [
     draining: false,
     upgrade_phase: null,
     upgrade_error: null,
+    cpu_usage: null,
+    memory_usage: null,
     created_at: NOW - 70 * 86400e3,
     updated_at: NOW - 12 * 86400e3,
   },
@@ -638,6 +654,8 @@ export const AGENTS: AgentResponse[] = [
     draining: true,
     upgrade_phase: 'downloading',
     upgrade_error: null,
+    cpu_usage: 8,
+    memory_usage: 22,
     created_at: NOW - 30 * 86400e3,
     updated_at: NOW - 5 * 60e3,
   },
@@ -656,6 +674,8 @@ export const AGENTS: AgentResponse[] = [
     draining: false,
     upgrade_phase: null,
     upgrade_error: null,
+    cpu_usage: null,
+    memory_usage: null,
     created_at: NOW - 80 * 86400e3,
     updated_at: NOW - 30e3,
   },
@@ -729,4 +749,60 @@ export function overviewSnapshot(): OverviewSnapshotResponse {
 export function nextBuildNumber(project: string, pipeline: string): number {
   const maxFixture = Math.max(0, ...buildSummaries(project, pipeline).map((s) => s.number))
   return maxFixture + 1
+}
+
+// ---------------------------------------------------------------------------
+// 流水线统计（契约票 #102 口径冻结）：按给定构建概要集聚合成功率/平均耗时
+// + 最近一条构建。聚合逻辑单点在 db.ts，handlers 层传入「fixture + 动态」
+// 合并后的概要（与构建列表同一合并规则，同号动态优先）。
+// ---------------------------------------------------------------------------
+
+/** 统计窗口合法域：1..=100。缺省/非数值 → 缺省 20；数值越界 → 取边界值
+ *  （1 或 100）；再与 total_builds 取小（窗口不超过实际构建数）。钳制
+ *  单点在本函数——handler 只透传原始参数，不预钳制。 */
+export const STATS_WINDOW_MAX = 100
+export const STATS_WINDOW_DEFAULT = 20
+
+/** 构建终态四类（succeeded/failed/cancelled/timeout；成功率分母口径）。
+ *  单点常量——统计聚合与展示派生共用，新增终态只改这一处。 */
+export const TERMINAL_STATUSES = ['succeeded', 'failed', 'cancelled', 'timeout'] as const
+
+function isTerminalStatus(status: BuildStatusDto): boolean {
+  return (TERMINAL_STATUSES as readonly string[]).includes(status)
+}
+
+/** 概要集 → 统计响应（口径见 PipelineStatsResponse 注释）。 */
+export function pipelineStatsFrom(
+  summaries: BuildSummaryResponse[],
+  totalBuilds: number,
+  requestedWindow: number,
+): PipelineStatsResponse {
+  const bounded = Number.isFinite(requestedWindow) ? Math.floor(requestedWindow) : STATS_WINDOW_DEFAULT
+  const window = Math.min(Math.max(1, bounded), totalBuilds, STATS_WINDOW_MAX)
+  const recent = [...summaries].sort((a, b) => b.number - a.number)
+  const inWindow = recent.slice(0, window)
+  const terminal = inWindow.filter((s) => isTerminalStatus(s.status))
+  const succeeded = terminal.filter((s) => s.status === 'succeeded')
+  const durations = terminal
+    .filter((s) => s.started_at != null && s.finished_at != null)
+    .map((s) => (s.finished_at as number) - (s.started_at as number))
+  const latest = recent[0] ?? null
+  return {
+    window,
+    total_builds: totalBuilds,
+    terminal_count: terminal.length,
+    succeeded_count: succeeded.length,
+    success_rate: terminal.length > 0 ? Math.round((succeeded.length / terminal.length) * 1000) / 10 : null,
+    avg_duration_ms:
+      durations.length > 0
+        ? Math.round(durations.reduce((sum, d) => sum + d, 0) / durations.length)
+        : null,
+    latest_build: latest == null ? null : {
+      number: latest.number,
+      status: latest.status,
+      trigger: latest.trigger,
+      started_at: latest.started_at,
+      finished_at: latest.finished_at,
+    },
+  }
 }
