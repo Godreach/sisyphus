@@ -20,7 +20,7 @@ import type {
   TriggerSourceDto,
 } from '@/api/types'
 import type { LogStreamEvent } from '@/api/sse'
-import { findPipeline, mulberry32, nextBuildNumber } from './db'
+import { AGENTS, findPipeline, mulberry32, nextBuildNumber } from './db'
 
 /** 动态构建内存态。 */
 interface DynJob {
@@ -78,6 +78,16 @@ function sleep(ms: number): Promise<void> {
     const t = setTimeout(resolve, ms)
     ;(t as unknown as { unref?: () => void }).unref?.()
   })
+}
+
+/** 动态构建任务占/释放 Agent 槽位（回写 fixture AGENTS.active_jobs）：
+ *  概览「在途任务 = 槽位占用」与构建机页当前任务对动态构建同口径
+ *  （契约票 #104：触发后刷新快照，在途/队列计数真实变化）。 */
+function adjustAgentLoad(agentId: number | null, delta: number): void {
+  if (agentId == null) return
+  const agent = AGENTS[agentId - 1]
+  if (agent == null) return
+  agent.active_jobs = Math.max(0, agent.active_jobs + delta)
 }
 
 function appendLog(build: DynBuild, job: string, attempt: number, event: LogStreamEvent): void {
@@ -151,6 +161,21 @@ export function dynamicSummaries(project: string, pipeline: string): BuildSummar
   const bucket = BUILDS.get(`${project}/${pipeline}`)
   if (bucket == null) return []
   return [...bucket.values()].map(summaryOf)
+}
+
+/** 全部动态构建概要（跨流水线；概览快照合并消费，契约票 #104：
+ *  最近构建须含排队/运行中的动态态）。 */
+export function allDynamicSummaries(): { project: string; pipeline: string; summary: BuildSummaryResponse }[] {
+  const rows: { project: string; pipeline: string; summary: BuildSummaryResponse }[] = []
+  for (const [key, bucket] of BUILDS) {
+    const parts = key.split('/')
+    const project = parts[0] as string
+    const pipeline = parts[1] as string
+    for (const b of bucket.values()) {
+      rows.push({ project, pipeline, summary: summaryOf(b) })
+    }
+  }
+  return rows
 }
 
 function summaryOf(b: DynBuild): BuildSummaryResponse {
@@ -325,6 +350,7 @@ export function cancelBuild(project: string, pipeline: string, number: number): 
       if (job.status === 'running') {
         job.status = 'cancelled'
         job.finished_at = b.cancelledAt
+        adjustAgentLoad(job.agent_id, -1)
         appendLog(b, job.name, job.attempt, {
           seq: 0,
           type: 'job_end',
@@ -381,6 +407,7 @@ async function runBuild(
     state.status = 'running'
     state.started_at = Date.now()
     state.agent_id = (ji % 3) + 1
+    adjustAgentLoad(state.agent_id, 1)
 
     const isFailing = build.failPlan && ji === allJobs.length - 1
     const stepCount = decl.steps.length
@@ -419,6 +446,7 @@ async function runBuild(
         state.exit_code = 1
         state.finished_at = Date.now()
         state.detail = '步骤退出码 1：命令执行失败（mock 生命周期模拟）'
+        adjustAgentLoad(state.agent_id, -1)
         appendLog(build, decl.name, build.attempt, {
           seq: 0,
           type: 'job_end',
@@ -438,6 +466,7 @@ async function runBuild(
     state.status = 'succeeded'
     state.exit_code = 0
     state.finished_at = Date.now()
+    adjustAgentLoad(state.agent_id, -1)
     appendLog(build, decl.name, build.attempt, {
       seq: 0,
       type: 'job_end',

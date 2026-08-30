@@ -1,25 +1,30 @@
 <script setup lang="ts">
 // 工作台（原型页一，spec #99，ADR-0019 数据面不变）：指标卡 + 最近构建表
-// + 右栏（Agent 健康 / 最近流水线）。
+// + 右栏（Agent 健康 / 收藏的流水线）。
 //
 // 数据源仍是概览快照端点 `GET /api/v1/overview`（单一来源，任意登录角色可
 // 读）：指标卡（在途任务 = 槽位占用；构建 = 终态合计；队列深度；在线构建
-// 机）+ 最近构建。原型的「收藏流水线」后端无此功能，就近以「最近流水线」
-// 替代（运行按钮直触 trigger；名称点击进该流水线构建列表）。
+// 机）+ 最近构建（含排队/运行中动态构建，契约票 #104）。
+//
+// 右栏「收藏的流水线」（W8 裁定，契约票 #104：用户级收藏端点契约先行 +
+// mock）：条目 = 项目 / 流水线名 + 最近构建状态徽章 + 运行按钮 + 取消收藏；
+// 无收藏时引导去流水线页（收藏入口随票 #105 落地）。运行成功后刷新概览
+// 快照与收藏列表（W2：新构建即时可见，在途/队列计数真实变化）。
 //
 // - 快照失败 → loadError 报错（NAlert + 重试）；首载 NSkeleton 骨架屏。
-// - 原型无对应数据的字段（分支/触发人）不造假，列就近收窄为
-//   流水线/状态/触发/耗时/时间。
+// - 原型无对应数据的字段（分支/触发人）不造假：契约无分支字段，收藏条目
+//   以「项目 / 流水线名」区分（fixture 的 main/release 名即分支口径）。
 
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { NAlert, NButton, NIcon, NSkeleton, NText, useMessage } from 'naive-ui'
-import { RefreshOutline } from '@vicons/ionicons5'
+import { RefreshOutline, Star } from '@vicons/ionicons5'
 
 import { useOverviewStore } from '@/stores/overview'
-import { buildsApi } from '@/api/client'
+import { buildsApi, favoritesApi } from '@/api/client'
 import { describeActionError } from '@/api/errors'
+import type { PipelineFavoriteResponse } from '@/api/types'
 import { formatDuration, relativeAge, relativeAgeKey } from '@/utils/format'
 
 /** 最近构建行（overview store 已把 API 蛇形字段映射为驼峰）。 */
@@ -37,10 +42,6 @@ const { t } = useI18n()
 const router = useRouter()
 const message = useMessage()
 const overview = useOverviewStore()
-
-onMounted(() => {
-  void overview.load()
-})
 
 /** 队列原因 → 人读标签键（与后端 snapshot::classify 固定标签全集对应）。 */
 function queueReasonKey(reason: string): string {
@@ -166,20 +167,23 @@ const healthRows = computed<HealthRow[]>(() => {
 /** 异常事实（健康卡只亮这些；无异常时显示「全部正常」一枚）。 */
 const healthIssues = computed(() => healthRows.value.filter((r) => r.issue))
 
-// ===== 右栏：最近流水线（就近替代原型「收藏」，去重取前 3） =====
+// ===== 右栏：收藏的流水线（W8 裁定；契约票 #104 收藏端点） =====
 
-const recentPipelines = computed(() => {
-  const seen = new Set<string>()
-  const rows: { project: string; pipeline: string; number: number; at: number | null }[] = []
-  for (const b of overview.state?.recentBuilds ?? []) {
-    const key = `${b.project}/${b.pipeline}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    rows.push({ project: b.project, pipeline: b.pipeline, number: b.number, at: b.finishedAt ?? b.startedAt })
-    if (rows.length >= 3) break
+const favorites = ref<PipelineFavoriteResponse[]>([])
+const favoritesLoading = ref(false)
+const favoritesError = ref('')
+
+async function loadFavorites(): Promise<void> {
+  favoritesError.value = ''
+  favoritesLoading.value = true
+  try {
+    favorites.value = await favoritesApi.list()
+  } catch (err) {
+    favoritesError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    favoritesLoading.value = false
   }
-  return rows
-})
+}
 
 function openPipelineBuilds(project: string, pipeline: string): void {
   void router.push({
@@ -197,12 +201,39 @@ async function triggerPipeline(project: string, pipeline: string): Promise<void>
   try {
     const accepted = await buildsApi.trigger(project, pipeline, {})
     message.success(t('plines.triggered', { n: accepted.number }))
+    // W2：触发成功后刷新概览快照与收藏列表——新构建（排队/运行中动态态）
+    // 即时可见，在途/队列计数真实变化，不再等手动刷新。
+    void overview.load()
+    void loadFavorites()
   } catch (err) {
     message.error(describeActionError(err))
   } finally {
     triggering.value = false
   }
 }
+
+/** 取消收藏（行内操作：仅被点行禁用，成功后重载清单 + toast 可感知）。 */
+const unfavoriting = ref<string | null>(null)
+
+async function unfavorite(project: string, pipeline: string): Promise<void> {
+  const key = `${project}/${pipeline}`
+  if (unfavoriting.value != null) return
+  unfavoriting.value = key
+  try {
+    await favoritesApi.remove(project, pipeline)
+    message.success(t('overview.unfavorited'))
+    await loadFavorites()
+  } catch (err) {
+    message.error(describeActionError(err))
+  } finally {
+    unfavoriting.value = null
+  }
+}
+
+onMounted(() => {
+  void overview.load()
+  void loadFavorites()
+})
 </script>
 
 <template>
@@ -240,7 +271,7 @@ async function triggerPipeline(project: string, pipeline: string): Promise<void>
           <span class="metric-value">
             {{ overview.state.slotsUsed }}<span class="unit">/ {{ overview.state.slotsTotal }}</span>
           </span>
-          <span class="metric-sub blue">{{ t('overview.subUsageRate', { pct: inflightPct }) }}</span>
+          <span class="metric-sub">{{ t('overview.subUsageRate', { pct: inflightPct }) }}</span>
         </div>
         <div class="metric-card">
           <span class="metric-label">{{ t('overview.metricBuilds') }}</span>
@@ -289,7 +320,7 @@ async function triggerPipeline(project: string, pipeline: string): Promise<void>
           <div class="card-header">
             <h2 class="card-title">{{ t('overview.recentRuns') }}</h2>
             <router-link class="card-link" :to="{ name: 'pipelines' }">
-              {{ t('overview.viewAll') }}
+              {{ t('overview.viewPipelines') }}
             </router-link>
           </div>
           <div class="runs-head">
@@ -324,17 +355,38 @@ async function triggerPipeline(project: string, pipeline: string): Promise<void>
           </div>
         </section>
 
-        <!-- 右栏：最近流水线（原型 dash-right 收窄为单卡）。 -->
+        <!-- 右栏：收藏的流水线（W8 裁定；无收藏引导去流水线页）。 -->
         <aside class="dash-right">
-          <section class="sisy-card" aria-label="recent pipelines">
+          <section class="sisy-card" aria-label="favorite pipelines">
             <div class="card-header">
-              <h2 class="card-title">{{ t('overview.recentPipelines') }}</h2>
+              <h2 class="card-title">{{ t('overview.favPipelines') }}</h2>
             </div>
-            <div v-if="recentPipelines.length > 0" class="fav-list">
-              <div v-for="p in recentPipelines" :key="`${p.project}-${p.pipeline}`" class="fav-row">
+            <!-- 收藏清单加载失败：卡内报错 + 重试（不拖垮整页）。 -->
+            <div v-if="favoritesError" class="runs-empty">
+              <n-text type="error" data-testid="fav-error">{{ favoritesError }}</n-text>
+              <n-button size="small" class="fav-retry" @click="loadFavorites">
+                <template #icon>
+                  <n-icon :component="RefreshOutline" />
+                </template>
+                {{ t('overview.retry') }}
+              </n-button>
+            </div>
+            <template v-else-if="favoritesLoading">
+              <div class="fav-list">
+                <n-skeleton v-for="i in 2" :key="i" text height="40px" class="fav-skeleton" />
+              </div>
+            </template>
+            <div v-else-if="favorites.length > 0" class="fav-list">
+              <div v-for="p in favorites" :key="`${p.project}-${p.pipeline}`" class="fav-row">
                 <button type="button" class="fav-name" @click="openPipelineBuilds(p.project, p.pipeline)">
-                  {{ p.pipeline }}
-                  <span class="sub">#{{ p.number }} · {{ relativeTimeText(p.at) }}</span>
+                  <span class="fav-title">
+                    {{ p.pipeline }}
+                    <span v-if="p.latest_build" class="badge" :class="statusBadgeClass(p.latest_build.status)">
+                      {{ t(buildStatusKey(p.latest_build.status)) }}
+                    </span>
+                    <span v-else class="badge neutral">{{ t('plines.noRun') }}</span>
+                  </span>
+                  <span class="sub">{{ p.project }}</span>
                 </button>
                 <button
                   type="button"
@@ -344,10 +396,24 @@ async function triggerPipeline(project: string, pipeline: string): Promise<void>
                 >
                   {{ t('overview.run') }}
                 </button>
+                <button
+                  type="button"
+                  class="fav-remove"
+                  :title="t('overview.unfavorite')"
+                  :aria-label="t('overview.unfavorite')"
+                  :disabled="unfavoriting === `${p.project}/${p.pipeline}`"
+                  @click="unfavorite(p.project, p.pipeline)"
+                >
+                  <n-icon :component="Star" />
+                </button>
               </div>
             </div>
-            <div v-else class="runs-empty">
-              <n-text depth="3">{{ t('overview.recentBuildsEmpty') }}</n-text>
+            <div v-else class="runs-empty fav-empty">
+              <n-text depth="3">{{ t('overview.favEmpty') }}</n-text>
+              <n-text depth="3" class="fav-empty-hint">{{ t('overview.favEmptyHint') }}</n-text>
+              <router-link class="fav-empty-link" :to="{ name: 'pipelines' }">
+                {{ t('overview.goPipelines') }}
+              </router-link>
             </div>
           </section>
         </aside>
@@ -545,10 +611,81 @@ async function triggerPipeline(project: string, pipeline: string): Promise<void>
   color: var(--sisy-color-primary);
 }
 
+/* 标题行：流水线名 + 最近构建状态徽章（W1/W8：条目可区分、状态可见）。 */
+.fav-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.fav-title .badge {
+  flex-shrink: 0;
+}
+
 .fav-name .sub {
   font-size: 11px;
   font-weight: 400;
   color: var(--sisy-color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 取消收藏（行内图标按钮；默认弱化，hover 点亮）。 */
+.fav-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--sisy-radius-small);
+  background: none;
+  color: var(--sisy-color-warning);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.fav-remove:hover {
+  background: var(--sisy-color-bg);
+}
+
+.fav-remove:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fav-retry {
+  margin-top: 8px;
+}
+
+/* 空态：引导去流水线页收藏（W8 定稿：不回退展示最近流水线）。 */
+.fav-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.fav-empty-hint {
+  font-size: 12px;
+}
+
+.fav-empty-link {
+  font-size: 13px;
+  color: var(--sisy-color-primary);
+  text-decoration: none;
+}
+
+.fav-empty-link:hover {
+  text-decoration: underline;
+}
+
+.fav-skeleton {
+  width: 100%;
+  margin-bottom: 8px;
 }
 
 /* 窄屏：右栏换行到主表下方。 */
@@ -559,6 +696,22 @@ async function triggerPipeline(project: string, pipeline: string): Promise<void>
 
   .dash-right {
     width: 100%;
+  }
+}
+
+/* 平板档（~768px，侧栏未折叠）：最近构建表降级次要列——时间列最先收起，
+   触发列随之（G2：列挤压不可读；桌面档不受影响）。 */
+@media (max-width: 900px) {
+  .runs-head .col-time,
+  .run-row .col-time {
+    display: none;
+  }
+}
+
+@media (max-width: 780px) {
+  .runs-head .col-trigger,
+  .run-row .col-trigger {
+    display: none;
   }
 }
 </style>

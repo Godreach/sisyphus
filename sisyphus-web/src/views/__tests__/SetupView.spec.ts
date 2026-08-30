@@ -91,7 +91,7 @@ describe('SetupView wizard（三步可跳过）', () => {
 
     await wrapper.get('input[name="admin-password"]').setValue('secret123')
     await getButton(wrapper, '创建管理员').trigger('click')
-    await vi.waitFor(() => expect(wrapper.text()).toContain('创建首个 Agent 条目'))
+    await vi.waitFor(() => expect(wrapper.text()).toContain('创建首台构建机条目'))
 
     const [setupUrl, setupInit] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(setupUrl).toBe('/api/v1/auth/setup')
@@ -127,7 +127,7 @@ describe('SetupView wizard（三步可跳过）', () => {
 
   it('Agent 步建条目成功 → 展示一次性注册码 + token + 按 OS 的注册命令', async () => {
     await getButton(wrapper, '跳过').trigger('click')
-    expect(wrapper.text()).toContain('创建首个 Agent 条目')
+    expect(wrapper.text()).toContain('创建首台构建机条目')
 
     fetchMock.mockResolvedValue(
       jsonResponse(201, {
@@ -253,7 +253,7 @@ describe('SetupView Naive UI 迁移', () => {
     wrapper = mountSetup()
     expect(wrapper.find('.setup-steps').exists()).toBe(true)
     expect(wrapper.text()).toContain('管理员')
-    expect(wrapper.text()).toContain('Agent')
+    expect(wrapper.text()).toContain('构建机')
     expect(wrapper.text()).toContain('项目')
   })
 

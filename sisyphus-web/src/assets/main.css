@@ -394,6 +394,10 @@ body.sidebar-resizing {
 .metric-sub {
   font-size: 11px;
   color: var(--sisy-color-text-tertiary);
+  /* W5（票 #104）：窄卡长句优先整词换行，仅放不下时才在词内断行，
+     修掉「age/nt」式断词。 */
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 
 .metric-sub.blue {

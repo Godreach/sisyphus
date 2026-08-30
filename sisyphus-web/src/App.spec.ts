@@ -25,6 +25,7 @@ describe('App 壳（三项导航 + 登出闭环）', () => {
   beforeEach(async () => {
     setLocale('zh-CN')
     localStorage.removeItem('sisyphus-sidebar-width')
+    localStorage.removeItem('sisyphus-theme')
     pinia = createPinia()
     setActivePinia(pinia)
     router = createRouter({
@@ -185,7 +186,7 @@ describe('App 壳（管理入口收编进用户卡下拉）', () => {
     const menuText = await openUserMenu()
     expect(menuText).toContain('机密')
     expect(menuText).toContain('审计日志')
-    expect(menuText).toContain('Agent 升级')
+    expect(menuText).toContain('构建机升级')
     expect(menuText).toContain('用户')
     // 侧栏本体严格三项（无管理分组）。
     expect(wrapper.find('.app-sidebar').text()).not.toContain('机密')
@@ -279,6 +280,127 @@ describe('App 壳（窄屏响应式 #87）', () => {
     await wrapper.vm.$nextTick()
     await vi.waitFor(() => {
       expect(document.body.querySelector('.n-drawer')).not.toBeNull()
+    })
+  })
+})
+
+describe('App 壳（语言/主题收进用户卡菜单，票 #104 裁定 G3/G4）', () => {
+  let pinia: Pinia
+  let router: Router
+  let wrapper: VueWrapper
+
+  beforeEach(async () => {
+    setLocale('zh-CN')
+    localStorage.removeItem('sisyphus-theme')
+    pinia = createPinia()
+    setActivePinia(pinia)
+    router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', name: 'overview', component: { template: '<div />' } },
+        { path: '/admin/secrets', name: 'admin-secrets', component: { template: '<div />' } },
+        { path: '/admin/audit', name: 'admin-audit', component: { template: '<div />' } },
+        { path: '/admin/upgrade', name: 'admin-upgrade', component: { template: '<div />' } },
+        { path: '/admin/users', name: 'admin-users', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/')
+    await router.isReady()
+    globalThis.fetch = vi.fn()
+    wrapper = mount(App, { global: { plugins: [pinia, router, i18n] } })
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    vi.restoreAllMocks()
+  })
+
+  function bodyOptionBodies(): HTMLElement[] {
+    return [...document.body.querySelectorAll('.n-dropdown-option-body')] as HTMLElement[]
+  }
+
+  /** 打开用户卡下拉。 */
+  async function openUserMenu(): Promise<void> {
+    await wrapper.find('[data-testid="sidebar-user"]').trigger('click')
+    await vi.waitFor(() => {
+      expect(document.body.querySelector('.n-dropdown')).not.toBeNull()
+    })
+  }
+
+  it('顶栏无语言开关；用户卡下拉平铺「语言」「主题」选项组', async () => {
+    const auth = useAuthStore()
+    auth.setAuthed({ username: 'alice', isAdmin: false })
+    await wrapper.vm.$nextTick()
+
+    // G3：顶栏「中/EN」开关移除。
+    expect(wrapper.find('.n-switch').exists()).toBe(false)
+
+    await openUserMenu()
+    const labels = bodyOptionBodies().map((el) => el.textContent ?? '')
+    // 语言组：中文/English；主题组：跟随系统/浅色/深色。
+    expect(labels.some((s) => s?.includes('中文'))).toBe(true)
+    expect(labels.some((s) => s?.includes('English'))).toBe(true)
+    expect(labels.some((s) => s?.includes('跟随系统'))).toBe(true)
+    expect(labels.some((s) => s?.includes('浅色'))).toBe(true)
+    expect(labels.some((s) => s?.includes('深色'))).toBe(true)
+  })
+
+  it('主题选「深色」：即时生效（data-theme）并持久化 localStorage', async () => {
+    const auth = useAuthStore()
+    auth.setAuthed({ username: 'alice', isAdmin: false })
+    await wrapper.vm.$nextTick()
+
+    await openUserMenu()
+    const darkBody = bodyOptionBodies().find((el) => el.textContent?.trim() === '深色')
+    expect(darkBody).toBeDefined()
+    darkBody!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await vi.waitFor(() => {
+      expect(localStorage.getItem('sisyphus-theme')).toBe('dark')
+      expect(document.documentElement.dataset.theme).toBe('dark')
+    })
+  })
+
+  it('语言选 English：即时切换语言（html lang 同步）', async () => {
+    const auth = useAuthStore()
+    auth.setAuthed({ username: 'alice', isAdmin: false })
+    await wrapper.vm.$nextTick()
+
+    await openUserMenu()
+    const enBody = bodyOptionBodies().find((el) => el.textContent?.trim() === 'English')
+    expect(enBody).toBeDefined()
+    enBody!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await vi.waitFor(() => {
+      expect(document.documentElement.lang).toBe('en')
+      expect(localStorage.getItem('sisyphus.locale')).toBe('en-US')
+    })
+    setLocale('zh-CN')
+  })
+
+  it('窄屏抽屉：偏好下拉同源（语言/主题不丢入口）', async () => {
+    const mq = createMockMediaQuery(true)
+    vi.spyOn(window, 'matchMedia').mockReturnValue(mq as unknown as MediaQueryList)
+    wrapper.unmount()
+
+    const auth = useAuthStore()
+    auth.setAuthed({ username: 'alice', isAdmin: false })
+    wrapper = mount(App, { global: { plugins: [pinia, router, i18n] } })
+    await wrapper.vm.$nextTick()
+
+    // 汉堡打开抽屉 → 抽屉偏好入口打开同源下拉。
+    await wrapper.find('.app-topbar button').trigger('click')
+    await vi.waitFor(() => {
+      expect(document.body.querySelector('.n-drawer')).not.toBeNull()
+    })
+    const prefsBtn = document.body.querySelector('[data-testid="drawer-prefs"]') as HTMLElement
+    expect(prefsBtn).not.toBeNull()
+    prefsBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await vi.waitFor(() => {
+      const labels = [...document.body.querySelectorAll('.n-dropdown-option-body')].map((el) =>
+        el.textContent,
+      )
+      expect(labels.some((s) => s?.includes('跟随系统'))).toBe(true)
+      expect(labels.some((s) => s?.includes('深色'))).toBe(true)
+      expect(labels.some((s) => s?.includes('登出'))).toBe(true)
     })
   })
 })

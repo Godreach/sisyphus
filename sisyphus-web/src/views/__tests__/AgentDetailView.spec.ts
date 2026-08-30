@@ -124,7 +124,7 @@ describe('AgentDetailView 详情（标签 + 槽位 + 磁盘 + 工作区/缓存�
     expect(wrapper!.text()).toContain('并发槽位')
     // Agent 版本（1.0.0）。
     expect(wrapper!.text()).toContain('1.0.0')
-    expect(wrapper!.get('.agent-back').text()).toContain('返回 Agent 列表')
+    expect(wrapper!.get('.agent-back').text()).toContain('返回构建机列表')
     expect(String(fetchMock.mock.calls[0]![0])).toBe('/api/v1/agents/demo')
   })
 
@@ -277,7 +277,7 @@ describe('AgentDetailView 详情（标签 + 槽位 + 磁盘 + 工作区/缓存�
       jsonResponse(404, { code: 'NOT_FOUND', message: 'Agent demo 不存在' }),
     )
     mountView()
-    await vi.waitFor(() => expect(wrapper!.text()).toContain('Agent 不存在'))
+    await vi.waitFor(() => expect(wrapper!.text()).toContain('构建机不存在'))
   })
 
   it('403（非全局 admin）→ admin-only 退化态，不渲染详情体', async () => {

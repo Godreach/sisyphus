@@ -14,9 +14,11 @@ import type {
   ArtifactResponse,
   BuildStatusDto,
   BuildSummaryResponse,
+  FavoriteLatestBuildDto,
   JobStatusDto,
   ModelParameterDecl,
   OverviewSnapshotResponse,
+  PipelineFavoriteResponse,
   PipelineStatsResponse,
   ProjectResponse,
   RecentBuildDto,
@@ -682,18 +684,110 @@ export const AGENTS: AgentResponse[] = [
 ]
 
 // ---------------------------------------------------------------------------
+// 收藏流水线（契约票 #104，W8 裁定）：用户级收藏（按会话用户归属）。
+// admin 预置两条收藏（工作台面板有内容可演示；逐条取消收藏可走空态），
+// 其他用户空收藏（空态引导去流水线页）。
+// ---------------------------------------------------------------------------
+
+interface FixtureFavorite {
+  project: string
+  pipeline: string
+  added_at: number
+}
+
+const FAVORITES = new Map<string, FixtureFavorite[]>([
+  [
+    'admin',
+    [
+      { project: 'web-app', pipeline: 'main', added_at: NOW - 3 * 86400e3 },
+      { project: 'api-gateway', pipeline: 'release', added_at: NOW - 86400e3 },
+    ],
+  ],
+])
+
+/** 某用户的收藏清单（按收藏时刻倒序）。 */
+export function favoritesOf(user: string): FixtureFavorite[] {
+  return [...(FAVORITES.get(user) ?? [])].sort((a, b) => b.added_at - a.added_at)
+}
+
+/** 收藏流水线（幂等）。返回 false = 流水线不存在（handler 404）。 */
+export function addFavorite(user: string, project: string, pipeline: string): boolean {
+  if (findPipeline(project, pipeline) == null) return false
+  const list = FAVORITES.get(user) ?? []
+  if (!list.some((f) => f.project === project && f.pipeline === pipeline)) {
+    list.push({ project, pipeline, added_at: Date.now() })
+  }
+  FAVORITES.set(user, list)
+  return true
+}
+
+/** 取消收藏（幂等：未收藏删除无事发生）。 */
+export function removeFavorite(user: string, project: string, pipeline: string): void {
+  const list = FAVORITES.get(user)
+  if (list == null) return
+  FAVORITES.set(
+    user,
+    list.filter((f) => !(f.project === project && f.pipeline === pipeline)),
+  )
+}
+
+/** 收藏条目 → 响应（latest_build 由调用侧传入合并后的最近构建概要）。
+ *  从未运行 → null（页面显示「未运行」，不造假）。 */
+export function favoriteResponse(
+  f: FixtureFavorite,
+  latest: FavoriteLatestBuildDto | null,
+): PipelineFavoriteResponse {
+  return { project: f.project, pipeline: f.pipeline, added_at: f.added_at, latest_build: latest }
+}
+
+/** 构建概要集 → 最近构建摘要（号最大者；无构建 null）。 */
+export function latestBuildOf(summaries: BuildSummaryResponse[]): FavoriteLatestBuildDto | null {
+  let latest: BuildSummaryResponse | null = null
+  for (const s of summaries) {
+    if (latest == null || s.number > latest.number) latest = s
+  }
+  if (latest == null) return null
+  return {
+    number: latest.number,
+    status: latest.status,
+    started_at: latest.started_at,
+    finished_at: latest.finished_at,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 概览快照（从 fixture 派生：stat 卡全量真值 + 三类事实警示 + 最近构建）
 // ---------------------------------------------------------------------------
 
-export function overviewSnapshot(): OverviewSnapshotResponse {
+/** 概览快照（从 fixture + 动态构建派生：stat 卡全量真值 + 三类事实警示
+ *  + 最近构建）。契约票 #104（W4 裁定）：快照合并动态构建——刚触发的
+ *  排队/运行中构建对「最近构建」与队列深度可见（同号动态优先，与构建
+ *  列表 handlers 层同一合并规则）。 */
+export function overviewSnapshot(
+  dynamic: { project: string; pipeline: string; summary: BuildSummaryResponse }[] = [],
+): OverviewSnapshotResponse {
   const online = AGENTS.filter((a) => a.online && !a.disabled)
   const slotsTotal = online.reduce((sum, a) => sum + a.max_concurrency, 0)
   const slotsUsed = online.reduce((sum, a) => sum + a.active_jobs, 0)
 
-  const terminal = { succeeded: 0, failed: 0, cancelled: 0, timeout: 0 }
-  let queueDepth = 0
+  // fixture + 动态合并（同号动态优先；被删 fixture 构建摘除）。
+  const byRef = new Map<string, { project: string; pipeline: string; summary: BuildSummaryResponse }>()
   for (const r of ALL_RECORDS) {
     if (DELETED_BUILDS.has(buildRef(r.key, r.summary.number))) continue
+    byRef.set(`${r.key}#${r.summary.number}`, {
+      project: r.key.split('/')[0] as string,
+      pipeline: r.key.split('/')[1] as string,
+      summary: r.summary,
+    })
+  }
+  for (const d of dynamic) {
+    byRef.set(`${d.project}/${d.pipeline}#${d.summary.number}`, d)
+  }
+  const merged = [...byRef.values()]
+
+  const terminal = { succeeded: 0, failed: 0, cancelled: 0, timeout: 0 }
+  let queueDepth = 0
+  for (const r of merged) {
     const s = r.summary.status
     if (s === 'succeeded' || s === 'failed' || s === 'cancelled' || s === 'timeout') {
       terminal[s] += 1
@@ -703,22 +797,21 @@ export function overviewSnapshot(): OverviewSnapshotResponse {
 
   // 队列：排队构建逐条归因（gpu 任务 → missing_labels；其余 no_slot）。
   const queueReasons = new Map<string, number>()
-  for (const r of ALL_RECORDS) {
-    if (r.summary.status !== 'queued' || DELETED_BUILDS.has(buildRef(r.key, r.summary.number))) continue
-    const def = findPipeline(r.key.split('/')[0] as string, r.key.split('/')[1] as string)
+  for (const r of merged) {
+    if (r.summary.status !== 'queued') continue
+    const def = findPipeline(r.project, r.pipeline)
     const firstLabels = def?.stages[0]?.jobs[0]?.labels ?? []
     const missing = firstLabels.some((l) => !AGENTS.some((a) => a.system_labels.includes(l) || a.custom_labels.includes(l)))
     const reason = missing ? 'missing_labels' : 'no_slot'
     queueReasons.set(reason, (queueReasons.get(reason) ?? 0) + 1)
   }
 
-  const recent: RecentBuildDto[] = [...ALL_RECORDS]
-    .filter((r) => !DELETED_BUILDS.has(buildRef(r.key, r.summary.number)))
+  const recent: RecentBuildDto[] = merged
     .sort((a, b) => (b.summary.finished_at ?? b.summary.started_at ?? 0) - (a.summary.finished_at ?? a.summary.started_at ?? 0))
     .slice(0, 12)
     .map((r) => ({
-      project: r.key.split('/')[0] as string,
-      pipeline: r.key.split('/')[1] as string,
+      project: r.project,
+      pipeline: r.pipeline,
       number: r.summary.number,
       status: r.summary.status,
       trigger: r.summary.trigger,

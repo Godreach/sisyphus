@@ -23,6 +23,7 @@ import type {
 import type { MeResponse } from '@/api/http'
 import * as db from './db'
 import {
+  allDynamicSummaries,
   cancelBuild,
   dynamicArtifacts,
   dynamicBuild,
@@ -228,8 +229,51 @@ export function createHandlers(options: MockHandlerOptions) {
       if (new URL(request.url).searchParams.get('_mock_error') === '1') {
         return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
       }
-      return HttpResponse.json(db.overviewSnapshot())
+      // 契约票 #104（W4）：快照合并动态构建（最近构建可见排队/运行中动态态，
+      // 队列深度同口径）——触发成功后前端刷新快照即见新构建（W2 闭环）。
+      return HttpResponse.json(db.overviewSnapshot(allDynamicSummaries()))
     }),
+
+    // ----- 收藏流水线（契约票 #104，W8 裁定；用户级，按会话用户归属）-----
+    favoritesList: http.get('/api/v1/user/pipeline-favorites', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(150)
+      const user = sessionUser(request) ?? 'admin'
+      return HttpResponse.json(
+        db.favoritesOf(user).map((f) =>
+          db.favoriteResponse(
+            f,
+            db.latestBuildOf(mergedSummaries(f.project, f.pipeline)),
+          ),
+        ),
+      )
+    }),
+
+    favoriteAdd: http.put(
+      '/api/v1/user/pipeline-favorites/:project/:pipeline',
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        await delay(150)
+        const user = sessionUser(request) ?? 'admin'
+        const ok = db.addFavorite(user, String(params.project), String(params.pipeline))
+        if (!ok) return jsonError(404, 'NOT_FOUND', '流水线不存在')
+        return new HttpResponse(null, { status: 204 })
+      },
+    ),
+
+    favoriteRemove: http.delete(
+      '/api/v1/user/pipeline-favorites/:project/:pipeline',
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        await delay(150)
+        const user = sessionUser(request) ?? 'admin'
+        db.removeFavorite(user, String(params.project), String(params.pipeline))
+        return new HttpResponse(null, { status: 204 })
+      },
+    ),
 
     // ----- 项目 / 流水线定义 -----
     projectsList: http.get('/api/v1/projects', async ({ request }) => {

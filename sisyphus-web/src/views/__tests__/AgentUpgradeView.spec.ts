@@ -286,6 +286,6 @@ describe('AgentUpgradeView 升级端点已交付', () => {
     setRoute('GET', '/api/v1/upgrade-packages', jsonResponse(200, []))
     const w = mountView()
     await vi.waitFor(() => expect(w.find('.n-empty').exists()).toBe(true))
-    expect(w.text()).toContain('暂无 Agent')
+    expect(w.text()).toContain('暂无构建机')
   })
 })

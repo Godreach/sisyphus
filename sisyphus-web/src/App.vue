@@ -1,10 +1,13 @@
 <script setup lang="ts">
 // 应用壳（spec #99：prototype/ 设计稿 1:1 落地）：232px 深侧栏（Logo +
 // 工作台/流水线/构建机 三项导航 + 底部用户卡）+ 60px 白顶栏（页面标题 +
-// 搜索框/主按钮/语言切换）+ #F5F5F7 内容区。
+// 搜索框/主按钮）+ #F5F5F7 内容区。
 //
 // - 导航严格三项（spec 验收口径）；管理四页入口收编进用户卡下拉菜单，
 //   仅全局 admin 可见，直访 URL 由路由守卫兜底（guards.ts 不变）。
+// - 语言切换与三态主题收进用户卡菜单（票 #104 裁定 G3/G4，更替票 #99
+//   「语言切换在顶栏」决策）：语言（中文/English）+ 主题（跟随系统/浅色/
+//   深色，持久化 localStorage），选项即时生效。
 // - 顶栏搜索框（流水线/构建机页）经 `?q=` 查询参数驱动页面过滤（250ms
 //   防抖 replace），主按钮走各页既有创建流（`?create=1`）。
 // - 窄屏（<768px）侧栏折叠为 NDrawer 抽屉（#87 行为保留）。
@@ -14,7 +17,7 @@
 import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { NButton, NDropdown, NIcon, NSwitch } from 'naive-ui'
+import { NButton, NDropdown, NIcon } from 'naive-ui'
 import type { DropdownOption } from 'naive-ui'
 import {
   LogOutOutline,
@@ -23,18 +26,20 @@ import {
   DocumentText,
   CloudUpload,
   People,
+  CheckmarkOutline,
+  SettingsOutline,
 } from '@vicons/ionicons5'
 
-import { currentLocale, setLocale } from '@/i18n'
+import { currentLocale, setLocale, type Locale } from '@/i18n'
 import { useAuthStore } from '@/stores/auth'
-import { useDarkMode } from '@/composables/useDarkMode'
+import { useDarkMode, type ThemePreference } from '@/composables/useDarkMode'
 import { useBreakpoint } from '@/composables/useBreakpoint'
 
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
-const { theme, themeOverrides } = useDarkMode()
+const { theme, themeOverrides, preference: themePref, setPreference: setThemePreference } = useDarkMode()
 const { isNarrow } = useBreakpoint()
 
 const locale = computed(() => currentLocale())
@@ -171,13 +176,30 @@ function goNav(name: string): void {
   void router.push({ name })
 }
 
-// ===== 用户卡下拉（管理四页入口收编 + 登出） =====
+// ===== 用户卡下拉（管理入口 + 语言/主题三态 + 登出，票 #104 裁定 G3/G4） =====
 
 function renderDropdownIcon(icon: ReturnType<typeof import('vue').defineComponent>) {
   return () => h(NIcon, { component: icon })
 }
 
-/** 管理入口仅全局 admin 可见；非 admin 下拉只有登出。 */
+/** 当前选项打勾标记（naive-ui 下拉无内建选中态，以 Checkmark 图标标注）。 */
+function checkIcon() {
+  return renderDropdownIcon(CheckmarkOutline)
+}
+
+/** 语言/主题选项组（平铺分组：全部选项立即可见，免悬停二级菜单）。 */
+const langOptions = computed<DropdownOption[]>(() => [
+  { key: 'lang:zh-CN', label: '中文', icon: locale.value === 'zh-CN' ? checkIcon() : undefined },
+  { key: 'lang:en-US', label: 'English', icon: locale.value === 'en-US' ? checkIcon() : undefined },
+])
+
+const themeOptions = computed<DropdownOption[]>(() => [
+  { key: 'theme:system', label: t('app.themeSystem'), icon: themePref.value === 'system' ? checkIcon() : undefined },
+  { key: 'theme:light', label: t('app.themeLight'), icon: themePref.value === 'light' ? checkIcon() : undefined },
+  { key: 'theme:dark', label: t('app.themeDark'), icon: themePref.value === 'dark' ? checkIcon() : undefined },
+])
+
+/** 管理入口仅全局 admin 可见；所有人有 语言/主题/登出。 */
 const userMenuOptions = computed<DropdownOption[]>(() => {
   const opts: DropdownOption[] = []
   if (isAdmin.value) {
@@ -189,13 +211,26 @@ const userMenuOptions = computed<DropdownOption[]>(() => {
       { type: 'divider', key: 'd1' },
     )
   }
-  opts.push({ key: 'logout', label: t('auth.logout'), icon: renderDropdownIcon(LogOutOutline) })
+  opts.push(
+    { type: 'group', key: 'lang-group', label: t('app.langLabel'), children: langOptions.value },
+    { type: 'group', key: 'theme-group', label: t('app.themeLabel'), children: themeOptions.value },
+    { type: 'divider', key: 'd2' },
+    { key: 'logout', label: t('auth.logout'), icon: renderDropdownIcon(LogOutOutline) },
+  )
   return opts
 })
 
 function handleUserMenuSelect(key: string): void {
   if (key === 'logout') {
     void signOut()
+    return
+  }
+  if (key.startsWith('lang:')) {
+    setLocale(key.slice('lang:'.length) as Locale)
+    return
+  }
+  if (key.startsWith('theme:')) {
+    setThemePreference(key.slice('theme:'.length) as ThemePreference)
     return
   }
   void router.push({ name: key })
@@ -256,12 +291,6 @@ function onCta(): void {
   if (route.name === 'machines') {
     void router.push({ query: { ...route.query, create: '1' } })
   }
-}
-
-const isZh = computed(() => locale.value === 'zh-CN')
-
-function toggleLocale(): void {
-  setLocale(locale.value === 'zh-CN' ? 'en-US' : 'zh-CN')
 }
 </script>
 
@@ -363,10 +392,6 @@ function toggleLocale(): void {
                   </template>
                   {{ ctaLabel }}
                 </n-button>
-                <n-switch :value="isZh" size="small" @update:value="toggleLocale">
-                  <template #checked>中</template>
-                  <template #unchecked>EN</template>
-                </n-switch>
               </div>
             </header>
 
@@ -409,6 +434,12 @@ function toggleLocale(): void {
                     <span class="user-name drawer-user-name">{{ username }}</span>
                     <span class="user-role drawer-user-role">{{ isAdmin ? t('userCard.roleAdmin') : t('userCard.roleMember') }}</span>
                   </span>
+                  <!-- 偏好下拉（语言/主题/登出同桌面用户卡菜单，窄屏不丢入口）。 -->
+                  <n-dropdown trigger="click" :options="userMenuOptions" @select="handleUserMenuSelect">
+                    <button type="button" class="user-logout" data-testid="drawer-prefs" :aria-label="t('app.prefsMenu')">
+                      <n-icon :component="SettingsOutline" />
+                    </button>
+                  </n-dropdown>
                   <button type="button" class="user-logout" data-testid="drawer-logout" @click="signOut">
                     <n-icon :component="LogOutOutline" />
                   </button>

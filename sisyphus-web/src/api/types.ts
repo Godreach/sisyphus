@@ -364,8 +364,39 @@ export interface OverviewSnapshotResponse {
   log_bytes: number
   /** 事实型警示态。 */
   alerts: OverviewAlertsDto
-  /** 最近构建（跨可见项目，按最近活动倒序）。 */
+  /** 最近构建（跨可见项目，按最近活动倒序；含排队/运行中动态构建——
+   *  契约票 #104：概览必须可见刚触发的动态态构建）。 */
   recent_builds: RecentBuildDto[]
+}
+
+// ---------------------------------------------------------------------------
+// 收藏流水线（契约票 #104，W8 裁定：工作台右栏为「收藏的流水线」面板）。
+// 用户级（按会话用户归属）收藏端点契约先行 + mock；收藏/取消收藏入口在
+// 流水线页（票 #105），工作台消费列出 + 取消收藏。
+// ---------------------------------------------------------------------------
+
+/** 收藏条目内嵌的最近构建概要（服务端 join，工作台单请求成行）。 */
+export interface FavoriteLatestBuildDto {
+  /** per-pipeline 构建号。 */
+  number: number
+  /** 构建状态（含 queued/running 动态态）。 */
+  status: BuildStatusDto
+  /** 开始时刻（Unix 毫秒；未运行 null）。 */
+  started_at: number | null
+  /** 终态时刻（Unix 毫秒；动态态 null）。 */
+  finished_at: number | null
+}
+
+/** 收藏流水线条目（GET 响应数组元素）。 */
+export interface PipelineFavoriteResponse {
+  /** 项目名。 */
+  project: string
+  /** pipeline 名。 */
+  pipeline: string
+  /** 收藏时刻（Unix 毫秒）。 */
+  added_at: number
+  /** 该流水线最近一条构建（含动态态）；从未运行 null。 */
+  latest_build: FavoriteLatestBuildDto | null
 }
 
 // ---------------------------------------------------------------------------

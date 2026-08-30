@@ -222,7 +222,7 @@ describe('AgentListView 构建机页（指标卡 + 资源表 + 动作流）', ()
     setRoute('GET', '/api/v1/agents', jsonResponse(200, []))
     mountView()
     await vi.waitFor(() => expect(wrapper!.find('.n-empty').exists()).toBe(true))
-    expect(wrapper!.text()).toContain('暂无 Agent')
+    expect(wrapper!.text()).toContain('暂无构建机')
     expect(wrapper!.text()).toContain('在构建机上执行注册命令')
     expect(wrapper!.find('button[name="agent-new-empty"]').exists()).toBe(true)
     expect(wrapper!.find('.n-data-table').exists()).toBe(false)
@@ -406,7 +406,7 @@ describe('AgentListView 构建机页（指标卡 + 资源表 + 动作流）', ()
 
     // 行内「编辑」按钮（动作列；NSwitch 非 button 元素，首个 button 即编辑）。
     await wrapper!.get('.machine-row-actions button').trigger('click')
-    await vi.waitFor(() => expect(document.querySelector('.n-modal')?.textContent).toContain('编辑 Agent'))
+    await vi.waitFor(() => expect(document.querySelector('.n-modal')?.textContent).toContain('编辑构建机'))
     expect((document.querySelector('.n-modal input[name="edit-concurrency"]') as HTMLInputElement)?.value).toBe('1')
     expect((document.querySelector('.n-modal textarea[name="edit-labels"]') as HTMLTextAreaElement)?.value).toBe('region=cn')
 

@@ -29,6 +29,7 @@ import type {
   PipelineDefinitionResponse,
   PipelineStatsResponse,
   ProjectResponse,
+  PipelineFavoriteResponse,
   PutSecretRequest,
   OverviewSnapshotResponse,
   ResetPasswordRequest,
@@ -238,6 +239,27 @@ export const tokensApi = {
 
   /** 吊销 PAT（删行，下一请求即 401；他人 id 一律 404，不暴露存在性）。 */
   revoke: (id: number) => http.del<void>(`auth/tokens/${id}`),
+}
+
+/** 收藏流水线端点（契约票 #104，W8 裁定）：用户级收藏——列出 / 收藏 /
+ *  取消收藏，按会话用户归属（同 auth/tokens 的 owner 本人语义）。
+ *  工作台右栏「收藏的流水线」面板消费；收藏/取消收藏入口在流水线页
+ *  （票 #105）。 */
+export const favoritesApi = {
+  /** 列当前用户收藏（按收藏时刻倒序；latest_build 服务端 join，单请求成行）。 */
+  list: () => http.get<PipelineFavoriteResponse[]>('user/pipeline-favorites'),
+
+  /** 收藏流水线（幂等：已收藏再收藏仍 204）。流水线不存在 404。 */
+  add: (project: string, pipeline: string) =>
+    http.put<void>(
+      `user/pipeline-favorites/${encodeURIComponent(project)}/${encodeURIComponent(pipeline)}`,
+    ),
+
+  /** 取消收藏（幂等：未收藏删除仍 204）。 */
+  remove: (project: string, pipeline: string) =>
+    http.del<void>(
+      `user/pipeline-favorites/${encodeURIComponent(project)}/${encodeURIComponent(pipeline)}`,
+    ),
 }
 
 /** Pipeline 定义端点（后端 `api/pipelines.rs`）。 */

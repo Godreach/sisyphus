@@ -8,7 +8,9 @@
 // - 最近构建行：pipeline #号 + 项目副行、状态徽章、触发、耗时、相对时间；
 //   点击行 → 构建详情
 // - 右栏 Agent 健康：在线比 + 三类事实警示（异常/正常徽章）；零 Agent 行
-// - 右栏 最近流水线：去重前 3；名称 → 构建列表；运行按钮 → POST trigger
+// - 右栏 收藏的流水线（票 #104，W8）：条目 = 流水线名 + 项目 + 状态徽章；
+//   名称 → 构建列表；运行按钮 → POST trigger + 刷新概览快照与收藏（W2）；
+//   取消收藏 → DELETE；空态引导去流水线页；加载失败卡内重试
 // - 快照失败：loadError 报错 + 重试按钮；首载骨架屏
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -45,6 +47,30 @@ function mockOverview(body: Record<string, unknown>, status = 200): void {
   server.use(
     http.get('/api/v1/overview', () => HttpResponse.json(body, { status })),
   )
+}
+
+/** 覆盖收藏清单端点响应（未覆盖时回落 mock fixture：admin 预置收藏）。 */
+function mockFavorites(body: Record<string, unknown>[], status = 200): void {
+  server.use(
+    http.get('/api/v1/user/pipeline-favorites', () => HttpResponse.json(body, { status })),
+  )
+}
+
+/** 一条收藏响应（可选最近构建概要）。 */
+function favRow(
+  project: string,
+  pipeline: string,
+  latest?: { number: number; status: string } | null,
+): Record<string, unknown> {
+  return {
+    project,
+    pipeline,
+    added_at: 1_700_000_000_000,
+    latest_build:
+      latest == null
+        ? null
+        : { number: latest.number, status: latest.status, started_at: null, finished_at: null },
+  }
 }
 
 /** 包装组件：NMessageProvider + OverviewView（useMessage 注入可用）。 */
@@ -142,8 +168,11 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     expect(w.text()).toContain('/ 2台')
     expect(w.findAll('.health-badges .badge').map((b) => b.text())).toEqual(['全部正常'])
 
-    // 请求形态：GET /api/v1/overview（唯一数据源，经真实 http client 打 MSW）。
-    await vi.waitFor(() => expect(requests).toEqual(['GET /api/v1/overview']))
+    // 请求形态：GET /api/v1/overview + GET /api/v1/user/pipeline-favorites
+    // （概览 + 收藏右栏，onMounted 双请求）。
+    await vi.waitFor(() =>
+      expect(requests).toEqual(['GET /api/v1/overview', 'GET /api/v1/user/pipeline-favorites']),
+    )
   })
 
   it('队列深度副标：有排队给首要原因（queue_reasons[0]）', async () => {
@@ -158,7 +187,7 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
 
     const w = mountView()
     await vi.waitFor(() => expect(w.text()).toContain('队列深度'))
-    expect(w.text()).toContain('首要原因：等待匹配 agent：无在线 agent')
+    expect(w.text()).toContain('首要原因：等待匹配构建机：无在线构建机')
   })
 
   it('最近构建行：pipeline #号/项目/状态徽章/触发/耗时/相对时间；点击行 → 构建详情', async () => {
@@ -214,9 +243,9 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     expect(w.text()).toContain('/ 1台')
     // 只亮异常事实（红徽章 + 完整句 title 提示）：离线/无匹配，无排空异常。
     const badges = w.findAll('.health-badges .badge')
-    expect(badges.map((b) => b.text())).toEqual(['离线 Agent', '无匹配任务'])
+    expect(badges.map((b) => b.text())).toEqual(['离线构建机', '无匹配任务'])
     expect(badges.every((b) => b.classes().includes('failed'))).toBe(true)
-    expect(badges[0]!.attributes('title')).toContain('有 Agent 离线')
+    expect(badges[0]!.attributes('title')).toContain('有构建机离线')
     // 无整页 alert（事实警示进健康卡，非 NAlert）。
     expect(w.find('[role="alert"]').exists()).toBe(false)
   })
@@ -229,39 +258,37 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     expect(w.find('.n-alert').exists()).toBe(false)
   })
 
-  it('最近流水线卡：去重取前 3；名称 → 构建列表；运行按钮 → POST trigger', async () => {
-    mockOverview({
-      ...emptySnapshot(),
-      recent_builds: [
-        {
-          project: 'demo',
-          pipeline: 'release',
-          number: 12,
-          status: 'succeeded',
-          trigger: 'manual',
-          started_at: 1_700_000_000_000,
-          finished_at: 1_700_000_060_000,
-        },
-        {
-          project: 'demo',
-          pipeline: 'release',
-          number: 11,
-          status: 'succeeded',
-          trigger: 'manual',
-          started_at: 1_699_000_000_000,
-          finished_at: 1_699_000_060_000,
-        },
-        {
-          project: 'demo',
-          pipeline: 'nightly',
-          number: 3,
-          status: 'failed',
-          trigger: 'cron',
-          started_at: 1_700_000_000_000,
-          finished_at: 1_700_000_060_000,
-        },
-      ],
+  it('收藏的流水线卡：条目 = 流水线名 + 项目 + 最近构建状态徽章；名称 → 构建列表', async () => {
+    mockOverview(emptySnapshot())
+    mockFavorites([
+      favRow('demo', 'release', { number: 12, status: 'succeeded' }),
+      favRow('web', 'nightly', { number: 3, status: 'running' }),
+      favRow('empty-proj', 'main', null),
+    ])
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.findAll('.fav-row')).toHaveLength(3))
+    const rows = w.findAll('.fav-row')
+    // 条目可区分：流水线名 + 项目副行（W1：无项目名无法区分多项目的 release）。
+    expect(rows[0]!.text()).toContain('release')
+    expect(rows[0]!.text()).toContain('demo')
+    expect(rows[0]!.find('.badge').text()).toBe('成功')
+    expect(rows[1]!.find('.badge').text()).toBe('运行中')
+    // 从未运行的收藏 → 「未运行」徽章（不造假）。
+    expect(rows[2]!.text()).toContain('未运行')
+
+    // 名称 → 该流水线构建列表。
+    const pushSpy = vi.spyOn(router, 'push')
+    await rows[0]!.find('.fav-name').trigger('click')
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'build-list',
+      params: { name: 'demo', pipeline: 'release' },
     })
+  })
+
+  it('收藏行「运行」：POST trigger 成功后刷新概览快照与收藏清单（W2 闭环）', async () => {
+    mockOverview(emptySnapshot())
+    mockFavorites([favRow('demo', 'release', { number: 12, status: 'succeeded' })])
     server.use(
       http.post('/api/v1/projects/demo/pipelines/release/builds', () =>
         HttpResponse.json({ number: 13, build_id: 1, attempt: 1, status: 'queued' }, { status: 202 }),
@@ -269,25 +296,81 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     )
 
     const w = mountView()
-    await vi.waitFor(() => expect(w.findAll('.fav-row')).toHaveLength(2))
-    // release 去重保留最近一次（#12）。
-    expect(w.findAll('.fav-row')[0]!.text()).toContain('release')
-    expect(w.findAll('.fav-row')[0]!.text()).toContain('#12')
-    expect(w.findAll('.fav-row')[1]!.text()).toContain('nightly')
-
-    // 名称 → 构建列表。
-    const pushSpy = vi.spyOn(router, 'push')
-    await w.findAll('.fav-row')[0]!.find('.fav-name').trigger('click')
-    expect(pushSpy).toHaveBeenCalledWith({
-      name: 'build-list',
-      params: { name: 'demo', pipeline: 'release' },
-    })
-
-    // 运行按钮 → POST /api/v1/projects/demo/pipelines/release/builds（空参数体）。
+    await vi.waitFor(() => expect(w.findAll('.fav-row')).toHaveLength(1))
+    requests = []
     await w.findAll('.fav-row')[0]!.find('.btn-outline').trigger('click')
     await vi.waitFor(() => {
+      // 触发受理 + 随后概览快照与收藏清单各重取一次（新构建即时可见）。
       expect(requests).toContain('POST /api/v1/projects/demo/pipelines/release/builds')
+      expect(requests.filter((r) => r === 'GET /api/v1/overview')).toHaveLength(1)
+      expect(requests.filter((r) => r === 'GET /api/v1/user/pipeline-favorites')).toHaveLength(1)
     })
+  })
+
+  it('取消收藏：DELETE 收藏端点 + 清单重载', async () => {
+    mockOverview(emptySnapshot())
+    let rows = [favRow('demo', 'release', { number: 12, status: 'succeeded' }), favRow('web', 'main')]
+    server.use(
+      http.get('/api/v1/user/pipeline-favorites', () => HttpResponse.json(rows)),
+      http.delete('/api/v1/user/pipeline-favorites/demo/release', () => {
+        rows = rows.filter((r) => (r as { pipeline: string }).pipeline !== 'release')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.findAll('.fav-row')).toHaveLength(2))
+    await w.findAll('.fav-row')[0]!.find('.fav-remove').trigger('click')
+    await vi.waitFor(() => {
+      expect(requests).toContain('DELETE /api/v1/user/pipeline-favorites/demo/release')
+      expect(w.findAll('.fav-row')).toHaveLength(1)
+    })
+    expect(w.findAll('.fav-row')[0]!.text()).toContain('main')
+  })
+
+  it('无收藏：空态引导去流水线页（不回退展示最近流水线）', async () => {
+    mockOverview(emptySnapshot())
+    mockFavorites([])
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.text()).toContain('还没有收藏的流水线'))
+    expect(w.text()).toContain('去流水线页')
+    const link = w.findAll('a').find((a) => a.text() === '去流水线页')
+    expect(link).toBeDefined()
+    expect(link!.attributes('href')).toBe('/pipelines')
+    expect(w.findAll('.fav-row')).toHaveLength(0)
+  })
+
+  it('收藏清单失败：卡内报错 + 重试（不拖垮整页概览）', async () => {
+    mockOverview(emptySnapshot())
+    let favCalls = 0
+    server.use(
+      http.get('/api/v1/user/pipeline-favorites', () => {
+        favCalls += 1
+        if (favCalls === 1) {
+          return HttpResponse.json({ code: 'INTERNAL', message: '服务内部错误', detail: null }, { status: 500 })
+        }
+        return HttpResponse.json([favRow('demo', 'release', { number: 12, status: 'succeeded' })])
+      }),
+    )
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.find('[data-testid="fav-error"]').exists()).toBe(true))
+    // 概览主体不受收藏失败影响（指标卡正常渲染）。
+    expect(w.text()).toContain('在途任务')
+
+    await w.find('.fav-retry').trigger('click')
+    await vi.waitFor(() => expect(w.findAll('.fav-row')).toHaveLength(1))
+  })
+
+  it('「查看流水线」链接指向流水线页（W3：链接语义与去向一致）', async () => {
+    mockOverview(emptySnapshot())
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.text()).toContain('查看流水线'))
+    const link = w.findAll('a').find((a) => a.text() === '查看流水线')
+    expect(link).toBeDefined()
+    expect(link!.attributes('href')).toBe('/pipelines')
   })
 
   it('快照失败：整页报错 + 重试；重试成功后恢复', async () => {
@@ -324,13 +407,4 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     expect(w.find('[role="alert"]').exists()).toBe(false)
   })
 
-  it('「查看全部」链接指向流水线页', async () => {
-    mockOverview(emptySnapshot())
-
-    const w = mountView()
-    await vi.waitFor(() => expect(w.text()).toContain('查看全部'))
-    const link = w.findAll('a').find((a) => a.text() === '查看全部')
-    expect(link).toBeDefined()
-    expect(link!.attributes('href')).toBe('/pipelines')
-  })
 })
