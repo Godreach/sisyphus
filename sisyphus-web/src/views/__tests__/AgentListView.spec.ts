@@ -10,7 +10,7 @@
 // NModal teleport 不在 wrapper 内——弹窗断言经 document.querySelector 定位。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount, type VueWrapper } from '@vue/test-utils'
+import { mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { NMessageProvider } from 'naive-ui'
@@ -110,6 +110,7 @@ describe('AgentListView 构建机页（指标卡 + 资源表 + 动作流）', ()
   afterEach(() => {
     wrapper?.unmount()
     wrapper = null
+    Object.defineProperty(window, 'innerWidth', { value: 1024, configurable: true })
     vi.restoreAllMocks()
   })
 
@@ -441,5 +442,71 @@ describe('AgentListView 构建机页（指标卡 + 资源表 + 动作流）', ()
       name: 'agent-detail',
       params: { name: 'linux-1' },
     })
+  })
+
+  // ----- 定稿（票 #106）-----
+
+  it('M5：离线机器 CPU/内存显示「—」（最后上报值已过期不造假；在线机器正常）', async () => {
+    // CPU/内存列在 ≤1120px 被平板降级剔除（G2）；本测试需桌面档列集合。
+    Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true })
+    setRoute(
+      'GET',
+      '/api/v1/agents',
+      jsonResponse(200, [
+        agent('on-1', { online: true, cpu_usage: 20, memory_usage: 35 }),
+        agent('off-1', { online: false, cpu_usage: 12, memory_usage: 30 }),
+      ]),
+    )
+    mountView()
+    await vi.waitFor(() =>
+      expect(wrapper!.findAll('.n-data-table-tbody .n-data-table-tr')).toHaveLength(2),
+    )
+
+    const rows = wrapper!.findAll('.n-data-table-tbody .n-data-table-tr')
+    // 行内 machine-cell 顺序：CPU / 内存 / 运行时长 / 最后心跳。
+    const cellsOf = (row: { findAll: (s: string) => DOMWrapper<Element>[] }) =>
+      row.findAll('.machine-cell').map((c) => c.text())
+    // 在线行：利用率真值。
+    expect(cellsOf(rows[0]!)[0]).toBe('20%')
+    expect(cellsOf(rows[0]!)[1]).toBe('35%')
+    // 离线行：利用率一律「—」（fixture 仍带最后上报值 12/30，展示层不采信）。
+    expect(cellsOf(rows[1]!)[0]).toBe('—')
+    expect(cellsOf(rows[1]!)[1]).toBe('—')
+  })
+
+  it('M4：停用 PATCH 失败 → toast 行内感知，不整页报错（无 NAlert）', async () => {
+    setRoute('GET', '/api/v1/agents', jsonResponse(200, [agent('linux-1', { online: true })]))
+    setRoute(
+      'PATCH',
+      '/api/v1/agents/linux-1',
+      jsonResponse(500, { code: 'INTERNAL', message: '服务内部错误' }),
+    )
+    mountView()
+    await vi.waitFor(() =>
+      expect(wrapper!.findAll('.n-data-table-tbody .n-data-table-tr')).toHaveLength(1),
+    )
+
+    await wrapper!.get('.machine-toggle').trigger('click')
+
+    // toast 出现（NMessage teleport 到 body），整页无 NAlert 报错条。
+    await vi.waitFor(() => expect(document.querySelector('.n-message')).toBeTruthy())
+    expect(wrapper!.find('.n-alert').exists()).toBe(false)
+    // 开关行内状态未被翻转（失败回落：列表未刷新，仍为启用态）。
+    expect(wrapper!.get('.machine-toggle').classes()).toContain('n-switch--active')
+  })
+
+  it('M2：页内点顶栏 CTA（?create=1）→ 不重挂载也弹建条目弹窗', async () => {
+    setRoute('GET', '/api/v1/agents', jsonResponse(200, [agent('linux-1', { online: true })]))
+    mountView()
+    await vi.waitFor(() => expect(wrapper!.text()).toContain('linux-1'))
+    expect(document.querySelector('.n-modal')).toBeNull()
+
+    // 模拟 App.vue 顶栏 CTA：路由推查询参（组件不重挂载）。
+    await router.push({ query: { create: '1' } })
+
+    await vi.waitFor(() => expect(document.querySelector('.n-modal')).toBeTruthy())
+    expect(document.querySelector('.n-modal')?.textContent).toContain('新建构建机')
+    // 消费后清参。
+    await vi.waitFor(() => expect(router.currentRoute.value.query.create).toBeUndefined())
   })
 })

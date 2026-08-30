@@ -173,7 +173,8 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
 
   it('默认卡片视图（P6）：渲染 mock 清单全量 23 条；脚注「共 n 次构建」（P4）；未运行行显示「—」', async () => {
     const w = mountView()
-    await vi.waitFor(() => expect(w.findAll('.p-card')).toHaveLength(23))
+    // 23 张卡各自还要打 stats 端点；全量并发负载下 1s 默认超时偶发不够（抖动）。
+    await vi.waitFor(() => expect(w.findAll('.p-card')).toHaveLength(23), { timeout: 5_000 })
     // 默认视图 = 卡片（P6 裁定），卡片视图激活态在「卡片」钮上。
     expect(w.find('[data-testid="view-cards-btn"]').classes()).toContain('active')
 

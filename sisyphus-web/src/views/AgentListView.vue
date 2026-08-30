@@ -10,15 +10,19 @@
 // - 槽位列 = active_jobs / max_concurrency（调度真值，非原型映射）。
 // - 温度类数据 v1 裁定不做（契约票 #102），不造假。
 //
-// 功能沿用既有流（票 B4-T5 / #94）：
+// 功能沿用既有流（票 B4-T5 / #94），定稿调整（票 #106）：
 // - 列表 `GET /agents`（全局 admin；403 → admin-only 退化态）。
 // - 接入构建机（顶栏 CTA `?create=1` 或空态按钮）→ 建条目弹窗 → 一次性
-//   token + 注册码 + 按 OS 复制注册命令。
-// - 停用/启用 `PATCH { disabled }`；编辑槽位/标签 `PATCH`；行/详情进
-//   Agent 详情页。
+//   token + 注册码 + 按 OS 复制注册命令；页内点 CTA 同样弹窗（watch 查询参，
+//   M2）。
+// - 停用/启用 `PATCH { disabled }`：成功行内刷新；失败 toast 行内感知，
+//   不再整页报错（M4）。
+// - 离线机器 CPU/内存显示「—」（最后上报值已过期，不造假；磁盘可保留，
+//   M5）；平板档降级次要列（M5/G2）。
+// - 编辑槽位/标签 `PATCH`；行/详情进 Agent 详情页。
 // - 顶栏搜索（`?q=`）按名称过滤。
 
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import {
@@ -91,13 +95,22 @@ const togglingName = ref<string | null>(null)
 const now = ref(Date.now())
 
 onMounted(() => {
-  // 顶栏 CTA `?create=1` → 直接打开建条目弹窗（收编入口，不改流）。
-  if (route.query.create === '1') {
-    showForm.value = true
-    void router.replace({ query: { ...route.query, create: undefined } })
-  }
   void load()
 })
+
+// 顶栏 CTA `?create=1` → 打开建条目弹窗（收编入口，不改流）。watch 而非
+// onMounted 读参（票 #106，M2）：页内点 CTA 时组件不重挂载，仅 onMounted
+// 读参会导致弹窗不出现；直链进入同样生效。
+watch(
+  () => route.query.create,
+  (v) => {
+    if (v === '1') {
+      showForm.value = true
+      void router.replace({ query: { ...route.query, create: undefined } })
+    }
+  },
+  { immediate: true },
+)
 
 const canCreate = computed(() => newName.value.trim() !== '' && !creating.value)
 
@@ -214,19 +227,25 @@ function slotUsage(agent: AgentResponse): { pct: number; red: boolean } {
   return { pct: Math.min(100, pct), red: pct >= 90 }
 }
 
-/** 利用率文本（CPU/内存列，契约票 #102）：未上报（null）→「—」。 */
-function usageText(value: number | null): string {
-  return value != null ? `${value}%` : '—'
+/** 利用率文本（CPU/内存列，契约票 #102）：未上报（null）→「—」。离线
+ *  机器一律「—」（票 #106，M5：最后上报值已过期，实时利用率不造假；
+ *  磁盘可保留最后上报值）。 */
+function usageText(value: number | null, online: boolean): string {
+  return online && value != null ? `${value}%` : '—'
 }
 
 /** 利用率红色阈值 90%（与槽位/磁盘一致）。 */
-function usageRed(value: number | null): boolean {
-  return value != null && value >= 90
+function usageRed(value: number | null, online: boolean): boolean {
+  return online && value != null && value >= 90
 }
 
 /** CPU/内存列单元格（契约票 #102 真形态消费；列工厂消双列逐字重复）。 */
-function usageCell(value: number | null): ReturnType<typeof h> {
-  return h('span', { class: `machine-cell${usageRed(value) ? ' red' : ''}` }, usageText(value))
+function usageCell(value: number | null, agent: AgentResponse): ReturnType<typeof h> {
+  return h(
+    'span',
+    { class: `machine-cell${usageRed(value, agent.online) ? ' red' : ''}` },
+    usageText(value, agent.online),
+  )
 }
 
 /** 磁盘占用（卷聚合；未上报为 null）。 */
@@ -356,14 +375,15 @@ async function saveEdit(): Promise<void> {
   }
 }
 
-/** 停用/启用切换：`PATCH` { disabled }，停用即踢线。 */
+/** 停用/启用切换：`PATCH` { disabled }，停用即踢线。成功行内刷新；失败
+ *  toast 行内感知（票 #106，M4：不再整页报错——开关失败只影响该行）。 */
 async function toggleDisabled(agent: AgentResponse): Promise<void> {
   togglingName.value = agent.name
   try {
     await agentsApi.patch(agent.name, { disabled: !agent.disabled })
     await load()
   } catch (err) {
-    listError.value = describeSubmitError(err)
+    message.error(describeSubmitError(err))
   } finally {
     togglingName.value = null
   }
@@ -373,11 +393,41 @@ function openDetail(agent: AgentResponse): void {
   void router.push({ name: 'agent-detail', params: { name: agent.name } })
 }
 
+// ===== 平板/窄桌面档降级（票 #106，G2）：列集合按视口剔除次要列 =====
+// 单一断点表：scroll-x 与剔除列集合同源同档（全量 1140 恰收进 1440 桌面
+// 内容区；≤1280 去 运行时长/最后心跳；≤1120 再去 CPU/内存），改档一处
+// 生效。直接过滤列而非 CSS 隐藏——NDataTable colgroup 仍会给隐藏列分配
+// 宽度、等比挤压可见列。
+const windowWidth = ref(typeof window !== 'undefined' ? window.innerWidth : 1280)
+function onWindowResize(): void {
+  windowWidth.value = window.innerWidth
+}
+onMounted(() => window.addEventListener('resize', onWindowResize))
+onBeforeUnmount(() => window.removeEventListener('resize', onWindowResize))
+
+interface TableBreakpoint {
+  /** 视口宽上限（含）；末档 Infinity 兜底。 */
+  max: number
+  scrollX: number
+  hidden: string[]
+}
+const TABLE_BREAKPOINTS: TableBreakpoint[] = [
+  { max: 1120, scrollX: 780, hidden: ['runtime', 'last_seen_at', 'cpu', 'mem'] },
+  { max: 1280, scrollX: 940, hidden: ['runtime', 'last_seen_at'] },
+  { max: Infinity, scrollX: 1140, hidden: [] },
+]
+const tableBreakpoint = computed(
+  () => TABLE_BREAKPOINTS.find((b) => windowWidth.value <= b.max) ?? TABLE_BREAKPOINTS[0]!,
+)
+
 /** 资源表列（NDataTable + 原型徽章/进度条渲染）。 */
-const columns = computed<DataTableColumns<AgentResponse>>(() => [
+const columns = computed<DataTableColumns<AgentResponse>>(() => {
+  const all: DataTableColumns<AgentResponse> = [
   {
     title: t('agents.colMachine'),
     key: 'name',
+    // M3（票 #106）：给足列宽，machine-name-btn 已 nowrap，不再折行。
+    width: 100,
     render: (row) =>
       h(
         'button',
@@ -388,7 +438,7 @@ const columns = computed<DataTableColumns<AgentResponse>>(() => [
   {
     title: t('agents.colState'),
     key: 'state',
-    width: 96,
+    width: 90,
     render: (row) => {
       const state = displayBadge(row)
       return h('span', { class: `badge ${badgeClass(state)}` }, badgeLabel(state))
@@ -397,7 +447,7 @@ const columns = computed<DataTableColumns<AgentResponse>>(() => [
   {
     title: t('agents.colSlots'),
     key: 'slots',
-    width: 150,
+    width: 140,
     render: (row) => {
       const usage = slotUsage(row)
       return h('div', { class: 'usage-cell' }, [
@@ -418,18 +468,18 @@ const columns = computed<DataTableColumns<AgentResponse>>(() => [
     title: t('agents.colCpu'),
     key: 'cpu',
     width: 80,
-    render: (row) => usageCell(row.cpu_usage),
+    render: (row) => usageCell(row.cpu_usage, row),
   },
   {
     title: t('agents.colMem'),
     key: 'mem',
     width: 80,
-    render: (row) => usageCell(row.memory_usage),
+    render: (row) => usageCell(row.memory_usage, row),
   },
   {
     title: t('agents.colDisk'),
     key: 'disk',
-    width: 170,
+    width: 150,
     render: (row) => {
       const disk = diskUsage(row)
       if (!disk) {
@@ -452,7 +502,7 @@ const columns = computed<DataTableColumns<AgentResponse>>(() => [
   {
     title: t('agents.colTask'),
     key: 'task',
-    width: 130,
+    width: 120,
     render: (row) =>
       h(
         'span',
@@ -463,19 +513,19 @@ const columns = computed<DataTableColumns<AgentResponse>>(() => [
   {
     title: t('agents.colRuntime'),
     key: 'runtime',
-    width: 110,
+    width: 100,
     render: (row) => h('span', { class: 'machine-cell' }, uptimeText(row)),
   },
   {
     title: t('agents.colLastSeen'),
     key: 'last_seen_at',
-    width: 110,
+    width: 100,
     render: (row) => h('span', { class: 'machine-cell gray' }, lastSeenText(row)),
   },
   {
     title: t('agents.colActions'),
     key: 'actions',
-    width: 190,
+    width: 180,
     render: (row) =>
       h('div', { class: 'machine-row-actions' }, [
         h(NSwitch, {
@@ -497,7 +547,14 @@ const columns = computed<DataTableColumns<AgentResponse>>(() => [
         ),
       ]),
   },
-])
+    ]
+
+  // 按列 key 剔除（动作列恒保留，不能按位置切尾）。
+  const { hidden } = tableBreakpoint.value
+  return hidden.length === 0
+    ? all
+    : all.filter((c) => !('key' in c) || !hidden.includes(String(c.key)))
+})
 
 const rowKey = (row: AgentResponse): string => row.name
 </script>
@@ -576,7 +633,7 @@ const rowKey = (row: AgentResponse): string => row.name
             :bordered="false"
             :single-line="true"
             size="small"
-            :scroll-x="1180"
+            :scroll-x="tableBreakpoint.scrollX"
             class="machine-data-table"
           />
         </section>

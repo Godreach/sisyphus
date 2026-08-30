@@ -554,6 +554,106 @@ export function createHandlers(options: MockHandlerOptions) {
       await delay(150)
       return HttpResponse.json(db.AGENTS)
     }),
+
+    // ----- 构建机详情 / 编辑停用 / 工作区 / 缓存（票 #106，M1/M4 契约缺口：
+    //       后端阶段照单实现；形态按 api/agents.rs 既有契约）-----
+    agentDetail: http.get('/api/v1/agents/:name', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(150)
+      const agent = db.AGENTS.find((a) => a.name === String(params.name))
+      if (agent == null) {
+        return jsonError(404, 'AGENT_NOT_FOUND', `构建机 ${String(params.name)} 不存在`)
+      }
+      return HttpResponse.json(agent)
+    }),
+
+    agentPatch: http.patch('/api/v1/agents/:name', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(250)
+      const agent = db.AGENTS.find((a) => a.name === String(params.name))
+      if (agent == null) {
+        return jsonError(404, 'AGENT_NOT_FOUND', `构建机 ${String(params.name)} 不存在`)
+      }
+      const body = (await request.json()) as {
+        disabled?: boolean
+        max_concurrency?: number
+        custom_labels?: string[]
+      }
+      if (body.disabled != null) {
+        agent.disabled = body.disabled
+        // 停用即踢线（ADR-0008：停用 Agent 不再参与调度，连接关闭）。
+        // 重新启用不就地恢复 online——真实语义是等 Agent 进程重连心跳
+        // （mock 会话内无心跳源，启用后保持离线是正确形态，非缺陷）。
+        if (body.disabled) {
+          agent.online = false
+          agent.active_jobs = 0
+        }
+      }
+      if (body.max_concurrency != null) agent.max_concurrency = body.max_concurrency
+      if (body.custom_labels != null) agent.custom_labels = body.custom_labels
+      agent.updated_at = Date.now()
+      return HttpResponse.json(agent)
+    }),
+
+    // 工作区 / 缓存走通道往返（ADR-0011/0012）：离线 → 409，fire-and-forget
+    // 清理/删除 → 202 空体。fixture 只给在线机器造条目（离线机器列表不可达）。
+    agentWorkspaceList: http.post('/api/v1/agents/:name/workspace/list', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(300)
+      const agent = db.AGENTS.find((a) => a.name === String(params.name))
+      if (agent == null) {
+        return jsonError(404, 'AGENT_NOT_FOUND', `构建机 ${String(params.name)} 不存在`)
+      }
+      if (!agent.online) {
+        return jsonError(409, 'AGENT_OFFLINE', '构建机离线，无法经通道查询工作区')
+      }
+      return HttpResponse.json({ entries: db.workspaceEntriesOf(agent.name) })
+    }),
+
+    agentWorkspaceClean: http.post('/api/v1/agents/:name/workspace/clean', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(200)
+      const agent = db.AGENTS.find((a) => a.name === String(params.name))
+      if (agent == null) {
+        return jsonError(404, 'AGENT_NOT_FOUND', `构建机 ${String(params.name)} 不存在`)
+      }
+      if (!agent.online) {
+        return jsonError(409, 'AGENT_OFFLINE', '构建机离线，无法经通道下发清理指令')
+      }
+      return new HttpResponse(null, { status: 202 })
+    }),
+
+    agentCacheList: http.post('/api/v1/agents/:name/cache/list', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(300)
+      const agent = db.AGENTS.find((a) => a.name === String(params.name))
+      if (agent == null) {
+        return jsonError(404, 'AGENT_NOT_FOUND', `构建机 ${String(params.name)} 不存在`)
+      }
+      if (!agent.online) {
+        return jsonError(409, 'AGENT_OFFLINE', '构建机离线，无法经通道查询缓存')
+      }
+      return HttpResponse.json({ entries: db.cacheEntriesOf(agent.name) })
+    }),
+
+    agentCacheDelete: http.post('/api/v1/agents/:name/cache/delete', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(200)
+      const agent = db.AGENTS.find((a) => a.name === String(params.name))
+      if (agent == null) {
+        return jsonError(404, 'AGENT_NOT_FOUND', `构建机 ${String(params.name)} 不存在`)
+      }
+      if (!agent.online) {
+        return jsonError(409, 'AGENT_OFFLINE', '构建机离线，无法经通道下发删除指令')
+      }
+      return new HttpResponse(null, { status: 202 })
+    }),
   }
 
   return Object.values(h)

@@ -14,6 +14,7 @@ import type {
   ArtifactResponse,
   BuildStatusDto,
   BuildSummaryResponse,
+  CacheEntry,
   FavoriteLatestBuildDto,
   JobStatusDto,
   ModelParameterDecl,
@@ -25,6 +26,7 @@ import type {
   RecentBuildDto,
   TriggerSourceDto,
   VersionDto,
+  WorkspaceEntry,
 } from '@/api/types'
 
 /** 种子随机（mulberry32）：全量 fixture 确定性可复现。 */
@@ -693,6 +695,49 @@ export const AGENTS: AgentResponse[] = [
     updated_at: NOW - 30e3,
   },
 ]
+
+// ---------------------------------------------------------------------------
+// 工作区 / 缓存条目（票 #106，M1：构建机详情清理面在 mock 上可体验）。
+// 按机器名确定性生成（在线机器经通道往返可达；离线机器 handler 层 409，
+// 不会走到这里）。
+// ---------------------------------------------------------------------------
+
+/** 某构建机的工作区条目（确定性可复现；按名散列出 0–3 条）。 */
+export function workspaceEntriesOf(agentName: string): WorkspaceEntry[] {
+  const rng = mulberry32([...agentName].reduce((s, c) => s + c.charCodeAt(0), 0))
+  const jobs: [string, string][] = [
+    ['web-app', 'main'],
+    ['api-gateway', 'release'],
+    ['core', 'main'],
+  ]
+  const count = Math.floor(rng() * 4)
+  const fallback: [string, string] = ['web-app', 'main']
+  return Array.from({ length: count }, (_, i) => {
+    const [pipeline, job] = jobs[Math.floor(rng() * jobs.length)] ?? fallback
+    return {
+      pipeline,
+      job: `${job}-${Math.floor(rng() * 20) + 1}`,
+      path: `/var/lib/sisyphus/workspaces/${agentName}/${pipeline}/${job}-${i + 1}`,
+      last_used_at_ms: NOW - Math.floor(rng() * 3 * 86400e3),
+    }
+  })
+}
+
+/** 某构建机的缓存条目（同上确定性散列）。 */
+export function cacheEntriesOf(agentName: string): CacheEntry[] {
+  const rng = mulberry32([...agentName].reduce((s, c) => s + c.charCodeAt(0) * 7, 0))
+  const pipelines = ['web-app/main', 'api-gateway/release'] as const
+  const count = Math.floor(rng() * 3)
+  return Array.from({ length: count }, (_, i) => {
+    const pipeline: string = pipelines[Math.floor(rng() * pipelines.length)] ?? pipelines[0]
+    return {
+      key: `cargo-registry-${pipeline}-${i + 1}-a1b2c3d4`,
+      pipeline,
+      size_bytes: Math.floor(rng() * 1800 + 120) * 1e6,
+      last_used_at_ms: NOW - Math.floor(rng() * 7 * 86400e3),
+    }
+  })
+}
 
 // ---------------------------------------------------------------------------
 // 收藏流水线（契约票 #104，W8 裁定）：用户级收藏（按会话用户归属）。
