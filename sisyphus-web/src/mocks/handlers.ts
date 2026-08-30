@@ -11,10 +11,14 @@
 import { http, HttpResponse, delay } from 'msw'
 
 import type {
+  AgentResponse,
   BuildAcceptedResponse,
   BuildListResponse,
   BuildStatusDto,
   BuildSummaryResponse,
+  CreatedAgentResponse,
+  CreateProjectRequest,
+  ProjectResponse,
 } from '@/api/types'
 import type { MeResponse } from '@/api/http'
 import * as db from './db'
@@ -128,9 +132,79 @@ export function createHandlers(options: MockHandlerOptions) {
       } satisfies MeResponse)
     }),
 
-    // 空库判定（auth store isSetupNeeded 探测）：mock 库非空 → 404 = 引导已完成。
-    setup: http.post('/api/v1/auth/setup', () => {
-      return jsonError(404, 'NOT_FOUND', '初始化已完成')
+    // 空库判定（auth store isSetupNeeded 探测）：探针用非法输入（空用户名），
+    // mock 库非空 → 404 = 引导已完成（守卫放 guest 去 /login）。
+    // 合法提交（SetupView 首装建号，直访 /setup 演示）：201 模拟空库建号成功。
+    setup: http.post('/api/v1/auth/setup', async ({ request }) => {
+      await delay(250)
+      const body = (await request.json()) as { username?: string; password?: string }
+      const username = body.username?.trim() ?? ''
+      if (username === '' || !body.password) {
+        return jsonError(404, 'NOT_FOUND', '初始化已完成')
+      }
+      return HttpResponse.json(
+        { username, is_admin: true } satisfies MeResponse,
+        { status: 201 },
+      )
+    }),
+
+    // ----- 首装引导 / 页面动作：建 Agent / 建项目（fixture 增量追加）-----
+    agentCreate: http.post('/api/v1/agents', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(250)
+      const body = (await request.json()) as {
+        name?: string
+        custom_labels?: string[]
+        max_concurrency?: number
+      }
+      const name = body.name?.trim() || `build-${db.AGENTS.length + 1}`
+      const agent: AgentResponse = {
+        name,
+        online: false,
+        disabled: false,
+        system_labels: ['linux', 'docker'],
+        custom_labels: body.custom_labels ?? [],
+        max_concurrency: body.max_concurrency ?? 4,
+        active_jobs: 0,
+        last_seen_at: null,
+        disk_usage: null,
+        agent_version: null,
+        version_compatible: true,
+        draining: false,
+        upgrade_phase: null,
+        upgrade_error: null,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+      }
+      db.AGENTS.push(agent)
+      // token 与注册码明文仅此一次返回（ADR-0010）。
+      return HttpResponse.json(
+        {
+          token: `sis_${Array.from({ length: 43 }, () => 'abcdefghijklmnopqrstuvwxyz234567'[Math.floor(Math.random() * 32)]).join('')}`,
+          register_code: `sisyphus register ${name} --code ${Math.random().toString(36).slice(2, 10).toUpperCase()}`,
+          agent,
+        } satisfies CreatedAgentResponse,
+        { status: 201 },
+      )
+    }),
+
+    projectCreate: http.post('/api/v1/projects', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(250)
+      const body = (await request.json()) as CreateProjectRequest
+      const project: ProjectResponse = {
+        id: db.PROJECTS.length + 1,
+        name: body.name,
+        scm_type: body.scm_type,
+        scm_url: body.scm_url,
+        default_branch: body.default_branch ?? null,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+      }
+      db.PROJECTS.push(project)
+      return HttpResponse.json(project, { status: 201 })
     }),
 
     // ----- 概览（后端 api/overview.rs，ADR-0019）-----
