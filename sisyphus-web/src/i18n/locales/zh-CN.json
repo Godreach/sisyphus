@@ -362,10 +362,8 @@
     "trigger": "触发构建",
     "triggerTitle": "触发构建",
     "cancel": "取消构建",
-    "cancelConfirm": "确定取消该构建吗？已开始的任务将被中止（运行中/排队可取消，202 受理）。",
     "rerunFromScratch": "从头重跑",
     "rerunFromFailed": "从失败重跑",
-    "rerunConfirm": "确定重跑该构建吗？从头重跑产生新构建号；从失败重跑同号 attempt+1（仅 failed / cancelled / timeout 终态）。",
     "delete": "删除构建",
     "deleteConfirm": "确定删除构建 #{number}？将立即删除其日志与产物文件；构建记录（状态 / 号 / 时长）永久保留（ADR-0013）。",
     "submitting": "提交中…",
@@ -377,7 +375,12 @@
     "commit": "Commit（git，可选）",
     "artifacts": "产物",
     "artifactPlaceholder": "下载占位",
-    "loadingStages": "加载中…"
+    "loadingStages": "加载中…",
+    "forbidden": "无权查看该构建：需要该项目访问权限（403）。",
+    "retry": "重试",
+    "emptyStages": "该构建没有阶段/任务记录。",
+    "triggerConflict": "无法触发（409）：同一条流水线同时只跑一条构建，请稍后重试。",
+    "backToProjects": "返回项目列表"
   },
   "buildLog": {
     "title": "日志",

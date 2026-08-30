@@ -362,10 +362,8 @@
     "trigger": "Trigger build",
     "triggerTitle": "Trigger build",
     "cancel": "Cancel build",
-    "cancelConfirm": "Cancel this build? Started jobs will be aborted (queued/running can be cancelled; accepted as 202).",
     "rerunFromScratch": "Rerun from scratch",
     "rerunFromFailed": "Rerun from failed",
-    "rerunConfirm": "Rerun this build? From scratch creates a new build number; from failed keeps the number with attempt+1 (only failed / cancelled / timeout terminal states).",
     "delete": "Delete build",
     "deleteConfirm": "Delete build #{number}? This immediately removes its logs and artifact files; the build record (status / number / duration) is kept permanently (ADR-0013).",
     "submitting": "Submitting…",
@@ -377,7 +375,12 @@
     "commit": "Commit (git, optional)",
     "artifacts": "Artifacts",
     "artifactPlaceholder": "download pending",
-    "loadingStages": "Loading…"
+    "loadingStages": "Loading…",
+    "forbidden": "No access to this build: project access is required (403).",
+    "retry": "Retry",
+    "emptyStages": "This build has no stage/job records.",
+    "triggerConflict": "Cannot trigger (409): only one build per pipeline runs at a time; try again later.",
+    "backToProjects": "Back to projects"
   },
   "buildLog": {
     "title": "Log",

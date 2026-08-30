@@ -600,6 +600,26 @@ body.sidebar-resizing {
   background: var(--sisy-color-danger-soft);
 }
 
+/* 重试/警示类动作（橙）——流水线页行内重试（#105）与构建详情从失败重跑
+   （#107）共用；此前 orange 类有引用无样式，随 #107 落定。 */
+.btn-outline.orange {
+  border-color: var(--sisy-color-warning);
+  color: var(--sisy-color-warning-text);
+}
+
+.btn-outline.orange:hover {
+  background: var(--sisy-color-warning-soft);
+}
+
+.btn-outline:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-outline:disabled:hover {
+  background: var(--sisy-color-surface);
+}
+
 /* 通用页头 / 表单提示（各页面共用；按钮已由 NButton 接管）。 */
 .page-title {
   margin-top: 0;
@@ -620,6 +640,16 @@ body.sidebar-resizing {
   color: var(--sisy-color-text-secondary);
   font-size: 12px;
   margin: 4px 0 0;
+}
+
+/* 事实态提示条（等待态/退化态/截断标注等）：柔和警示底（票 #107 起
+   构建详情与日志视图共用）。 */
+.state-note {
+  font-size: 13px;
+  color: var(--sisy-color-warning-text);
+  background: var(--sisy-color-warning-soft);
+  border-radius: var(--sisy-radius-small);
+  padding: 6px 10px;
 }
 
 /* 登录页（全屏无侧栏形态，居中卡片——spec #100 story 21）。 */

@@ -28,7 +28,7 @@ import { NAlert, NDropdown, NEmpty, NSkeleton, useMessage } from 'naive-ui'
 
 import { buildsApi, favoritesApi, pipelinesApi } from '@/api/client'
 import { describeActionError, describeSubmitError } from '@/api/errors'
-import { formatDuration, relativeAge, relativeAgeKey } from '@/utils/format'
+import { formatDuration, relativeAge, relativeAgeKey, settledPercent, statusBadgeClass } from '@/utils/format'
 import type { BuildDetailResponse, LatestBuildRef } from '@/api/types'
 
 const { t } = useI18n()
@@ -164,18 +164,11 @@ async function progressFor(
 }
 
 function progressOfDetail(detail: BuildDetailResponse): number | null {
+  // 进度口径（P3）与构建详情阶段进度共享 settledPercent。
   const jobs = detail.stages
     .flatMap((stage) => stage.jobs)
     .filter((job) => job.attempt === detail.attempt)
-  if (jobs.length === 0) return null
-  const settled = jobs.filter(
-    (job) =>
-      job.status === 'succeeded' ||
-      job.status === 'failed' ||
-      job.status === 'cancelled' ||
-      job.status === 'timeout',
-  ).length
-  return Math.round((settled / jobs.length) * 100)
+  return settledPercent(jobs)
 }
 
 /** 轻轮询：仅重取最近构建为排队/运行中的行（统计 + 进度），其余不动。 */
@@ -276,25 +269,6 @@ const visibleRows = computed(() => {
 })
 
 // ===== 展示形态 =====
-
-function statusBadgeClass(status: string | undefined): string {
-  switch (status) {
-    case 'running':
-      return 'running'
-    case 'queued':
-      return 'info'
-    case 'succeeded':
-      return 'success'
-    case 'failed':
-      return 'failed'
-    case 'timeout':
-      return 'warning'
-    case undefined:
-      return 'neutral'
-    default:
-      return 'neutral'
-  }
-}
 
 function statusLabel(status: string | undefined): string {
   return status === undefined ? t('plines.noRun') : t(`buildStatus.${status}`)
@@ -510,7 +484,7 @@ const hasAny = computed(() => rows.value.length > 0)
                 <span class="r">{{ row.project }} · {{ t('plines.latestRun') }} {{ latestRunText(row) }}</span>
               </button>
               <div class="pc-status">
-                <span class="badge" :class="statusBadgeClass(row.latest?.status)">
+                <span class="badge" :class="statusBadgeClass(row.latest?.status ?? '')">
                   {{ statusLabel(row.latest?.status) }}
                 </span>
               </div>
@@ -561,7 +535,7 @@ const hasAny = computed(() => rows.value.length > 0)
                 </button>
                 <button type="button" class="p-card-name" @click="openPipeline(row)">{{ row.pipeline }}</button>
               </div>
-              <span class="badge" :class="statusBadgeClass(row.latest?.status)">
+              <span class="badge" :class="statusBadgeClass(row.latest?.status ?? '')">
                 {{ statusLabel(row.latest?.status) }}
               </span>
             </div>

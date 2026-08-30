@@ -29,8 +29,8 @@ import type {
 /** 进行中构建的轮询节奏（毫秒）。 */
 export const BUILD_POLL_MS = 3000
 
-/** 详情加载状态（视图分支消费）。 */
-export type BuildDetailStatus = 'loading' | 'ready' | 'error' | 'not-found'
+/** 详情加载状态（视图分支消费）。forbidden = 403（项目不可见）退化态。 */
+export type BuildDetailStatus = 'loading' | 'ready' | 'error' | 'not-found' | 'forbidden'
 
 export const useBuildDetailStore = defineStore('buildDetail', () => {
   const build = ref<BuildDetailResponse | null>(null)
@@ -94,9 +94,11 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
       status.value = 'ready'
       schedulePoll(project, pipeline, number)
     } catch (err) {
-      status.value = err instanceof Error && 'status' in err && (err as { status?: number }).status === 404
-        ? 'not-found'
-        : 'error'
+      // 404 = 构建不存在/项目不可见；403 = 无项目访问权限（退化态，
+      // 票 #107 事实态纪律）；其余整页报错。
+      const errStatus = err instanceof Error && 'status' in err ? (err as { status?: number }).status : undefined
+      status.value =
+        errStatus === 404 ? 'not-found' : errStatus === 403 ? 'forbidden' : 'error'
       errorMessage.value =
         err instanceof Error ? err.message : '构建详情加载失败'
       build.value = null

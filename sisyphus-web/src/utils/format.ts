@@ -81,3 +81,43 @@ export function formatBytes(bytes: number | null | undefined): string {
 export function isLiveStatus(status: string): boolean {
   return status === 'queued' || status === 'running' || status === 'unknown'
 }
+
+/** 构建/任务状态 → 胶囊徽章色类（badge.* 共享组件类，main.css）。
+ *  与流水线页/概览最近构建同色系：运行=蓝 / 成功=绿 / 失败=红 /
+ *  排队=蓝 info / 超时未知=黄 / 取消跳过等=灰。 */
+export function statusBadgeClass(status: string): string {
+  switch (status) {
+    case 'succeeded':
+      return 'success'
+    case 'failed':
+    case 'aborted':
+      return 'failed'
+    case 'running':
+      return 'running'
+    case 'queued':
+      return 'info'
+    case 'timeout':
+    case 'unknown':
+      return 'warning'
+    default:
+      return 'neutral'
+  }
+}
+
+/** 任务是否为已落定终态（进度口径：不计排队/运行中/未知）。 */
+export function isSettledStatus(status: string): boolean {
+  return (
+    status === 'succeeded' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'timeout'
+  )
+}
+
+/** 任务集合的落定进度（0–100 整数；空集合返回 null → 显示「—」，不造假）。
+ *  流水线页进度列与构建详情阶段进度共用同一口径。 */
+export function settledPercent(jobs: Array<{ status: string }>): number | null {
+  if (jobs.length === 0) return null
+  const settled = jobs.filter((j) => isSettledStatus(j.status)).length
+  return Math.round((settled / jobs.length) * 100)
+}

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-// 构建日志视图（票 B4-T4，ADR-0013）：SSE 日志流按步骤折叠渲染。
+// 构建日志视图（票 B4-T4；视觉随票 #107 收编定稿设计语言，ADR-0013）：
+// SSE 日志流按步骤折叠渲染。
 //
 // - `openLogStream` 消费原生 EventSource（同源 cookie；断线自动重连带
 //   Last-Event-ID 原地续传——原生语义，本组件不重复实现）。
@@ -9,12 +10,13 @@
 //   截断事件显著标注（截断不判败）。
 // - 首连失败 = 端点未交付（degraded）→ 显式标注退化态（Spec B4 缺端点纪律）。
 // - 任务终态事件送达即关流（ADR-0013）。
-// #93: 视觉升级——monospace 字体、步骤折叠（NCollapse 风格化）、主题 Token
-// 驱动的配色与操作按钮（NButton），SSE 流式行为保持不变。
+// - 自动跟随：日志体为限高滚动容器，输出块到达即滚动到底（运行中实时
+//   跟随至终态）；用户上滚阅读历史时暂停跟随，滚回底部自动恢复。
+// - 视觉：`--sisy-*` token + 共享组件类（btn-outline/state-note 同族提示条），
+//   日志体保持固定深底等宽形态（浅/深色主题下均为惯例终端观感）。
 
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NButton, NTag } from 'naive-ui'
 
 import {
   openLogStream,
@@ -62,6 +64,7 @@ const hasLog = computed(() => model.value.steps.length > 0 || model.value.preamb
 
 function openStream(): void {
   connection?.close()
+  stick = true
   model.value = createLogModel()
   connectionStatus.value = 'connecting'
   connection = openLogStream(
@@ -72,6 +75,38 @@ function openStream(): void {
     },
   )
 }
+
+// 自动跟随：stick=true 时每次事件推进都滚到底；用户上滚（离底 >32px）
+// 即暂停跟随，重新滚到底部附近自动恢复。
+const bodyEl = ref<HTMLElement | null>(null)
+let stick = true
+
+function onBodyScroll(): void {
+  const el = bodyEl.value
+  if (el == null) return
+  stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 32
+}
+
+function followBottom(): void {
+  void nextTick(() => {
+    const el = bodyEl.value
+    if (el == null || !stick) return
+    el.scrollTop = el.scrollHeight
+  })
+}
+
+/** 事件量信号：任一变化（新步骤/新输出块/终态）触发跟随判定。 */
+const eventTick = computed(() => {
+  const m = model.value
+  return (
+    m.preamble.length +
+    m.steps.length +
+    (m.steps[m.steps.length - 1]?.lines.length ?? 0) +
+    (m.ended ? 1 : 0)
+  )
+})
+
+watch(eventTick, followBottom)
 
 function onToggleStep(index: number): void {
   toggleStep(model.value, index)
@@ -89,10 +124,10 @@ function collapseAll(): void {
   })
 }
 
-/** 步骤退出码 → NTag 状态色（0=成功绿，非 0=失败红，None=无）。 */
-function stepExitType(exitCode: number | null): 'success' | 'error' | null {
-  if (exitCode == null) return null
-  return exitCode === 0 ? 'success' : 'error'
+/** 步骤退出码色（0=成功绿，非 0=失败红）。 */
+function stepExitClass(exitCode: number | null): string {
+  if (exitCode == null) return ''
+  return exitCode === 0 ? 'exit-ok' : 'exit-fail'
 }
 
 watch(
@@ -113,20 +148,19 @@ onBeforeUnmount(() => {
   <section class="build-log">
     <header class="build-log-header">
       <h3>{{ t('buildLog.title') }}</h3>
-      <div v-if="hasLog" class="build-log-actions">
-        <n-button
-          size="tiny"
-          quaternary
-          :disabled="!anyCollapsible"
-          @click="allExpanded ? collapseAll() : expandAll()"
-        >
-          {{ allExpanded ? t('buildLog.collapseAll') : t('buildLog.expandAll') }}
-        </n-button>
-      </div>
+      <button
+        v-if="hasLog"
+        type="button"
+        class="btn-outline build-log-collapse"
+        :disabled="!anyCollapsible"
+        @click="allExpanded ? collapseAll() : expandAll()"
+      >
+        {{ allExpanded ? t('buildLog.collapseAll') : t('buildLog.expandAll') }}
+      </button>
     </header>
 
     <!-- 退化态：SSE 日志端点尚未交付（Spec B4 缺端点纪律：显式标注）。 -->
-    <div v-if="connectionStatus === 'degraded'" class="build-log-degraded" role="status">
+    <div v-if="connectionStatus === 'degraded'" class="state-note" role="status">
       {{ t('buildLog.degraded') }}
     </div>
 
@@ -143,16 +177,14 @@ onBeforeUnmount(() => {
       }}
     </div>
 
-    <div
-      v-else-if="!hasLog && connectionStatus !== 'open' && connectionStatus !== 'closed'"
-      class="build-log-status"
-    >
+    <!-- 空态：流已开但无任何输出（历史为空且未推块——如无日志的终态构建）。 -->
+    <div v-else-if="!hasLog" class="build-log-status">
       {{ t('buildLog.noLog') }}
     </div>
 
-    <div v-if="hasLog" class="build-log-body">
+    <div v-if="hasLog" ref="bodyEl" class="build-log-body" @scroll="onBodyScroll">
       <!-- 截断显著标注（截断不判败，ADR-0013）。 -->
-      <div v-if="model.truncatedAt != null" class="build-log-truncated" role="alert">
+      <div v-if="model.truncatedAt != null" class="state-note build-log-truncated" role="alert">
         {{ t('buildLog.truncated', { limit: formatBytes(model.truncatedAt) }) }}
       </div>
 
@@ -181,14 +213,8 @@ onBeforeUnmount(() => {
             {{ step.name || `${t('buildLog.step')} ${step.index + 1}` }}
           </span>
           <span v-if="step.command" class="build-log-step-cmd mono">{{ step.command }}</span>
-          <span v-if="step.exitCode != null" class="build-log-step-exit">
-            <n-tag
-              :type="stepExitType(step.exitCode) ?? 'default'"
-              size="tiny"
-              :bordered="false"
-            >
-              {{ t('buildLog.exitCode', { code: step.exitCode }) }}
-            </n-tag>
+          <span v-if="step.exitCode != null" class="build-log-step-exit" :class="stepExitClass(step.exitCode)">
+            {{ t('buildLog.exitCode', { code: step.exitCode }) }}
           </span>
           <span v-if="step.durationMs != null" class="build-log-step-duration">
             {{ formatDuration(step.durationMs) }}
@@ -229,42 +255,28 @@ onBeforeUnmount(() => {
 
 .build-log-header h3 {
   margin: 0;
-  font-size: 14px;
-}
-
-.build-log-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.build-log-status,
-.build-log-degraded,
-.build-log-ended {
   font-size: 13px;
-  color: var(--n-text-color-3, #999);
+  font-weight: 600;
+  color: var(--sisy-color-text);
 }
 
-.build-log-degraded {
-  color: #8a4a0f;
-  background: #fdf1e3;
-  border: 1px solid #e2a56a;
-  border-radius: var(--n-border-radius, 6px);
-  padding: 6px 10px;
+.build-log-collapse {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 11px;
 }
 
-.build-log-truncated {
-  font-size: 13px;
-  color: #8a4a0f;
-  background: #fdf1e3;
-  border: 1px solid #e2a56a;
-  border-radius: var(--n-border-radius, 6px);
-  padding: 6px 10px;
-  margin-bottom: 8px;
+.build-log-status {
+  font-size: 12px;
+  color: var(--sisy-color-text-tertiary);
 }
 
+/* 日志体：固定深底终端形态（浅/深色主题下一致），与页面柔和对比。 */
 .build-log-body {
-  background: #0f172a;
-  border-radius: var(--n-border-radius, 6px);
+  max-height: 420px;
+  overflow-y: auto;
+  background: #16181d;
+  border-radius: var(--sisy-radius);
   padding: 10px 12px;
   font-size: 12.5px;
   line-height: 1.55;
@@ -278,7 +290,7 @@ onBeforeUnmount(() => {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: var(--n-font-family-mono, ui-monospace, 'Cascadia Code', Consolas, monospace);
+  font-family: ui-monospace, 'Cascadia Code', Consolas, 'SF Mono', Menlo, monospace;
   color: #d7e0ee;
 }
 
@@ -288,7 +300,7 @@ onBeforeUnmount(() => {
 
 .build-log-step {
   margin-top: 8px;
-  border-top: 1px solid #26324a;
+  border-top: 1px solid #262b36;
   padding-top: 6px;
 }
 
@@ -303,6 +315,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
   padding: 4px 0;
   text-align: left;
+  font-family: inherit;
   font-size: 12.5px;
 }
 
@@ -322,9 +335,21 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.build-log-step-exit,
-.build-log-step-duration {
+.build-log-step-exit {
   margin-left: auto;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.build-log-step-exit.exit-ok {
+  color: #6fd78a;
+}
+
+.build-log-step-exit.exit-fail {
+  color: #ff8a80;
+}
+
+.build-log-step-duration {
   color: #8aa0c0;
   font-size: 12px;
   white-space: nowrap;
@@ -334,14 +359,18 @@ onBeforeUnmount(() => {
   padding: 4px 0 0 14px;
 }
 
+.build-log-truncated {
+  margin-bottom: 8px;
+}
+
 .build-log-ended {
   margin-top: 8px;
   color: #8aa0c0;
-  border-top: 1px solid #26324a;
+  border-top: 1px solid #262b36;
   padding-top: 6px;
 }
 
 .mono {
-  font-family: var(--n-font-family-mono, ui-monospace, 'Cascadia Code', Consolas, monospace);
+  font-family: ui-monospace, 'Cascadia Code', Consolas, 'SF Mono', Menlo, monospace;
 }
 </style>
