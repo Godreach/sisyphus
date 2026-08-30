@@ -327,7 +327,7 @@ describe('App 壳（语言/主题收进用户卡菜单，票 #104 裁定 G3/G4�
     })
   }
 
-  it('顶栏无语言开关；用户卡下拉平铺「语言」「主题」选项组', async () => {
+  it('顶栏无语言开关；用户卡下拉有「语言」「主题」二级菜单父项', async () => {
     const auth = useAuthStore()
     auth.setAuthed({ username: 'alice', isAdmin: false })
     await wrapper.vm.$nextTick()
@@ -336,44 +336,12 @@ describe('App 壳（语言/主题收进用户卡菜单，票 #104 裁定 G3/G4�
     expect(wrapper.find('.n-switch').exists()).toBe(false)
 
     await openUserMenu()
+    // 二级菜单父项常驻（叶子项悬停展开，为 naive-ui 库内行为，叶子
+    // 结构/切换分发在 utils/userMenu.spec 验证）。
     const labels = bodyOptionBodies().map((el) => el.textContent ?? '')
-    // 语言组：中文/English；主题组：跟随系统/浅色/深色。
-    expect(labels.some((s) => s?.includes('中文'))).toBe(true)
-    expect(labels.some((s) => s?.includes('English'))).toBe(true)
-    expect(labels.some((s) => s?.includes('跟随系统'))).toBe(true)
-    expect(labels.some((s) => s?.includes('浅色'))).toBe(true)
-    expect(labels.some((s) => s?.includes('深色'))).toBe(true)
-  })
-
-  it('主题选「深色」：即时生效（data-theme）并持久化 localStorage', async () => {
-    const auth = useAuthStore()
-    auth.setAuthed({ username: 'alice', isAdmin: false })
-    await wrapper.vm.$nextTick()
-
-    await openUserMenu()
-    const darkBody = bodyOptionBodies().find((el) => el.textContent?.trim() === '深色')
-    expect(darkBody).toBeDefined()
-    darkBody!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await vi.waitFor(() => {
-      expect(localStorage.getItem('sisyphus-theme')).toBe('dark')
-      expect(document.documentElement.dataset.theme).toBe('dark')
-    })
-  })
-
-  it('语言选 English：即时切换语言（html lang 同步）', async () => {
-    const auth = useAuthStore()
-    auth.setAuthed({ username: 'alice', isAdmin: false })
-    await wrapper.vm.$nextTick()
-
-    await openUserMenu()
-    const enBody = bodyOptionBodies().find((el) => el.textContent?.trim() === 'English')
-    expect(enBody).toBeDefined()
-    enBody!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    await vi.waitFor(() => {
-      expect(document.documentElement.lang).toBe('en')
-      expect(localStorage.getItem('sisyphus.locale')).toBe('en-US')
-    })
-    setLocale('zh-CN')
+    expect(labels.some((s) => s?.includes('语言'))).toBe(true)
+    expect(labels.some((s) => s?.includes('主题'))).toBe(true)
+    expect(labels.some((s) => s?.includes('登出'))).toBe(true)
   })
 
   it('窄屏抽屉：偏好下拉同源（语言/主题不丢入口）', async () => {
@@ -398,8 +366,8 @@ describe('App 壳（语言/主题收进用户卡菜单，票 #104 裁定 G3/G4�
       const labels = [...document.body.querySelectorAll('.n-dropdown-option-body')].map((el) =>
         el.textContent,
       )
-      expect(labels.some((s) => s?.includes('跟随系统'))).toBe(true)
-      expect(labels.some((s) => s?.includes('深色'))).toBe(true)
+      expect(labels.some((s) => s?.includes('语言'))).toBe(true)
+      expect(labels.some((s) => s?.includes('主题'))).toBe(true)
       expect(labels.some((s) => s?.includes('登出'))).toBe(true)
     })
   })

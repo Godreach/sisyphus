@@ -26,14 +26,18 @@ import {
   DocumentText,
   CloudUpload,
   People,
+  Language,
+  SunnyOutline,
+  MoonOutline,
   CheckmarkOutline,
   SettingsOutline,
 } from '@vicons/ionicons5'
 
-import { currentLocale, setLocale, type Locale } from '@/i18n'
+import { currentLocale, setLocale } from '@/i18n'
 import { useAuthStore } from '@/stores/auth'
-import { useDarkMode, type ThemePreference } from '@/composables/useDarkMode'
+import { useDarkMode } from '@/composables/useDarkMode'
 import { useBreakpoint } from '@/composables/useBreakpoint'
+import { applyUserMenuKey, buildUserMenuOptions } from '@/utils/userMenu'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -176,64 +180,58 @@ function goNav(name: string): void {
   void router.push({ name })
 }
 
-// ===== 用户卡下拉（管理入口 + 语言/主题三态 + 登出，票 #104 裁定 G3/G4） =====
+// ===== 用户卡下拉（管理入口 + 语言/主题二级子菜单 + 登出，票 #104 裁定 G3/G4） =====
 
 function renderDropdownIcon(icon: ReturnType<typeof import('vue').defineComponent>) {
   return () => h(NIcon, { component: icon })
 }
 
-/** 当前选项打勾标记（naive-ui 下拉无内建选中态，以 Checkmark 图标标注）。 */
-function checkIcon() {
-  return renderDropdownIcon(CheckmarkOutline)
+/** userMenu.ts 纯函数的图标键 → naive-ui 图标渲染（映射单点在壳层）。 */
+const ICON_BY_KEY: Record<string, ReturnType<typeof import('vue').defineComponent>> = {
+  secrets: LockClosed,
+  audit: DocumentText,
+  upgrade: CloudUpload,
+  users: People,
+  language: Language,
+  sun: SunnyOutline,
+  moon: MoonOutline,
+  logout: LogOutOutline,
+  check: CheckmarkOutline,
 }
 
-/** 语言/主题选项组（平铺分组：全部选项立即可见，免悬停二级菜单）。 */
-const langOptions = computed<DropdownOption[]>(() => [
-  { key: 'lang:zh-CN', label: '中文', icon: locale.value === 'zh-CN' ? checkIcon() : undefined },
-  { key: 'lang:en-US', label: 'English', icon: locale.value === 'en-US' ? checkIcon() : undefined },
-])
-
-const themeOptions = computed<DropdownOption[]>(() => [
-  { key: 'theme:system', label: t('app.themeSystem'), icon: themePref.value === 'system' ? checkIcon() : undefined },
-  { key: 'theme:light', label: t('app.themeLight'), icon: themePref.value === 'light' ? checkIcon() : undefined },
-  { key: 'theme:dark', label: t('app.themeDark'), icon: themePref.value === 'dark' ? checkIcon() : undefined },
-])
-
-/** 管理入口仅全局 admin 可见；所有人有 语言/主题/登出。 */
-const userMenuOptions = computed<DropdownOption[]>(() => {
-  const opts: DropdownOption[] = []
-  if (isAdmin.value) {
-    opts.push(
-      { key: 'admin-secrets', label: t('routes.adminSecrets'), icon: renderDropdownIcon(LockClosed) },
-      { key: 'admin-audit', label: t('routes.adminAudit'), icon: renderDropdownIcon(DocumentText) },
-      { key: 'admin-upgrade', label: t('routes.adminUpgrade'), icon: renderDropdownIcon(CloudUpload) },
-      { key: 'admin-users', label: t('routes.adminUsers'), icon: renderDropdownIcon(People) },
-      { type: 'divider', key: 'd1' },
-    )
-  }
-  opts.push(
-    { type: 'group', key: 'lang-group', label: t('app.langLabel'), children: langOptions.value },
-    { type: 'group', key: 'theme-group', label: t('app.themeLabel'), children: themeOptions.value },
-    { type: 'divider', key: 'd2' },
-    { key: 'logout', label: t('auth.logout'), icon: renderDropdownIcon(LogOutOutline) },
-  )
-  return opts
-})
+const userMenuOptions = computed<DropdownOption[]>(() =>
+  buildUserMenuOptions(
+    {
+      isAdmin: isAdmin.value,
+      locale: locale.value,
+      themePreference: themePref.value,
+      labels: {
+        adminSecrets: t('routes.adminSecrets'),
+        adminAudit: t('routes.adminAudit'),
+        adminUpgrade: t('routes.adminUpgrade'),
+        adminUsers: t('routes.adminUsers'),
+        language: t('app.langLabel'),
+        theme: t('app.themeLabel'),
+        themeSystem: t('app.themeSystem'),
+        themeLight: t('app.themeLight'),
+        themeDark: t('app.themeDark'),
+        logout: t('auth.logout'),
+      },
+    },
+    (key) => {
+      const icon = ICON_BY_KEY[key]
+      return icon == null ? undefined : renderDropdownIcon(icon)
+    },
+  ),
+)
 
 function handleUserMenuSelect(key: string): void {
-  if (key === 'logout') {
-    void signOut()
-    return
-  }
-  if (key.startsWith('lang:')) {
-    setLocale(key.slice('lang:'.length) as Locale)
-    return
-  }
-  if (key.startsWith('theme:')) {
-    setThemePreference(key.slice('theme:'.length) as ThemePreference)
-    return
-  }
-  void router.push({ name: key })
+  applyUserMenuKey(key, {
+    setLocale,
+    setThemePreference: setThemePreference,
+    navigate: (name) => void router.push({ name }),
+    logout: () => void signOut(),
+  })
 }
 
 async function signOut(): Promise<void> {
