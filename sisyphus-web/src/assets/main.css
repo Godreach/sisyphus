@@ -637,6 +637,11 @@ body.sidebar-resizing {
   width: min(420px, 100%);
 }
 
+/* 保持登录复选框（契约先行字段 remember_me，票 #114）。 */
+.login-remember {
+  margin: 4px 0 12px;
+}
+
 .login-tagline {
   color: var(--sisy-color-text-secondary);
   margin-top: -8px;

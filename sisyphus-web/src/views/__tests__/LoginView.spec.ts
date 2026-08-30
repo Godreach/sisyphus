@@ -65,10 +65,33 @@ describe('LoginView（登录/回跳/错误展示）', () => {
     await fillAndSubmit('alice', 'secret123')
     await vi.waitFor(() => expect(replaceSpy).toHaveBeenCalledWith('/projects'))
 
-    // 请求形态：POST /api/v1/auth/login，JSON 凭据体。
+    // 请求形态：POST /api/v1/auth/login，JSON 凭据体（保持登录默认勾选 →
+    // remember_me: true，契约先行字段票 #114）。
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/v1/auth/login')
-    expect(JSON.parse(init.body as string)).toEqual({ username: 'alice', password: 'secret123' })
+    expect(JSON.parse(init.body as string)).toEqual({
+      username: 'alice',
+      password: 'secret123',
+      remember_me: true,
+    })
+  })
+
+  it('保持登录：取消勾选 → remember_me: false（会话级 cookie）', async () => {
+    wrapper = mount(LoginView, { global: { plugins: [pinia, router, i18n] } })
+    fetchMock.mockResolvedValue(jsonResponse(200, { username: 'alice', is_admin: false }))
+    const replaceSpy = vi.spyOn(router, 'replace')
+
+    // NCheckbox 的原生 input 不在 testid 元素子树内：点击组件本体切换。
+    await wrapper.get('[data-testid="remember-me"]').trigger('click')
+    await fillAndSubmit('alice', 'secret123')
+    await vi.waitFor(() => expect(replaceSpy).toHaveBeenCalledWith('/'))
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({
+      username: 'alice',
+      password: 'secret123',
+      remember_me: false,
+    })
   })
 
   it('无 redirect 时登录成功 → 回首页', async () => {

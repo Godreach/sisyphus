@@ -74,7 +74,11 @@ export function createHandlers(options: MockHandlerOptions) {
     // ----- 认证（后端 api/auth.rs，ADR-0014）-----
     login: http.post('/api/v1/auth/login', async ({ request }) => {
       await delay(300)
-      const body = (await request.json()) as { username?: string; password?: string }
+      const body = (await request.json()) as {
+        username?: string
+        password?: string
+        remember_me?: boolean
+      }
       // 演示便利：任意非空账号密码均可登录（仍是真实 POST 往返；空凭据
       // 走 401 失败路径）。固定演示账号见 db.USERS（admin 为管理员）。
       const username = body.username?.trim() ?? ''
@@ -93,8 +97,12 @@ export function createHandlers(options: MockHandlerOptions) {
           status: 200,
           // 注意：mock 会话 cookie 不带 HttpOnly——MSW worker 经 document.cookie
           // 落 cookie，HttpOnly 属性会被浏览器丢弃导致会话立不住。
+          // remember_me（契约先行，票 #114）：勾选带 30 天 Max-Age（保持登录），
+          // 否则会话级 cookie（关浏览器即失效）。
           headers: {
-            'Set-Cookie': `${SESSION_COOKIE}=${encodeURIComponent(user.username)}; Path=/; SameSite=Lax`,
+            'Set-Cookie': `${SESSION_COOKIE}=${encodeURIComponent(user.username)}; Path=/; SameSite=Lax${
+              body.remember_me ? '; Max-Age=2592000' : ''
+            }`,
           },
         },
       )

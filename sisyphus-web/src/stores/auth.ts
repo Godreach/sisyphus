@@ -61,10 +61,15 @@ export const useAuthStore = defineStore('auth', () => {
     return status.value
   }
 
-  /** 登录：换会话 cookie（HttpOnly + SameSite=Lax，浏览器自动携带），成功
-   *  写用户 + 置 authed（回跳由调用侧/路由守卫处理）。 */
-  async function login(username: string, password: string): Promise<void> {
-    const me = await authApi.login({ username, password })
+  /** 登录：换会话 cookie（remember_me 保持登录——契约先行字段，票 #114；
+   *  mock 已实现有效期 cookie，真后端就绪前该字段对其无害），成功写用户 +
+   *  置 authed（回跳由调用侧/路由守卫处理）。 */
+  async function login(
+    username: string,
+    password: string,
+    rememberMe = false,
+  ): Promise<void> {
+    const me = await authApi.login({ username, password, remember_me: rememberMe })
     setAuthed({ username: me.username, isAdmin: me.is_admin })
   }
 

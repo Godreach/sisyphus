@@ -7,7 +7,7 @@
 
 import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NCard, NForm, NFormItem, NInput, NButton, NAlert, NIcon } from 'naive-ui'
+import { NCard, NForm, NFormItem, NInput, NButton, NAlert, NCheckbox, NIcon } from 'naive-ui'
 import { PersonOutline, LockClosedOutline } from '@vicons/ionicons5'
 
 import { describeSubmitError } from '@/api/errors'
@@ -21,6 +21,8 @@ const auth = useAuthStore()
 
 const username = ref('')
 const password = ref('')
+/** 保持登录（契约先行字段 remember_me，票 #114）：默认勾选。 */
+const rememberMe = ref(true)
 const submitting = ref(false)
 const errorMessage = ref('')
 const formRef = ref<InstanceType<typeof NForm> | null>(null)
@@ -48,8 +50,9 @@ async function submit(): Promise<void> {
   }
   submitting.value = true
   try {
-    // 登录换会话 cookie（auth store 单一动作），成功即回跳原目标。
-    await auth.login(username.value, password.value)
+    // 登录换会话 cookie（auth store 单一动作；remember_me 走保持登录
+    // 有效期 cookie），成功即回跳原目标。
+    await auth.login(username.value, password.value, rememberMe.value)
     const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/'
     await router.replace(redirect)
   } catch (err) {
@@ -92,6 +95,13 @@ async function submit(): Promise<void> {
             </template>
           </n-input>
         </n-form-item>
+
+        <n-checkbox
+          v-model:checked="rememberMe"
+          class="login-remember"
+          data-testid="remember-me"
+          :label="t('auth.rememberMe')"
+        />
 
         <n-alert v-if="errorMessage" type="error" :title="errorMessage" role="alert" />
 

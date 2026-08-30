@@ -98,7 +98,12 @@ describe('SetupView wizard（三步可跳过）', () => {
     expect(JSON.parse(setupInit.body as string)).toEqual({ username: 'admin', password: 'secret123' })
     const [loginUrl, loginInit] = fetchMock.mock.calls[1] as [string, RequestInit]
     expect(loginUrl).toBe('/api/v1/auth/login')
-    expect(JSON.parse(loginInit.body as string)).toEqual({ username: 'admin', password: 'secret123' })
+    // 引导完成后的自动登录不勾保持登录（默认缺省 false，契约字段票 #114）。
+    expect(JSON.parse(loginInit.body as string)).toEqual({
+      username: 'admin',
+      password: 'secret123',
+      remember_me: false,
+    })
   })
 
   it('管理员步 404（非空库/引导已完成）→ 回落登录页', async () => {

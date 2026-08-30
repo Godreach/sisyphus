@@ -186,7 +186,9 @@ export function createApiClient(): ApiClient {
   return client
 }
 
-/** 认证端点 DTO（后端 `auth.rs` 的 `MeResponse` / `CredentialsRequest`）。 */
+/** 认证端点 DTO（后端 `auth.rs` 的 `MeResponse` / `CredentialsRequest`）。
+ *  `remember_me` 为契约先行字段（票 #114，后端待实现）：true 时会话 cookie
+ *  带有效期（保持登录），缺省/ false 为浏览器会话级 cookie（关浏览器即失效）。 */
 export interface MeResponse {
   username: string
   is_admin: boolean
@@ -195,4 +197,5 @@ export interface MeResponse {
 export interface CredentialsRequest {
   username: string
   password: string
+  remember_me?: boolean
 }

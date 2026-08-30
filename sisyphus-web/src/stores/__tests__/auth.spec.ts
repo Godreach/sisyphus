@@ -83,7 +83,7 @@ describe('auth store 登录/登出闭环（B4-T2）', () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/v1/auth/login')
     expect(init.method).toBe('POST')
-    expect(JSON.parse(init.body as string)).toEqual({ username: 'alice', password: 'secret123' })
+    expect(JSON.parse(init.body as string)).toEqual({ username: 'alice', password: 'secret123', remember_me: false })
   })
 
   it('login 失败（401）抛错且不置 authed', async () => {
