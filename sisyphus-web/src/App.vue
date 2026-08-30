@@ -8,7 +8,8 @@
 // - 顶栏搜索框（流水线/构建机页）经 `?q=` 查询参数驱动页面过滤（250ms
 //   防抖 replace），主按钮走各页既有创建流（`?create=1`）。
 // - 窄屏（<768px）侧栏折叠为 NDrawer 抽屉（#87 行为保留）。
-// - 未认证（登录/初始化引导）：无壳居中布局，仅保留底部语言切换。
+// - 未认证（登录/初始化引导）：无壳居中布局，无壳内开关（主题/语言切换
+//   在登录壳不出现）。
 
 import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -22,8 +23,6 @@ import {
   DocumentText,
   CloudUpload,
   People,
-  MoonOutline,
-  SunnyOutline,
 } from '@vicons/ionicons5'
 
 import { currentLocale, setLocale } from '@/i18n'
@@ -35,7 +34,7 @@ const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
-const { theme, themeOverrides, isDark, setTheme } = useDarkMode()
+const { theme, themeOverrides } = useDarkMode()
 const { isNarrow } = useBreakpoint()
 
 const locale = computed(() => currentLocale())
@@ -277,28 +276,6 @@ function toggleLocale(): void {
           <main class="app-main">
             <RouterView />
           </main>
-          <footer class="app-footer">
-            <!-- 主题切换（浅/深，显式覆盖 localStorage；null 跟随系统的语义
-                 由开关二值化：切过即落覆盖）。 -->
-            <n-switch
-              :value="isDark"
-              size="small"
-              :aria-label="t('app.darkMode')"
-              data-testid="theme-toggle"
-              @update:value="(v: boolean) => setTheme(v ? 'dark' : 'light')"
-            >
-              <template #checked>
-                <n-icon :component="MoonOutline" />
-              </template>
-              <template #unchecked>
-                <n-icon :component="SunnyOutline" />
-              </template>
-            </n-switch>
-            <n-switch :value="isZh" @update:value="toggleLocale">
-              <template #checked>中</template>
-              <template #unchecked>EN</template>
-            </n-switch>
-          </footer>
         </div>
       </template>
 

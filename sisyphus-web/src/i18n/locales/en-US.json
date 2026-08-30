@@ -4,8 +4,7 @@
     "langSwitch": "中",
     "openMenu": "Open menu",
     "langLabel": "Language",
-    "sidebarResize": "Resize sidebar (arrow keys to adjust, double-click to reset)",
-    "darkMode": "Dark mode"
+    "sidebarResize": "Resize sidebar (arrow keys to adjust, double-click to reset)"
   },
   "common": {
     "confirm": "Confirm",

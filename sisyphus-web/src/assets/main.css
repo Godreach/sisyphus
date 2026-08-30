@@ -332,15 +332,6 @@ body.sidebar-resizing {
   min-width: 0;
 }
 
-.app-footer {
-  padding: 12px 24px;
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
 .footer-user {
   display: flex;
   align-items: center;
