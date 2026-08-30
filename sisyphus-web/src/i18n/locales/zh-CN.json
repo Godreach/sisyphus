@@ -680,7 +680,6 @@
     "searchPlaceholder": "搜索流水线…",
     "newPipeline": "新建流水线",
     "chipAll": "全部",
-    "chipRunning": "运行中",
     "chipFailed": "失败",
     "chipSuccess": "成功",
     "viewList": "列表",
@@ -704,7 +703,15 @@
     "rerunRequested": "已请求重跑",
     "empty": "暂无流水线",
     "emptyHint": "创建项目并保存 pipeline 定义后，这里会展示可运行的流水线。",
-    "statsHint": "成功率与平均耗时由服务端按每条流水线最近 20 条构建聚合（终态口径）；清单由项目与最近构建汇聚生成。",
-    "totalPipelines": "共 {n} 条流水线"
+    "statsHint": "成功率与平均耗时由服务端按每条流水线最近 20 条构建聚合（终态口径）；取不到时显示「—」。",
+    "chipActive": "进行中",
+    "chipEnded": "超时/取消",
+    "totalBuilds": "共 {n} 次构建",
+    "retry": "重试",
+    "favoriteAdd": "收藏",
+    "favoriteRemove": "取消收藏",
+    "favoriteAdded": "已收藏，可在工作台查看",
+    "favoriteRemoved": "已取消收藏",
+    "chipNever": "未运行"
   }
 }

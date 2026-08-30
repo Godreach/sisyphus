@@ -27,6 +27,7 @@ import type {
   PatchAgentRequest,
   PatchUserRequest,
   PipelineDefinitionResponse,
+  PipelineListResponse,
   PipelineStatsResponse,
   ProjectResponse,
   PipelineFavoriteResponse,
@@ -264,6 +265,11 @@ export const favoritesApi = {
 
 /** Pipeline 定义端点（后端 `api/pipelines.rs`）。 */
 export const pipelinesApi = {
+  /** 跨项目流水线清单（viewer 档，契约票 #105 契约先行，P1 裁定）：
+   *  服务端权威清单，替代前端「探测 main/release + 概览最近构建去重」
+   *  凑数（跑得少或探测表外的流水线不再消失）。 */
+  list: () => http.get<PipelineListResponse>('pipelines'),
+
   /** 读 pipeline 定义 + 修订版本（构建详情页触发参数/等待标签态/产物声明
    *  的只读消费面，ADR-0009 model 为单一事实源）。 */
   getDefinition: (project: string, pipeline: string) =>

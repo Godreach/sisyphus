@@ -1,29 +1,35 @@
 <script setup lang="ts">
-// 流水线页（原型页二，spec #99）：跨项目流水线列表——筛选 Chips（全部/
-// 运行中/失败/成功，含计数）+ 列表/卡片双视图 + 排序 + 行内动作。
+// 流水线页（原型页二，spec #99/#105 定稿）：跨项目流水线列表——筛选 Chips
+// （全部/进行中/成功/失败/超时取消，含计数，P2 裁定口径）+ 卡片/列表双视图
+// （P6 裁定：默认卡片，切换仅会话内保持）+ 排序 + 行内动作 + 收藏入口。
 //
-// 数据（就近填充）：
-// - 项目清单 `GET /projects` + 逐项目探测 pipeline 名（main/release，与项目
-//   详情页同一降级口径，显式标注）+ 概览快照 recent_builds 的跨项目对
-//   （非致命，失败跳过）。
-// - 每对 (project, pipeline) 调统计端点 `GET …/stats?window=20`（契约票
-//   #102）：成功率/平均耗时/构建总数/最近一条构建由服务端聚合；窗口内无
-//   终态构建时 success_rate / avg_duration_ms 为 null → 显示「—」。
-// - 行内动作按最近构建状态映射：运行中/排队 → 终止（红）；失败 → 重试
-//   （橙）；其余 → 运行（蓝），走既有 cancel / rerun / trigger API。
+// 数据：
+// - 清单 `GET /pipelines`（契约票 #105，P1 裁定——服务端权威清单，替代
+//   探测凑数）；清单失败整页报错 + 重试（既有事实态纪律，不做探测回退）。
+// - 每行调统计端点 `GET …/stats?window=20`（契约票 #102）：成功率/平均耗时/
+//   构建总数/最近一条构建由服务端聚合；窗口内无终态构建时 success_rate /
+//   avg_duration_ms 为 null → 显示「—」。
+// - 进度（P3 裁定）：最近构建为 running 的行走既有构建详情端点取阶段/任务
+//   态，进度 = 当前 attempt 已落定任务数 / 任务总数（双层进度条）；排队未
+//   开始与非运行行显示「—」。
+// - 收藏（票 #104 W8 裁定，入口随本票落地）：`GET/PUT/DELETE
+//   /user/pipeline-favorites`；星标切换，失败 toast 行内报错。
+// - 轻轮询（5s）：仅对最近构建为排队/运行中的行重取统计与进度，mock 动态
+//   构建生命周期在页面上「活」起来（触发后无需手动刷新）。
 //
-// 顶栏搜索（`?q=`）按流水线/项目名过滤；视图偏好仅会话内保持。
+// 行内动作按最近构建状态映射：运行中/排队 → 终止（红）；失败 → 重试
+// （橙）；其余 → 运行（蓝），走既有 cancel / rerun / trigger API。
+// 顶栏搜索（`?q=`）按流水线/项目名过滤。
 
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { NAlert, NDropdown, NEmpty, NSkeleton, useMessage } from 'naive-ui'
 
-import { buildsApi, overviewApi, pipelinesApi, projectsApi } from '@/api/client'
+import { buildsApi, favoritesApi, pipelinesApi } from '@/api/client'
 import { describeActionError, describeSubmitError } from '@/api/errors'
-import { ApiError } from '@/api/http'
 import { formatDuration, relativeAge, relativeAgeKey } from '@/utils/format'
-import type { LatestBuildRef } from '@/api/types'
+import type { BuildDetailResponse, LatestBuildRef } from '@/api/types'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -32,8 +38,8 @@ const message = useMessage()
 
 /** 统计窗口（服务端聚合口径，契约票 #102）。 */
 const WINDOW = 20
-/** pipeline 名探测清单（与 ProjectDetailView 同一口径；端点交付后换真列表）。 */
-const PROBE_NAMES = ['main', 'release']
+/** 活跃行轻轮询间隔（排队/运行中行重取统计与进度）。 */
+const POLL_MS = 5000
 
 interface PipelineRow {
   project: string
@@ -46,6 +52,8 @@ interface PipelineRow {
   rate: string | null
   /** 窗口内终态平均耗时毫秒（无样本为 null → 「—」）。 */
   avgMs: number | null
+  /** 最近构建为 running 时的任务进度（0–100 整数；其余为 null → 「—」）。 */
+  progress: number | null
 }
 
 const rows = ref<PipelineRow[]>([])
@@ -55,55 +63,46 @@ const loadError = ref('')
 /** 动作进行中（按行标记，按钮转圈/禁用）。 */
 const actingKey = ref('')
 
-type ChipKey = 'all' | 'running' | 'failed' | 'success'
+type ChipKey = 'all' | 'active' | 'success' | 'failed' | 'ended' | 'never'
 const activeChip = ref<ChipKey>('all')
 type SortKey = 'recent' | 'name'
 const sortKey = ref<SortKey>('recent')
-const viewMode = ref<'list' | 'cards'>('list')
+/** P6 裁定：默认卡片视图；切换偏好仅会话内保持（不落 localStorage）。 */
+const viewMode = ref<'list' | 'cards'>('cards')
+
+/** 当前用户收藏的 (project, pipeline) 集合（票 #104 W8 契约；加载失败非致命）。 */
+const favoriteKeys = ref(new Set<string>())
 
 /** 顶栏搜索（`?q=`，App 壳写入）。 */
 const searchQuery = computed(() => (typeof route.query.q === 'string' ? route.query.q.trim() : ''))
 
 const rowKeyOf = (row: { project: string; pipeline: string }): string => `${row.project}/${row.pipeline}`
 
-onMounted(load)
+/** 活跃行轻轮询间隔（排队/运行中行重取统计与进度）。 */
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+onMounted(() => {
+  void load()
+  pollTimer = setInterval(() => {
+    void refreshLiveRows()
+  }, POLL_MS)
+})
+
+onBeforeUnmount(() => {
+  if (pollTimer != null) clearInterval(pollTimer)
+  pollTimer = null
+})
 
 async function load(): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
-    const projects = await projectsApi.list()
+    const list = await pipelinesApi.list()
 
-    // 逐项目探测 pipeline 名（200 = 存在；404 = 不存在；其它失败不当事实）。
-    const probed = await Promise.all(
-      projects.flatMap((p) =>
-        PROBE_NAMES.map(async (pipeline) => {
-          try {
-            await projectsApi.getPipeline(p.name, pipeline)
-            return { project: p.name, pipeline, exists: true }
-          } catch (err) {
-            return { project: p.name, pipeline, exists: err instanceof ApiError && err.status === 404 }
-          }
-        }),
-      ),
-    )
+    // 收藏集合（非致命：失败仅星标态不可见，可重进页面恢复）。
+    void loadFavorites()
 
-    const pairMap = new Map<string, { project: string; pipeline: string }>()
-    for (const r of probed) {
-      if (r.exists) pairMap.set(`${r.project}/${r.pipeline}`, { project: r.project, pipeline: r.pipeline })
-    }
-    // 概览快照的最近构建对并入（探不住但跑过的 pipeline；快照失败非致命）。
-    try {
-      const snap = await overviewApi.snapshot()
-      for (const b of snap.recent_builds) {
-        pairMap.set(`${b.project}/${b.pipeline}`, { project: b.project, pipeline: b.pipeline })
-      }
-    } catch {
-      // 快照不可达时本页仍可用（少了「跑过但探不住」的对）。
-    }
-
-    const pairs = [...pairMap.values()]
-    const loaded = await Promise.all(pairs.map((pair) => loadRow(pair)))
+    const loaded = await Promise.all(list.items.map((item) => loadRow(item)))
     rows.value = sortRows(loaded)
   } catch (err) {
     rows.value = []
@@ -113,22 +112,91 @@ async function load(): Promise<void> {
   }
 }
 
-/** 单对 (project, pipeline) → 行数据；404/403 = 无可见运行记录。 */
-async function loadRow(pair: { project: string; pipeline: string }): Promise<PipelineRow> {
+async function loadFavorites(): Promise<void> {
   try {
-    const stats = await pipelinesApi.stats(pair.project, pair.pipeline, WINDOW)
+    favoriteKeys.value = new Set((await favoritesApi.list()).map((f) => rowKeyOf(f)))
+  } catch {
+    // 星标态非致命数据：失败不拖垮清单，星标视为未收藏。
+    favoriteKeys.value = new Set()
+  }
+}
+
+/** 单条流水线 → 行数据；统计不可见（404）或权限不足（403）按「未运行」行展示。 */
+async function loadRow(item: { project: string; pipeline: string }): Promise<PipelineRow> {
+  try {
+    const stats = await pipelinesApi.stats(item.project, item.pipeline, WINDOW)
+    const latest = stats.latest_build
     return {
-      project: pair.project,
-      pipeline: pair.pipeline,
-      latest: stats.latest_build,
+      project: item.project,
+      pipeline: item.pipeline,
+      latest,
       total: stats.total_builds,
       rate: stats.success_rate != null ? `${stats.success_rate}%` : null,
       avgMs: stats.avg_duration_ms,
+      progress: await progressFor(item, latest),
     }
   } catch {
-    // 清单在、统计不可见（404）或权限不足（403）：按「未运行」行展示。
-    return { project: pair.project, pipeline: pair.pipeline, latest: null, total: 0, rate: null, avgMs: null }
+    return {
+      project: item.project,
+      pipeline: item.pipeline,
+      latest: null,
+      total: 0,
+      rate: null,
+      avgMs: null,
+      progress: null,
+    }
   }
+}
+
+/** P3：运行中构建 → 任务进度（当前 attempt 已落定任务 / 任务总数）。
+ *  排队未开始/非运行/详情不可得 → null（显示「—」，不造假）。 */
+async function progressFor(
+  item: { project: string; pipeline: string },
+  latest: LatestBuildRef | null,
+): Promise<number | null> {
+  if (latest?.status !== 'running') return null
+  try {
+    const detail = await buildsApi.detail(item.project, item.pipeline, latest.number)
+    return progressOfDetail(detail)
+  } catch {
+    return null
+  }
+}
+
+function progressOfDetail(detail: BuildDetailResponse): number | null {
+  const jobs = detail.stages
+    .flatMap((stage) => stage.jobs)
+    .filter((job) => job.attempt === detail.attempt)
+  if (jobs.length === 0) return null
+  const settled = jobs.filter(
+    (job) =>
+      job.status === 'succeeded' ||
+      job.status === 'failed' ||
+      job.status === 'cancelled' ||
+      job.status === 'timeout',
+  ).length
+  return Math.round((settled / jobs.length) * 100)
+}
+
+/** 轻轮询：仅重取最近构建为排队/运行中的行（统计 + 进度），其余不动。 */
+async function refreshLiveRows(): Promise<void> {
+  if (loading.value) return
+  const live = new Map<string, PipelineRow>()
+  for (const row of rows.value) {
+    if (row.latest?.status === 'queued' || row.latest?.status === 'running') {
+      live.set(rowKeyOf(row), row)
+    }
+  }
+  if (live.size === 0) return
+  const fresh = await Promise.all([...live.values()].map((row) => loadRow(row)))
+  // 统计取不到（瞬时失败）的行不回写——构建不会凭空消失，避免把在跑行
+  // 错误翻成「未运行」；下一轮轮询自会修正。
+  const freshByKey = new Map<string, PipelineRow>()
+  for (const row of fresh) {
+    if (row.latest != null) freshByKey.set(rowKeyOf(row), row)
+  }
+  if (freshByKey.size === 0) return
+  rows.value = sortRows(rows.value.map((row) => freshByKey.get(rowKeyOf(row)) ?? row))
 }
 
 function sortRows(list: PipelineRow[]): PipelineRow[] {
@@ -153,32 +221,47 @@ const sortOptions = computed(() => [
   { label: t('plines.sortName'), key: 'name' as const },
 ])
 
-// ===== Chips 过滤（计数 + 单选） =====
+// ===== Chips 过滤（计数 + 单选；P2 裁定口径）=====
+// 「进行中」含排队（未终态都算在跑）；「超时/取消」单列；「未运行」收留
+// latest 为空（零构建/统计不可见）的行——保证
+// 全部 = 进行中 + 成功 + 失败 + 超时/取消 + 未运行 计数严格对账。
 
-/** chip 命中：运行中含排队（未终态都算「在跑」）；失败只算 failed。 */
 function chipHit(row: PipelineRow, chip: ChipKey): boolean {
   if (chip === 'all') return true
   const status = row.latest?.status
-  if (chip === 'running') return status === 'running' || status === 'queued'
+  if (chip === 'active') return status === 'running' || status === 'queued'
   if (chip === 'failed') return status === 'failed'
+  if (chip === 'ended') return status === 'timeout' || status === 'cancelled'
+  if (chip === 'never') return status === undefined
   return status === 'succeeded'
 }
 
 const chipCounts = computed<Record<ChipKey, number>>(() => {
-  const counts: Record<ChipKey, number> = { all: rows.value.length, running: 0, failed: 0, success: 0 }
+  const counts: Record<ChipKey, number> = {
+    all: rows.value.length,
+    active: 0,
+    success: 0,
+    failed: 0,
+    ended: 0,
+    never: 0,
+  }
   for (const row of rows.value) {
-    if (chipHit(row, 'running')) counts.running += 1
-    if (chipHit(row, 'failed')) counts.failed += 1
+    if (chipHit(row, 'active')) counts.active += 1
     if (chipHit(row, 'success')) counts.success += 1
+    if (chipHit(row, 'failed')) counts.failed += 1
+    if (chipHit(row, 'ended')) counts.ended += 1
+    if (chipHit(row, 'never')) counts.never += 1
   }
   return counts
 })
 
 const chipDefs = computed<{ key: ChipKey; label: string }[]>(() => [
   { key: 'all', label: t('plines.chipAll') },
-  { key: 'running', label: t('plines.chipRunning') },
-  { key: 'failed', label: t('plines.chipFailed') },
+  { key: 'active', label: t('plines.chipActive') },
   { key: 'success', label: t('plines.chipSuccess') },
+  { key: 'failed', label: t('plines.chipFailed') },
+  { key: 'ended', label: t('plines.chipEnded') },
+  { key: 'never', label: t('plines.chipNever') },
 ])
 
 const visibleRows = computed(() => {
@@ -227,6 +310,32 @@ function latestRunText(row: PipelineRow): string {
   return `#${row.latest.number} · ${t(relativeAgeKey(age), { n: age.n })}`
 }
 
+// ===== 收藏（票 #104 W8 契约；入口随本票落地）=====
+
+function isFavorite(row: PipelineRow): boolean {
+  return favoriteKeys.value.has(rowKeyOf(row))
+}
+
+async function toggleFavorite(row: PipelineRow): Promise<void> {
+  const key = rowKeyOf(row)
+  const removing = favoriteKeys.value.has(key)
+  try {
+    if (removing) {
+      await favoritesApi.remove(row.project, row.pipeline)
+      const next = new Set(favoriteKeys.value)
+      next.delete(key)
+      favoriteKeys.value = next
+      message.success(t('plines.favoriteRemoved'))
+    } else {
+      await favoritesApi.add(row.project, row.pipeline)
+      favoriteKeys.value = new Set(favoriteKeys.value).add(key)
+      message.success(t('plines.favoriteAdded'))
+    }
+  } catch (err) {
+    message.error(describeActionError(err))
+  }
+}
+
 interface RowAction {
   label: string
   cls: string
@@ -272,7 +381,7 @@ async function runAction(row: PipelineRow): Promise<void> {
   actingKey.value = key
   try {
     await actionFor(row).run(row)
-    // 动作落定后刷新该行（状态/计数就近更新）。
+    // 动作落定后刷新该行（状态/计数/进度就近更新）。
     const fresh = await loadRow(row)
     rows.value = sortRows(rows.value.map((r) => (rowKeyOf(r) === key ? fresh : r)))
   } catch (err) {
@@ -300,7 +409,11 @@ const hasAny = computed(() => rows.value.length > 0)
       :title="loadError"
       role="alert"
       class="plines-error"
-    />
+    >
+      <button type="button" class="btn-outline" data-testid="pipelines-retry" @click="load">
+        {{ t('plines.retry') }}
+      </button>
+    </n-alert>
 
     <!-- 首载骨架屏（与概览/构建列表同纪律）。 -->
     <div v-if="loading && !loadError" class="plines-skeleton" data-testid="pipelines-skeleton">
@@ -369,6 +482,7 @@ const hasAny = computed(() => rows.value.length > 0)
         <!-- 列表视图（原型 pipe-table）。 -->
         <section v-if="viewMode === 'list'" class="sisy-card pipe-table" aria-label="pipeline list">
           <div class="pipe-thead">
+            <span class="pc-fav" />
             <span class="pc-name">{{ t('plines.colPipeline') }}</span>
             <span class="pc-status">{{ t('plines.colStatus') }}</span>
             <span class="pc-progress">{{ t('plines.colProgress') }}</span>
@@ -379,6 +493,18 @@ const hasAny = computed(() => rows.value.length > 0)
           </div>
           <div class="pipe-tbody">
             <div v-for="row in visibleRows" :key="rowKeyOf(row)" class="pipe-row">
+              <div class="pc-fav">
+                <button
+                  type="button"
+                  class="fav-btn"
+                  :class="{ active: isFavorite(row) }"
+                  :title="isFavorite(row) ? t('plines.favoriteRemove') : t('plines.favoriteAdd')"
+                  :data-testid="`fav-${rowKeyOf(row)}`"
+                  @click="toggleFavorite(row)"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" :fill="isFavorite(row) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="2" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5-5.9-3.2-5.9 3.2 1.2-6.5L2.5 9.4l6.6-.9z"/></svg>
+                </button>
+              </div>
               <button type="button" class="pc-name" @click="openPipeline(row)">
                 <span class="n">{{ row.pipeline }}</span>
                 <span class="r">{{ row.project }} · {{ t('plines.latestRun') }} {{ latestRunText(row) }}</span>
@@ -388,7 +514,15 @@ const hasAny = computed(() => rows.value.length > 0)
                   {{ statusLabel(row.latest?.status) }}
                 </span>
               </div>
-              <div class="pc-progress"><span class="pct-none">—</span></div>
+              <div class="pc-progress">
+                <div v-if="row.progress != null" class="usage-row">
+                  <div class="track">
+                    <div class="fill" :style="{ width: `${row.progress}%` }" />
+                  </div>
+                  <span class="pct">{{ row.progress }}%</span>
+                </div>
+                <span v-else class="pct-none">—</span>
+              </div>
               <span class="pc-rate">{{ row.rate ?? '—' }}</span>
               <span class="pc-avg">{{ row.avgMs != null ? formatDuration(row.avgMs) : '—' }}</span>
               <span class="pc-trigger">{{ triggerLabel(row) }}</span>
@@ -410,16 +544,36 @@ const hasAny = computed(() => rows.value.length > 0)
           </div>
         </section>
 
-        <!-- 卡片视图（原型 cards-view 2 列网格）。 -->
+        <!-- 卡片视图（原型 cards-view 2 列网格；P6 定稿默认视图）。 -->
         <section v-else class="cards-view" aria-label="pipeline cards">
           <article v-for="row in visibleRows" :key="rowKeyOf(row)" class="p-card">
             <div class="p-card-head">
-              <button type="button" class="p-card-name" @click="openPipeline(row)">{{ row.pipeline }}</button>
+              <div class="p-card-title">
+                <button
+                  type="button"
+                  class="fav-btn"
+                  :class="{ active: isFavorite(row) }"
+                  :title="isFavorite(row) ? t('plines.favoriteRemove') : t('plines.favoriteAdd')"
+                  :data-testid="`fav-${rowKeyOf(row)}`"
+                  @click="toggleFavorite(row)"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" :fill="isFavorite(row) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="2" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5-5.9-3.2-5.9 3.2 1.2-6.5L2.5 9.4l6.6-.9z"/></svg>
+                </button>
+                <button type="button" class="p-card-name" @click="openPipeline(row)">{{ row.pipeline }}</button>
+              </div>
               <span class="badge" :class="statusBadgeClass(row.latest?.status)">
                 {{ statusLabel(row.latest?.status) }}
               </span>
             </div>
             <div class="p-card-sub">{{ row.project }} · {{ t('plines.latestRun') }} {{ latestRunText(row) }}</div>
+            <div v-if="row.progress != null" class="p-card-progress">
+              <div class="usage-row">
+                <div class="track">
+                  <div class="fill" :style="{ width: `${row.progress}%` }" />
+                </div>
+                <span class="pct">{{ row.progress }}%</span>
+              </div>
+            </div>
             <div class="p-card-stats">
               <div class="p-stat">
                 <span class="l">{{ t('plines.colRate') }}</span>
@@ -435,7 +589,7 @@ const hasAny = computed(() => rows.value.length > 0)
               </div>
             </div>
             <div class="p-card-foot">
-              <span class="trigger-tag">{{ t('plines.totalPipelines', { n: row.total }) }}</span>
+              <span class="trigger-tag">{{ t('plines.totalBuilds', { n: row.total }) }}</span>
               <button
                 type="button"
                 class="btn-outline"
@@ -464,6 +618,10 @@ const hasAny = computed(() => rows.value.length > 0)
 
 .plines-error {
   margin-bottom: 4px;
+}
+
+.plines-error button {
+  margin-top: 8px;
 }
 
 .plines-skeleton {
@@ -605,6 +763,31 @@ const hasAny = computed(() => rows.value.length > 0)
   color: var(--sisy-color-text-secondary);
 }
 
+/* 收藏星标（票 #104 W8 入口）。 */
+.fav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--sisy-radius-small);
+  background: none;
+  padding: 0;
+  color: var(--sisy-color-text-tertiary);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.fav-btn:hover {
+  color: var(--sisy-color-warning);
+  background: var(--sisy-color-bg);
+}
+
+.fav-btn.active {
+  color: var(--sisy-color-warning);
+}
+
 /* 列表视图（原型 pipe-table）。 */
 .pipe-table {
   min-height: 0;
@@ -645,6 +828,12 @@ const hasAny = computed(() => rows.value.length > 0)
 
 .pipe-row:hover {
   background: var(--sisy-color-bg);
+}
+
+.pc-fav {
+  width: 32px;
+  flex-shrink: 0;
+  display: flex;
 }
 
 .pc-name {
@@ -744,6 +933,13 @@ const hasAny = computed(() => rows.value.length > 0)
   gap: 12px;
 }
 
+.p-card-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
 .p-card-name {
   border: none;
   background: none;
@@ -762,6 +958,10 @@ const hasAny = computed(() => rows.value.length > 0)
 .p-card-sub {
   font-size: 12px;
   color: var(--sisy-color-text-secondary);
+  margin-top: -6px;
+}
+
+.p-card-progress {
   margin-top: -6px;
 }
 
@@ -812,7 +1012,15 @@ const hasAny = computed(() => rows.value.length > 0)
   margin-top: -4px;
 }
 
-@media (max-width: 767px) {
+/* G2（平板档降级次要列）：≤1024px 收起「触发方式」；≤880px 再收起
+   「进度/成功率」，保留 状态/平均耗时/动作。桌面档不受影响。 */
+@media (max-width: 1024px) {
+  .pc-trigger {
+    display: none;
+  }
+}
+
+@media (max-width: 880px) {
   .pc-progress,
   .pc-rate {
     display: none;

@@ -680,7 +680,6 @@
     "searchPlaceholder": "Search pipelines…",
     "newPipeline": "New pipeline",
     "chipAll": "All",
-    "chipRunning": "Running",
     "chipFailed": "Failed",
     "chipSuccess": "Succeeded",
     "viewList": "List",
@@ -704,7 +703,15 @@
     "rerunRequested": "Rerun requested",
     "empty": "No pipelines yet",
     "emptyHint": "Create a project and save a pipeline definition; it will show up here.",
-    "statsHint": "Success rate and average duration are aggregated server-side from each pipeline's last 20 builds (terminal states); the list is aggregated from projects and recent builds.",
-    "totalPipelines": "{n} pipelines in total"
+    "statsHint": "Success rate and average duration are aggregated server-side from each pipeline's last 20 builds (terminal states); “—” is shown when unavailable.",
+    "chipActive": "Active",
+    "chipEnded": "Timeout/Cancelled",
+    "totalBuilds": "{n} builds",
+    "retry": "Retry",
+    "favoriteAdd": "Add to favorites",
+    "favoriteRemove": "Remove from favorites",
+    "favoriteAdded": "Added to favorites",
+    "favoriteRemoved": "Removed from favorites",
+    "chipNever": "Never run"
   }
 }

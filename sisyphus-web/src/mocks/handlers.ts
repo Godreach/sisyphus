@@ -309,6 +309,14 @@ export function createHandlers(options: MockHandlerOptions) {
       },
     ),
 
+    // ----- 流水线清单（契约票 #105，P1 裁定：跨项目权威清单，替代前端探测）-----
+    pipelinesList: http.get('/api/v1/pipelines', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(150)
+      return HttpResponse.json(db.pipelineListItems())
+    }),
+
     // ----- 流水线统计（契约票 #102：fixture + 动态合并聚合，口径同构建列表）-----
     pipelineStats: http.get(
       '/api/v1/projects/:name/pipelines/:pipeline/stats',

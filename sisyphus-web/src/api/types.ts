@@ -235,6 +235,26 @@ export interface LatestBuildRef {
   finished_at: number | null
 }
 
+/** 流水线清单条目（跨项目；契约票 #105，P1 裁定——替代前端「探测 + 概览
+ *  去重」凑数，清单以服务端为准）。 */
+export interface PipelineListItemDto {
+  /** 所属项目名。 */
+  project: string
+  /** pipeline 名。 */
+  pipeline: string
+  /** 定义最近修改时刻（Unix 毫秒）。 */
+  updated_at: number
+}
+
+/** 流水线清单响应（跨项目全量；服务端固定 (project, pipeline) 字典序，
+ *  前端展示序自排）。viewer 档权限；无分页（v1 规模几十条，全量返回）。 */
+export interface PipelineListResponse {
+  /** 流水线条目（(project, pipeline) 字典序）。 */
+  items: PipelineListItemDto[]
+  /** 条目总数（= items.length，形态与其余列表端点对齐）。 */
+  total: number
+}
+
 /** 流水线统计响应（服务端聚合，契约票 #102 口径冻结）：
  *  窗口 = 最近 N 条构建（按号倒序、不分状态）；成功率分母为窗口内终态
  *  （succeeded/failed/cancelled/timeout 四类）；平均耗时只取 started_at 与

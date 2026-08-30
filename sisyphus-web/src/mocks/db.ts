@@ -19,6 +19,7 @@ import type {
   ModelParameterDecl,
   OverviewSnapshotResponse,
   PipelineFavoriteResponse,
+  PipelineListResponse,
   PipelineStatsResponse,
   ProjectResponse,
   RecentBuildDto,
@@ -230,6 +231,16 @@ const GPU_JOB_PROJECT = 'android-sdk'
 
 export function findPipeline(project: string, pipeline: string): FixturePipeline | null {
   return PIPELINES.find((p) => p.project === project && p.name === pipeline) ?? null
+}
+
+/** 流水线清单（契约票 #105，P1）：跨项目全量，(project, pipeline) 字典序
+ *  （sort 稳定，定义顺序即同名兜底序）；updated_at 按序确定性回溯（清单
+ *  条目只需稳定，不承载真实编辑时刻）。 */
+export function pipelineListItems(): PipelineListResponse {
+  const items = [...PIPELINES]
+    .sort((a, b) => a.project.localeCompare(b.project) || a.name.localeCompare(b.name))
+    .map((p, i) => ({ project: p.project, pipeline: p.name, updated_at: NOW - (i + 1) * 3600e3 }))
+  return { items, total: items.length }
 }
 
 // ---------------------------------------------------------------------------
