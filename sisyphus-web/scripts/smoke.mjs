@@ -344,14 +344,14 @@ async function runAuthed(browser) {
   await visit(page, '/agents/linux-1', 'linux-1', 'agent-detail')
   await visit(page, '/admin/secrets', '机密', 'admin-secrets')
   await visit(page, '/admin/audit', '审计日志', 'admin-audit')
-  await visit(page, '/admin/upgrade', 'Agent 升级', 'admin-upgrade')
+  await visit(page, '/admin/upgrade', '构建机升级', 'admin-upgrade')
   await visit(page, '/admin/users', '用户', 'admin-users')
 
   // 关键动作 1：升级页升级包表格渲染（占位态消除——mock 回非空包，
   // NDataTable 包表出现且含包名）。B5-T4 起升级端点已交付，页不再退化。
   try {
     await page.goto(`${BASE}/admin/upgrade`, { waitUntil: 'domcontentloaded' })
-    await page.locator('.app-topbar-title', { hasText: 'Agent 升级' }).first().waitFor({ timeout: 10000 })
+    await page.locator('.app-topbar-title', { hasText: '构建机升级' }).first().waitFor({ timeout: 10000 })
     await page
       .locator('.upgrade-packages-table td', { hasText: 'sisyphus-agent-1.0.0-linux-x86_64.tar.gz' })
       .first()
@@ -404,13 +404,23 @@ async function runAuthed(browser) {
     ok('overview no-degradation (real stat cards, no error)', false, err.message)
   }
 
-  // i18n 即时切换：工作台顶栏标题 工作台 → Dashboard → 工作台。
+  // i18n 即时切换：用户卡菜单（票 #104 起「语言」收进二级子菜单，顶栏开关
+  // 已废）—— 工作台 → English → 工作台。叶子选项须精确文本匹配：子菜单 DOM
+  // 嵌在父选项内，父行文本包含子项文本，hasText 模糊匹配会命中父行点不开。
   try {
     await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
     await page.locator('.app-topbar-title', { hasText: '工作台' }).first().waitFor({ timeout: 10000 })
-    await page.locator('.app-topbar .n-switch').click()
+    await page.locator('.sidebar-user').click()
+    await page.locator('.n-dropdown-option').filter({ hasText: /^语言$/ }).first().hover()
+    await page.locator('.n-dropdown-option').filter({ hasText: /^English$/ }).first().click()
     await page.locator('.app-topbar-title', { hasText: 'Dashboard' }).first().waitFor({ timeout: 5000 })
-    await page.locator('.app-topbar .n-switch').click()
+    // NDropdown 二级叶子选中后菜单不自动关闭——先关掉再重新点开（否则第二次
+    // sidebar-user 点击是「关」而非「开」）。
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(300)
+    await page.locator('.sidebar-user').click()
+    await page.locator('.n-dropdown-option').filter({ hasText: /^Language$/ }).first().hover()
+    await page.locator('.n-dropdown-option').filter({ hasText: /^中文$/ }).first().click()
     await page.locator('.app-topbar-title', { hasText: '工作台' }).first().waitFor({ timeout: 5000 })
     ok('i18n zh→en→zh', true)
   } catch (err) {
