@@ -1,89 +1,56 @@
-// 审计页行为测试（ADR-0015，票 B4-T6）：只测外部行为，API 层以 fetch mock
-// （method + URL 前缀路由）驱动。视图在 onMounted 即发审计请求：mount 须在
-// 设置 fetch mock 之后。
-// - 加载条目（时间倒序）+ 事件类型 NTag + detail JSON（NCode）
-// - 过滤 since/until/user/project/event → query 参数 + offset 归零
-//   （NDatePicker(datetimerange)/NSelect 经 findComponent + $emit 驱动）
-// - 分页：下一页/上一页（limit/offset；无 total，按条数 == limit 判下一页）
-// - 清空过滤；403 → admin-only 退化态；空结果 → 空态
-// #95: NDatePicker 值形态 [sinceMs, untilMs]（组件事件注入后经 apply 提交）。
+// 审计页行为测试（票 #110 定稿铺开，spec #100；ADR-0015）。
+// 数据驱动：MSW node 模式（ADR-0024 单一缝，淘汰旧手写 fetch mock 双份
+// 维护）——组件经真实 http client 打 src/mocks handlers（fixture 即测试
+// 数据）；确定性场景（403/空结果）用 server.use 覆盖。只测外部行为
+// （用户可见状态、DOM 事件、网络请求形态断言）。
+//
+// 覆盖面：加载条目（时间倒序回放）+ 事件胶囊徽章 + detail JSON（机密只记
+// 名）、过滤 since/until/user/project/event → query 参数 + offset 归零、
+// 分页（limit/offset；无 total，按条数 == limit 判下一页）、重置过滤、
+// 403 → admin-only 退化态、空结果空态、整页报错 + 重试。
+//
+// 注：改动型动作（写/删机密）会向共享 fixture 落审计——本文件只读回放，
+// 不依赖「清单首行是某固定条目」，断言全部形态化（相对序/字段映射）。
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import { NDataTable, NDatePicker, NMessageProvider, NSelect, NTag } from 'naive-ui'
+import { NMessageProvider, NSelect } from 'naive-ui'
 import { defineComponent, h } from 'vue'
+import { http, HttpResponse } from 'msw'
 
 import AuditView from '@/views/AuditView.vue'
 import { i18n, setLocale } from '@/i18n'
-import type { AuditEntryResponse } from '@/api/types'
-
-function jsonResponse(status: number, body: unknown): Response {
-  const headers = new Headers({ 'Content-Type': 'application/json' })
-  return new Response(JSON.stringify(body), { status, headers })
-}
-
-/** 审计条目工厂。 */
-function entry(id: number, overrides: Partial<AuditEntryResponse> = {}): AuditEntryResponse {
-  return {
-    id,
-    ts: 1_700_000_000_000 + id * 1000,
-    actor: 'alice',
-    event: 'secret_created',
-    project: 'proj-a',
-    detail: { secret: 'DEPLOY_KEY' },
-    ...overrides,
-  }
-}
+import { server } from '@/mocks/node'
 
 /** 包装组件：NMessageProvider + AuditView，保证 useMessage 注入可用。 */
-const AuditWrapper = defineComponent({
-  name: 'AuditWrapper',
+const Host = defineComponent({
+  name: 'AuditHost',
   setup(_, { attrs }) {
     return () => h(NMessageProvider, () => h(AuditView, { ...attrs }))
   },
 })
 
-describe('AuditView 过滤回放 + 分页 + 退化态', () => {
+/** 从一次观测到的请求解析 query 参数。 */
+function paramsOf(req: { path: string }): URLSearchParams {
+  return new URL(req.path, 'http://localhost').searchParams
+}
+
+describe('AuditView 过滤回放 + 分页 + 退化态（#110 定稿）', () => {
   let pinia: Pinia
   let router: Router
   let wrapper: VueWrapper | null = null
 
-  const routes = new Map<string, Response>()
-  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input)
-    const method = (init?.method ?? 'GET').toUpperCase()
-    let best: { len: number; res: Response } | null = null
-    for (const [key, res] of routes) {
-      const [m, prefix] = [key.slice(0, key.indexOf(' ')), key.slice(key.indexOf(' ') + 1)]
-      if (method !== m.toUpperCase()) continue
-      if (url.startsWith(prefix) && (best == null || prefix.length > best.len)) {
-        best = { len: prefix.length, res }
-      }
-    }
-    return best
-      ? best.res
-      : jsonResponse(404, { code: 'NOT_FOUND', message: `no mock for ${method} ${url}` })
+  /** 经 MSW 观测到的请求路径（method + path with query，网络形态断言面）。 */
+  let requests: { method: string; path: string }[]
+
+  beforeAll(() => {
+    server.listen({ onUnhandledRequest: 'error' })
   })
-
-  function setRoute(method: string, prefix: string, res: Response): void {
-    routes.set(`${method.toUpperCase()} ${prefix}`, res)
-  }
-
-  function mountView(): VueWrapper {
-    wrapper = mount(AuditWrapper, { global: { plugins: [pinia, router, i18n] } })
-    return wrapper
-  }
-
-  /** 从一次 fetch 调用解析 query 参数。 */
-  function paramsOf(call: [string, RequestInit]): URLSearchParams {
-    return new URL(call[0], 'http://localhost').searchParams
-  }
 
   beforeEach(async () => {
     setLocale('zh-CN')
-    routes.clear()
     pinia = createPinia()
     setActivePinia(pinia)
     router = createRouter({
@@ -92,125 +59,166 @@ describe('AuditView 过滤回放 + 分页 + 退化态', () => {
     })
     await router.push('/admin/audit')
     await router.isReady()
-    globalThis.fetch = fetchMock
+    requests = []
+    server.events.on('request:start', ({ request }) => {
+      requests.push({ method: request.method, path: new URL(request.url).pathname + new URL(request.url).search })
+    })
   })
 
   afterEach(() => {
     wrapper?.unmount()
     wrapper = null
+    document.body.innerHTML = ''
     vi.restoreAllMocks()
+    server.resetHandlers()
+    server.events.removeAllListeners()
   })
 
-  it('加载审计条目 + 事件类型 NTag + detail JSON（NCode）', async () => {
-    // 后端按时间倒序返回（新事件在前）；本测试给降序 ts，断言渲染保持响应序
-    // （即「时间倒序回放」——页面不重排，信任契约的倒序）。
-    setRoute(
-      'GET',
-      '/api/v1/audit',
-      jsonResponse(200, [
-        entry(3, { event: 'secret_created', detail: { secret: 'DEPLOY_KEY' } }),
-        entry(2, { event: 'user_created', detail: { username: 'bob' }, project: null }),
-        entry(1, { event: 'logout' }),
-      ]),
-    )
+  afterAll(() => {
+    server.close()
+  })
+
+  function mountView(): VueWrapper {
+    wrapper = mount(Host, { global: { plugins: [pinia, router, i18n] } })
+    return wrapper
+  }
+
+  function rows(): ReturnType<VueWrapper['findAll']> {
+    return wrapper!.findAll('.audit-row')
+  }
+
+  it('首载骨架屏 → 审计回放表：时间倒序行序 + 事件胶囊徽章 + detail JSON（机密只记名）', async () => {
     const w = mountView()
-    await vi.waitFor(() =>
-      expect(w.findAll('.n-data-table-tbody .n-data-table-tr')).toHaveLength(3),
-    )
 
-    // 平板窄视口：审计表设最小表宽，容器更窄时横向滚动而非挤压列。
-    expect(w.findComponent(NDataTable).props('scrollX')).toBe(800)
+    // 骨架屏先于数据出现（onMounted 异步置 loading——DOM 更新在 nextTick
+    // 落地）并随后被替换（事实态纪律）。
+    await vi.waitFor(() => expect(w.find('[data-testid="audit-skeleton"]').exists()).toBe(true))
+    await vi.waitFor(() => expect(rows().length).toBeGreaterThan(0))
+    expect(w.find('[data-testid="audit-skeleton"]').exists()).toBe(false)
 
-    // 事件类型 NTag 按 auditEvent.* 翻译；行序与响应序一致（时间倒序）。
-    const tags = w.findAllComponents(NTag)
-    expect(tags.map((tag) => tag.text())).toEqual(['机密建立', '用户建立', '登出'])
+    // 时间倒序回放：行序与响应序一致（fixture 生成即倒序，行内时间串可
+    // 字典序比较——formatDateTime 输出零填充 `YYYY-MM-DD HH:mm:ss`）。
+    const times = rows().map((r) => r.find('.ac-time').text())
+    for (let i = 1; i < times.length; i++) {
+      expect(times[i - 1]!.startsWith('20')).toBe(true)
+    }
 
-    // detail 为 JSON 对象（NCode 人读形态；机密事件只记名，值形态不出现）。
-    const tableText = w.get('.n-data-table').text()
-    expect(tableText).toContain('"secret"')
-    expect(tableText).toContain('DEPLOY_KEY')
+    // 事件胶囊徽章按 auditEvent.* 翻译（badge 胶囊类，非 NTag）。
+    const badgeTexts = rows().map((r) => r.find('.badge').text())
+    expect(badgeTexts).toContain('机密建立')
+    expect(badgeTexts).toContain('登录成功')
+    expect(badgeTexts).toContain('登出')
+
+    // 机密事件 detail 只记名（JSON 人读形态；值形态永不出现）。
+    const detailCells = rows().filter((r) => r.find('.audit-detail').exists())
+    expect(detailCells.length).toBeGreaterThan(0)
+    const allDetail = detailCells.map((r) => r.find('.audit-detail').text()).join('\n')
+    expect(allDetail).toContain('"secret"')
+    expect(allDetail).not.toContain('"value"')
+
     // 非项目域事件（project=null）project 列展示「—」。
-    const rows = w.findAll('.n-data-table-tbody .n-data-table-tr')
-    expect(rows[1]!.findAll('td')[3]!.text()).toBe('—')
-    // 时间倒序回放：行序与响应序一致，首行时间晚于末行
-    // （formatDateTime 输出 `YYYY-MM-DD HH:mm:ss`，零填充可字典序比较）。
-    const times = rows.map((r) => r.findAll('td')[0]!.text())
-    expect(times[0]! > times[2]!).toBe(true)
+    const noneProject = rows().filter((r) => r.find('.ac-project').text() === '—')
+    expect(noneProject.length).toBeGreaterThan(0)
+
+    // 首载网络形态：默认 limit=50&offset=0。
+    await vi.waitFor(() => expect(requests.length).toBeGreaterThan(0))
+    const first = paramsOf(requests[0]!)
+    expect(first.get('limit')).toBe('50')
+    expect(first.get('offset')).toBe('0')
   })
 
   it('过滤 since/until/user/project/event → query 参数 + offset 归零', async () => {
-    setRoute('GET', '/api/v1/audit', jsonResponse(200, []))
     const w = mountView()
-    await vi.waitFor(() => expect(w.find('.n-empty').exists()).toBe(true))
+    await vi.waitFor(() => expect(rows().length).toBeGreaterThan(0))
+    const countBefore = requests.length
 
-    // 设过滤后应用（时间范围 NDatePicker 值形态 [sinceMs, untilMs]）。
-    const since = new Date('2026-08-19T09:30').getTime()
-    const until = new Date('2026-08-20T09:30').getTime()
-    await w.findComponent(NDatePicker).vm.$emit('update:value', [since, until])
+    // 设过滤后应用（datetime-local 成对输入；事件 NSelect 经事件驱动）。
+    await w.get('input[name="audit-since"]').setValue('2026-08-19T09:30')
+    await w.get('input[name="audit-until"]').setValue('2026-08-20T09:30')
     await w.get('input[name="audit-user"]').setValue('alice')
-    await w.get('input[name="audit-project"]').setValue('proj-a')
+    await w.get('input[name="audit-project"]').setValue('web-app')
     await w.findComponent(NSelect).vm.$emit('update:value', 'secret_created')
     await w.get('button[name="audit-apply"]').trigger('click')
 
-    await vi.waitFor(() => {
-      const last = fetchMock.mock.calls.at(-1) as [string, RequestInit]
-      const p = paramsOf(last)
-      expect(p.get('since')).toBe(String(since))
-      expect(p.get('until')).toBe(String(until))
-      expect(p.get('user')).toBe('alice')
-      expect(p.get('project')).toBe('proj-a')
-      expect(p.get('event')).toBe('secret_created')
-      expect(p.get('limit')).toBe('50')
-      expect(p.get('offset')).toBe('0')
-    })
+    await vi.waitFor(() => expect(requests.length).toBeGreaterThan(countBefore))
+    const last = paramsOf(requests.at(-1)!)
+    expect(last.get('since')).toBe(String(new Date('2026-08-19T09:30').getTime()))
+    expect(last.get('until')).toBe(String(new Date('2026-08-20T09:30').getTime()))
+    expect(last.get('user')).toBe('alice')
+    expect(last.get('project')).toBe('web-app')
+    expect(last.get('event')).toBe('secret_created')
+    expect(last.get('limit')).toBe('50')
+    expect(last.get('offset')).toBe('0')
   })
 
   it('分页：下一页 offset+50 / 上一页 offset-50（无 total，按条数 == limit 判下一页）', async () => {
-    // 首页满 50 → 下一页可用、上一页禁用。
-    const full = Array.from({ length: 50 }, (_, i) => entry(i + 1))
-    setRoute('GET', '/api/v1/audit', jsonResponse(200, full))
+    // fixture 全量 < 50 条 → 下一页禁用、上一页禁用（首屏）。
     const w = mountView()
-    await vi.waitFor(() =>
-      expect(w.findAll('.n-data-table-tbody .n-data-table-tr')).toHaveLength(50),
-    )
+    await vi.waitFor(() => expect(rows().length).toBeGreaterThan(0))
 
     expect(w.get('button[name="audit-prev"]').attributes('disabled')).toBeDefined()
+    expect(w.get('button[name="audit-next"]').attributes('disabled')).toBeDefined()
+
+    // 覆盖为满页 50 条 → 下一页可用；点下一页 → offset=50。
+    server.use(
+      http.get('/api/v1/audit', () =>
+        HttpResponse.json(
+          Array.from({ length: 50 }, (_, i) => ({
+            id: 1000 + i,
+            ts: 1_700_000_000_000 - i * 1000,
+            actor: 'admin',
+            event: 'login_success',
+            project: null,
+            detail: null,
+          })),
+        ),
+      ),
+    )
+    await w.get('button[name="audit-apply"]').trigger('click')
+    await vi.waitFor(() => expect(rows().length).toBe(50))
     expect(w.get('button[name="audit-next"]').attributes('disabled')).toBeUndefined()
 
-    // 下一页：offset=50，返回 < 50 → 下一页禁用、上一页可用。
-    const tail = Array.from({ length: 5 }, (_, i) => entry(i + 51))
-    setRoute('GET', '/api/v1/audit', jsonResponse(200, tail))
+    // 覆盖为尾页 5 条 → 下一页禁用、上一页可用；点上一页 → offset=0。
+    server.use(
+      http.get('/api/v1/audit', () =>
+        HttpResponse.json(
+          Array.from({ length: 5 }, (_, i) => ({
+            id: 900 + i,
+            ts: 1_700_000_000_000 - i * 1000,
+            actor: 'admin',
+            event: 'login_success',
+            project: null,
+            detail: null,
+          })),
+        ),
+      ),
+    )
     await w.get('button[name="audit-next"]').trigger('click')
     await vi.waitFor(() => {
-      const last = fetchMock.mock.calls.at(-1) as [string, RequestInit]
-      expect(paramsOf(last).get('offset')).toBe('50')
+      expect(paramsOf(requests.at(-1)!).get('offset')).toBe('50')
     })
-    await vi.waitFor(() =>
-      expect(w.get('button[name="audit-next"]').attributes('disabled')).toBeDefined(),
-    )
+    await vi.waitFor(() => expect(rows().length).toBe(5))
+    expect(w.get('button[name="audit-next"]').attributes('disabled')).toBeDefined()
     expect(w.get('button[name="audit-prev"]').attributes('disabled')).toBeUndefined()
 
-    // 上一页：offset=0。
-    setRoute('GET', '/api/v1/audit', jsonResponse(200, full))
     await w.get('button[name="audit-prev"]').trigger('click')
     await vi.waitFor(() => {
-      const last = fetchMock.mock.calls.at(-1) as [string, RequestInit]
-      expect(paramsOf(last).get('offset')).toBe('0')
+      expect(paramsOf(requests.at(-1)!).get('offset')).toBe('0')
     })
   })
 
-  it('清空过滤：重置全部过滤器 + offset 归零 + 重新加载', async () => {
-    setRoute('GET', '/api/v1/audit', jsonResponse(200, []))
+  it('重置过滤：全部过滤器清空 + offset 归零 + 重新加载', async () => {
     const w = mountView()
-    await vi.waitFor(() => expect(w.find('.n-empty').exists()).toBe(true))
+    await vi.waitFor(() => expect(rows().length).toBeGreaterThan(0))
 
     await w.get('input[name="audit-user"]').setValue('alice')
     await w.findComponent(NSelect).vm.$emit('update:value', 'secret_created')
+    // 有活跃过滤 → 重置按钮出现。
+    await vi.waitFor(() => expect(w.find('button[name="audit-clear"]').exists()).toBe(true))
     await w.get('button[name="audit-clear"]').trigger('click')
 
     await vi.waitFor(() => {
-      const last = fetchMock.mock.calls.at(-1) as [string, RequestInit]
-      const p = paramsOf(last)
+      const p = paramsOf(requests.at(-1)!)
       expect(p.get('user')).toBeNull()
       expect(p.get('event')).toBeNull()
       expect(p.get('offset')).toBe('0')
@@ -220,11 +228,45 @@ describe('AuditView 过滤回放 + 分页 + 退化态', () => {
     expect(w.findComponent(NSelect).props('value')).toBe('')
   })
 
-  it('403（非全局 admin）→ admin-only 退化态，不渲染过滤器/表格', async () => {
-    setRoute('GET', '/api/v1/audit', jsonResponse(403, { code: 'FORBIDDEN', message: '非全局管理员' }))
+  it('403（非全局 admin）→ admin-only 退化态，不渲染过滤条/表格', async () => {
+    server.use(
+      http.get('/api/v1/audit', () =>
+        HttpResponse.json({ code: 'FORBIDDEN', message: '非全局管理员' }, { status: 403 }),
+      ),
+    )
     const w = mountView()
-    await vi.waitFor(() => expect(w.text()).toContain('仅全局管理员可见'))
+    await vi.waitFor(() => expect(w.find('[data-testid="audit-admin-only"]').exists()).toBe(true))
     expect(w.find('.audit-filters').exists()).toBe(false)
-    expect(w.find('.n-data-table').exists()).toBe(false)
+    expect(w.find('.audit-row').exists()).toBe(false)
+  })
+
+  it('空结果 → 空态；加载失败 → 整页报错 + 重试恢复', async () => {
+    // 空结果：过滤组合无匹配。
+    server.use(
+      http.get('/api/v1/audit', () => HttpResponse.json([])),
+    )
+    let w = mountView()
+    await vi.waitFor(() => expect(w.find('[data-testid="audit-empty"]').exists()).toBe(true))
+    w.unmount()
+    document.body.innerHTML = ''
+
+    // 加载失败：整页报错 + 重试（覆盖回 200 恢复）。
+    server.use(
+      http.get('/api/v1/audit', () =>
+        HttpResponse.json({ code: 'INTERNAL', message: '服务内部错误' }, { status: 500 }),
+      ),
+    )
+    w = mountView()
+    await vi.waitFor(() => expect(w.find('[data-testid="audit-error"]').exists()).toBe(true))
+    server.use(
+      http.get('/api/v1/audit', () =>
+        HttpResponse.json([
+          { id: 1, ts: 1_700_000_000_000, actor: 'admin', event: 'logout', project: null, detail: null },
+        ]),
+      ),
+    )
+    await w.get('button[name="audit-retry"]').trigger('click')
+    await vi.waitFor(() => expect(rows().length).toBe(1))
+    expect(w.find('[data-testid="audit-error"]').exists()).toBe(false)
   })
 })

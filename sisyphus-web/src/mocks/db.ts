@@ -12,6 +12,7 @@
 import type {
   AgentResponse,
   ArtifactResponse,
+  AuditEventDto,
   BuildStatusDto,
   BuildSummaryResponse,
   CacheEntry,
@@ -1133,4 +1134,152 @@ export function pipelineStatsFrom(
       finished_at: latest.finished_at,
     },
   }
+}
+
+// ---------------------------------------------------------------------------
+// 机密（spec #110，ADR-0015）：项目域 fixture，值形态不存在——SECRETS 只记
+// 名（与后端 secret repo 的加密落库对齐：值只在写入路径出现，任何 fixture
+// 都不造值，纪律「只记名不记值」在 mock 层同样成立）。error-demo 项目的
+// 机密端点在 handlers 层 500（同其余端点）；fresh-project 无机密（空态）。
+// 审计闭环：写/删机密的 handler 同步落 AUDIT 条目（audit 语义演示同源）。
+// ---------------------------------------------------------------------------
+
+/** 项目名 → 机密名清单（按名排序在 listSecretsOf 收口；无值形态）。 */
+const SECRETS = new Map<string, string[]>([
+  [
+    'web-app',
+    ['DEPLOY_KEY', 'NPM_TOKEN', 'SSH_HOST_KEY'],
+  ],
+  ['api-gateway', ['DOCKERHUB_TOKEN']],
+  ['error-demo', ['WILL_500']],
+])
+
+/** 某项目的机密名清单（按名排序；值形态不存在）。 */
+export function listSecretsOf(project: string): string[] {
+  return [...(SECRETS.get(project) ?? [])].sort()
+}
+
+/** 写/覆写机密（同名即覆写）。返回 existed = 是否覆写（审计事件分流）。
+ *  值参数在此处即被丢弃——mock 层只记名不记值（ADR-0015 纪律同源）。 */
+export function upsertSecret(project: string, name: string): boolean {
+  const list = SECRETS.get(project) ?? []
+  const existed = list.includes(name)
+  if (!existed) {
+    list.push(name)
+    SECRETS.set(project, list)
+  }
+  return existed
+}
+
+/** 删除机密。返回是否确有删除（无此名 false → handler 404）。 */
+export function deleteSecret(project: string, name: string): boolean {
+  const list = SECRETS.get(project) ?? []
+  const existed = list.includes(name)
+  if (existed) {
+    SECRETS.set(
+      project,
+      list.filter((n) => n !== name),
+    )
+  }
+  return existed
+}
+
+// ---------------------------------------------------------------------------
+// 审计日志（spec #110，ADR-0015）：全局 admin 安全事件回放 fixture。
+// 覆盖多用户/多项目/多事件类型（含机密只记名 detail、非项目域 project=null），
+// 时间倒序（新事件在前——查询契约由后端保证，fixture 生成即倒序）。
+// handlers 层的机密写/删同步 insertAudit（页面动作 → 审计可回放闭环）。
+// ---------------------------------------------------------------------------
+
+export interface FixtureAuditEntry {
+  id: number
+  ts: number
+  actor: string
+  event: AuditEventDto
+  project: string | null
+  detail: Record<string, unknown> | null
+}
+
+/** 全量审计条目（生成即按 ts 倒序；id 递增——新事件 id 更大）。 */
+const AUDIT: FixtureAuditEntry[] = (() => {
+  interface Seed {
+    actor: string
+    event: AuditEventDto
+    project: string | null
+    detail: Record<string, unknown> | null
+    agoMs: number
+  }
+  const seeds: Seed[] = [
+    { actor: 'admin', event: 'secret_created', project: 'web-app', detail: { secret: 'NPM_TOKEN' }, agoMs: 2 * 3600e3 },
+    { actor: 'alice', event: 'login_success', project: null, detail: null, agoMs: 5 * 3600e3 },
+    { actor: 'admin', event: 'scm_credential_set', project: 'api-gateway', detail: null, agoMs: 9 * 3600e3 },
+    { actor: 'admin', event: 'secret_overwritten', project: 'web-app', detail: { secret: 'DEPLOY_KEY' }, agoMs: 26 * 3600e3 },
+    { actor: 'bob', event: 'login_failure', project: null, detail: null, agoMs: 30 * 3600e3 },
+    { actor: 'admin', event: 'user_created', project: null, detail: { username: 'bob' }, agoMs: 2 * 86400e3 },
+    { actor: 'alice', event: 'member_roles_changed', project: 'web-app', detail: { members: [{ username: 'bob', role: 'viewer' }] }, agoMs: 3 * 86400e3 },
+    { actor: 'admin', event: 'pat_created', project: null, detail: { name: 'ci-token' }, agoMs: 4 * 86400e3 },
+    { actor: 'admin', event: 'secret_created', project: 'api-gateway', detail: { secret: 'DOCKERHUB_TOKEN' }, agoMs: 5 * 86400e3 },
+    { actor: 'alice', event: 'project_created', project: 'web-app', detail: null, agoMs: 6 * 86400e3 },
+    { actor: 'admin', event: 'agent_registered', project: null, detail: { agent: 'build-01' }, agoMs: 7 * 86400e3 },
+    { actor: 'admin', event: 'agent_created', project: null, detail: { agent: 'build-02' }, agoMs: 8 * 86400e3 },
+    { actor: 'alice', event: 'login_success', project: null, detail: null, agoMs: 9 * 86400e3 },
+    { actor: 'bob', event: 'login_success', project: null, detail: null, agoMs: 10 * 86400e3 },
+    { actor: 'admin', event: 'password_reset', project: null, detail: { username: 'bob' }, agoMs: 12 * 86400e3 },
+    { actor: 'admin', event: 'pat_revoked', project: null, detail: { name: 'old-token' }, agoMs: 15 * 86400e3 },
+    { actor: 'admin', event: 'user_disabled', project: null, detail: { username: 'carol' }, agoMs: 20 * 86400e3 },
+    { actor: 'admin', event: 'agent_disabled', project: null, detail: { agent: 'build-07' }, agoMs: 25 * 86400e3 },
+    { actor: 'alice', event: 'logout', project: null, detail: null, agoMs: 30 * 86400e3 },
+    { actor: 'admin', event: 'secret_deleted', project: 'web-app', detail: { secret: 'OLD_TOKEN' }, agoMs: 40 * 86400e3 },
+    { actor: 'admin', event: 'user_enabled', project: null, detail: { username: 'bob' }, agoMs: 50 * 86400e3 },
+    { actor: 'admin', event: 'secret_created', project: 'web-app', detail: { secret: 'SSH_HOST_KEY' }, agoMs: 60 * 86400e3 },
+  ]
+  // ts = NOW - agoMs（晚事件 agoMs 更小 → 排前，时间倒序成立）。
+  const rows = seeds.map((s, i) => ({
+    id: seeds.length - i,
+    ts: NOW - s.agoMs,
+    actor: s.actor,
+    event: s.event,
+    project: s.project,
+    detail: s.detail,
+  }))
+  // 双保险排序：不依赖 seeds 书写顺序（ts 倒序 → id 倒序）。
+  return rows.sort((a, b) => b.ts - a.ts)
+})()
+
+/** 下一行 id（handlers 层动作落审计时取用；递增不回收）。 */
+let auditNextId = AUDIT.length + 1
+
+/** 落一条审计事件（handlers 层动作闭环调用：机密写/删等）。 */
+export function insertAudit(
+  actor: string,
+  event: AuditEventDto,
+  project: string | null,
+  detail: Record<string, unknown> | null,
+): void {
+  AUDIT.unshift({ id: auditNextId++, ts: Date.now(), actor, event, project, detail })
+}
+
+/** 审计查询（过滤全部可选 AND 组合 + limit/offset 分页；时间倒序由
+ *  AUDIT 生成序保证）。参数合法性（limit 1..=200 / offset 非负 / event
+ *  取值域）由 handler 层 422 裁决（audit.rs parse_filter/parse_paging 同形），
+ *  这里只做纯查询。 */
+export function queryAudit(filter: {
+  since?: number
+  until?: number
+  user?: string
+  project?: string
+  event?: AuditEventDto
+  limit: number
+  offset: number
+}): FixtureAuditEntry[] {
+  const limit = filter.limit
+  const matched = AUDIT.filter(
+    (e) =>
+      (filter.since == null || e.ts >= filter.since) &&
+      (filter.until == null || e.ts <= filter.until) &&
+      (filter.user == null || filter.user === '' || e.actor === filter.user) &&
+      (filter.project == null || filter.project === '' || e.project === filter.project) &&
+      (filter.event == null || e.event === filter.event),
+  )
+  return matched.slice(filter.offset, filter.offset + limit)
 }

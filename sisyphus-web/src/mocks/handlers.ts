@@ -7,14 +7,16 @@
 // - 动态构建走 engine.ts；fixture 构建走 db.ts；两者在列表/详情处合并
 //   （同号动态优先——from_failed 重跑会以动态态接管同号构建）。
 // - 错误态 fixture：`error-demo` 项目全部端点 500；概览支持 `?_mock_error=1`。
+// - 机密/审计（spec #110）：机密只记名不记值（PUT value 即弃）、审计仅安全
+//   事件；页面动作同步落审计条目（ADR-0015 语义闭环）。
 
 import { http, HttpResponse, delay } from 'msw'
 
+import { AUDIT_EVENTS, type AuditEventDto, type BuildStatusDto } from '@/api/types'
 import type {
   AgentResponse,
   BuildAcceptedResponse,
   BuildListResponse,
-  BuildStatusDto,
   BuildSummaryResponse,
   CreatedAgentResponse,
   CreateProjectRequest,
@@ -867,6 +869,126 @@ export function createHandlers(options: MockHandlerOptions) {
         return jsonError(409, 'AGENT_OFFLINE', '构建机离线，无法经通道下发删除指令')
       }
       return new HttpResponse(null, { status: 202 })
+    }),
+
+    // ----- 机密（spec #110，后端 api/secrets.rs 契约同形；项目 admin 档）-----
+    // 值只写不读：PUT body 的 value 在 handler 即被丢弃（db 只记名），任何
+    // 响应无值形态；写/删同步落审计（detail 只记名——audit 演示同源闭环）。
+    secretsList: http.get('/api/v1/projects/:name/secrets', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const name = String(params.name)
+      await delay(150)
+      if (isErrorFixture(name)) {
+        return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+      }
+      const user = sessionUser(request) ?? 'admin'
+      const deniedAdmin = projectAdminGuard(user, name)
+      if (deniedAdmin != null) return deniedAdmin
+      return HttpResponse.json(db.listSecretsOf(name).map((n) => ({ name: n })))
+    }),
+
+    secretPut: http.put(
+      '/api/v1/projects/:name/secrets/:secret',
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const name = String(params.name)
+        const secret = String(params.secret)
+        await delay(200)
+        if (isErrorFixture(name)) {
+          return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+        }
+        const user = sessionUser(request) ?? 'admin'
+        const deniedAdmin = projectAdminGuard(user, name)
+        if (deniedAdmin != null) return deniedAdmin
+        // 名校验与后端同规则（非空、字母数字 + `_`）：非法 422 不落写入。
+        if (!/^[A-Za-z0-9_]+$/.test(secret)) {
+          return validationError([
+            { path: 'secret', message: '机密名须为非空、由字母数字与下划线组成（env 键字符集）' },
+          ])
+        }
+        const body = (await request.json()) as { value?: string }
+        // 值形态只在请求体出现一次——handler 收到即弃（db 只记名）。
+        void body?.value
+        const existed = db.upsertSecret(name, secret)
+        db.insertAudit(user, existed ? 'secret_overwritten' : 'secret_created', name, { secret })
+        return new HttpResponse(null, { status: 204 })
+      },
+    ),
+
+    secretDelete: http.delete(
+      '/api/v1/projects/:name/secrets/:secret',
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const name = String(params.name)
+        const secret = String(params.secret)
+        await delay(200)
+        if (isErrorFixture(name)) {
+          return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+        }
+        const user = sessionUser(request) ?? 'admin'
+        const deniedAdmin = projectAdminGuard(user, name)
+        if (deniedAdmin != null) return deniedAdmin
+        if (!db.deleteSecret(name, secret)) {
+          return jsonError(404, 'NOT_FOUND', `机密不存在：${secret}`)
+        }
+        db.insertAudit(user, 'secret_deleted', name, { secret })
+        return new HttpResponse(null, { status: 204 })
+      },
+    ),
+
+    // ----- 审计（spec #110，后端 api/audit.rs 契约同形；仅全局 admin）-----
+    // 参数合法性同 parse_filter/parse_paging：未知事件类型 422、limit 越界
+    // 422、offset 负 422；user/project trim 后空串视为未过滤。
+    auditList: http.get('/api/v1/audit', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(150)
+      const user = sessionUser(request) ?? 'admin'
+      if (!db.USERS.find((u) => u.username === user)?.is_admin) {
+        return jsonError(403, 'FORBIDDEN', '非全局管理员（审计仅全局 admin 可读）')
+      }
+      const url = new URL(request.url)
+      // 事件类型取值域校验（AuditEvent::parse 同义：未知值 422，不静默放宽）。
+      const rawEvent = url.searchParams.get('event')
+      if (rawEvent != null && rawEvent !== '' && !AUDIT_EVENTS.includes(rawEvent as AuditEventDto)) {
+        return validationError([
+          { path: 'event', message: `未知事件类型：${rawEvent}（取值域见 OpenAPI enum）` },
+        ])
+      }
+      // 分页校验：limit 缺省 50、1..=200；offset 缺省 0、非负。非法 422。
+      const pagingIssues: { path: string; message: string }[] = []
+      const rawLimit = url.searchParams.get('limit')
+      const rawOffset = url.searchParams.get('offset')
+      const limit = rawLimit == null || rawLimit === '' ? 50 : Number(rawLimit)
+      const offset = rawOffset == null || rawOffset === '' ? 0 : Number(rawOffset)
+      if (!Number.isFinite(limit) || !Number.isInteger(limit) || limit < 1 || limit > 200) {
+        pagingIssues.push({ path: 'limit', message: 'limit 须在 1..=200 之间' })
+      }
+      if (!Number.isFinite(offset) || !Number.isInteger(offset) || offset < 0) {
+        pagingIssues.push({ path: 'offset', message: 'offset 不能为负' })
+      }
+      if (pagingIssues.length > 0) {
+        return validationError(pagingIssues)
+      }
+      const trim = (key: string): string | undefined => {
+        const raw = url.searchParams.get(key)?.trim()
+        return raw ? raw : undefined
+      }
+      const since = url.searchParams.get('since')
+      const until = url.searchParams.get('until')
+      const rows = db.queryAudit({
+        since: since != null && since !== '' ? Number(since) : undefined,
+        until: until != null && until !== '' ? Number(until) : undefined,
+        user: trim('user'),
+        project: trim('project'),
+        event: rawEvent != null && rawEvent !== '' ? (rawEvent as AuditEventDto) : undefined,
+        limit,
+        offset,
+      })
+      return HttpResponse.json(rows)
     }),
   }
 
