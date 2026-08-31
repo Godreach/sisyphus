@@ -57,6 +57,18 @@ export interface CreateProjectRequest {
   scm_password?: string | null
 }
 
+/** 编辑项目请求体（契约先行，票 #108，`PATCH /projects/{name}`，项目 admin 档；
+ *  mock 先行，后端阶段照单实现——与 agents PATCH 同惯例：字段缺省不动。
+ *  - `scm_url`：提交即整段替换（trim 后非空，空值 422；无 null 语义——仓库
+ *    URL 是项目锚点，不可清除）。
+ *  - `default_branch: null` = 清除默认分支；svn 项目提交非 null 分支 422
+ *    （与 create 校验同规则：svn 无分支概念）。
+ *  项目名是身份绑定（缓存命名空间/工作区路径/审计引用），v1 不可改。 */
+export interface UpdateProjectRequest {
+  scm_url?: string
+  default_branch?: string | null
+}
+
 // ---------------------------------------------------------------------------
 // SCM 探测 / 测试连接 / 分支枚举 / 凭据管理 DTO（后端 `api/scm.rs`，票 B5-T3，
 // ADR-0016）。创建期测试连接/分支枚举为 ad-hoc（凭据经请求体递送、不落库）；

@@ -131,6 +131,28 @@ const buildDetail = {
 }
 const buildList = { items: [], total: 0, page: 1, limit: 20 }
 
+// 流水线清单 + 统计（票 #108 项目详情消费：清单按项目过滤成行，stats 成行
+// 成功率/耗时/最近构建徽章；成员/目录面 smoke 既有 mock 直返空）。
+const pipelineList = {
+  items: [{ project: 'demo', pipeline: 'release', updated_at: 0 }],
+  total: 1,
+}
+const pipelineStats = {
+  window: 20,
+  total_builds: 1,
+  terminal_count: 1,
+  succeeded_count: 1,
+  success_rate: 100,
+  avg_duration_ms: 1000,
+  latest_build: {
+    number: 1,
+    status: 'succeeded',
+    trigger: 'manual',
+    started_at: 0,
+    finished_at: 1000,
+  },
+}
+
 // 升级包（升级页表格区渲染用——占位态消除：mock 回非空包，断言包表出现。
 // #95 迁移 NDataTable 后包表定位类为 upgrade-packages-table）。
 const upgradePackage = {
@@ -215,10 +237,12 @@ function mockApi(authed) {
     if (m === 'POST' && p === '/api/v1/projects/scm-branches') return json(200, scmBranches)
     if (m === 'GET') {
       if (p === '/api/v1/projects') return json(200, [project])
+      if (p === '/api/v1/pipelines') return json(200, pipelineList)
       if (p === '/api/v1/projects/demo') return json(200, project)
       if (p === '/api/v1/projects/demo/members') return json(200, [])
       if (p === '/api/v1/projects/demo/secrets') return json(200, [])
       if (p === '/api/v1/projects/demo/pipelines/release') return json(200, pipelineDef)
+      if (p === '/api/v1/projects/demo/pipelines/release/stats') return json(200, pipelineStats)
       if (p === '/api/v1/projects/demo/pipelines/release/builds') return json(200, buildList)
       if (p === '/api/v1/projects/demo/pipelines/release/builds/1') return json(200, buildDetail)
       if (p === '/api/v1/agents') return json(200, [agent])

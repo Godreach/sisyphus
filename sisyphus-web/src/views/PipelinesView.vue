@@ -29,6 +29,7 @@ import { NAlert, NDropdown, NEmpty, NSkeleton, useMessage } from 'naive-ui'
 import { buildsApi, favoritesApi, pipelinesApi } from '@/api/client'
 import { describeActionError, describeSubmitError } from '@/api/errors'
 import { formatDuration, relativeAge, relativeAgeKey, settledPercent, statusBadgeClass } from '@/utils/format'
+import { pipelineRowActionFor, runPipelineRowAction } from '@/utils/pipelineAction'
 import type { BuildDetailResponse, LatestBuildRef } from '@/api/types'
 
 const { t } = useI18n()
@@ -316,35 +317,20 @@ interface RowAction {
   run: (row: PipelineRow) => Promise<void>
 }
 
-/** 最近构建状态 → 行内动作（终止/重试/运行，原型红/橙/蓝）。 */
+/** 最近构建状态 → 行内动作（终止/重试/运行，原型红/橙/蓝；映射与执行走
+ *  utils/pipelineAction 单一缝，与项目详情共用）。 */
 function actionFor(row: PipelineRow): RowAction {
-  const status = row.latest?.status
-  if (status === 'running' || status === 'queued') {
-    return {
-      label: t('plines.actionCancel'),
-      cls: 'red',
-      run: async (r) => {
-        await buildsApi.cancel(r.project, r.pipeline, r.latest!.number)
-        message.success(t('plines.cancelRequested'))
-      },
-    }
-  }
-  if (status === 'failed') {
-    return {
-      label: t('plines.actionRetry'),
-      cls: 'orange',
-      run: async (r) => {
-        await buildsApi.rerun(r.project, r.pipeline, r.latest!.number, { mode: 'from_failed' })
-        message.success(t('plines.rerunRequested'))
-      },
-    }
-  }
+  const action = pipelineRowActionFor(row.latest?.status)
   return {
-    label: t('plines.actionRun'),
-    cls: 'blue',
+    label: t(action.labelKey),
+    cls: action.cls,
     run: async (r) => {
-      const accepted = await buildsApi.trigger(r.project, r.pipeline, {})
-      message.success(t('plines.triggered', { n: accepted.number }))
+      const toast = await runPipelineRowAction(action.kind, {
+        project: r.project,
+        pipeline: r.pipeline,
+        latest: r.latest,
+      })
+      message.success(toast.key === 'plines.triggered' ? t(toast.key, toast.params) : t(toast.key))
     },
   }
 }

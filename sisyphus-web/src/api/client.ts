@@ -44,6 +44,7 @@ import type {
   SecretNameResponse,
   TokenResponse,
   TriggerBuildRequest,
+  UpdateProjectRequest,
   UpgradeCommandRequest,
   UpgradeIssuedSummary,
   UpgradePackageResponse,
@@ -130,8 +131,13 @@ export const projectsApi = {
   /** 项目清单（按可见性过滤：全局 admin 全量、普通用户仅有角色者）。 */
   list: () => http.get<ProjectResponse[]>('projects'),
 
-  /** 项目详情（viewer 档）。 */
+  /** 项目详情（viewer 档声明：无角色与不存在同形 404，不暴露存在性，票 B2b-T5）。 */
   get: (name: string) => http.get<ProjectResponse>(`projects/${encodeURIComponent(name)}`),
+
+  /** 编辑项目（契约先行，票 #108；项目 admin 档）：PATCH 语义——字段缺省
+   *  不动，`default_branch: null` 清除默认分支；返回更新后的项目。 */
+  update: (name: string, req: UpdateProjectRequest) =>
+    http.patch<ProjectResponse>(`projects/${encodeURIComponent(name)}`, { json: req }),
 
   /** 建项目（git/svn + 仓库 URL + 可选默认分支 + 可选 SCM 凭据）。 */
   create: (req: CreateProjectRequest) =>

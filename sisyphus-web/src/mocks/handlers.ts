@@ -18,7 +18,9 @@ import type {
   BuildSummaryResponse,
   CreatedAgentResponse,
   CreateProjectRequest,
+  MemberAssignment,
   ProjectResponse,
+  UpdateProjectRequest,
 } from '@/api/types'
 import type { MeResponse } from '@/api/http'
 import * as db from './db'
@@ -46,18 +48,42 @@ function jsonError(status: number, code: string, message: string) {
   return HttpResponse.json({ code, message, detail: null }, { status })
 }
 
+/** 校验失败 422（server projects.rs validate 同形：detail.errors 错误清单）。 */
+function validationError(errors: { path: string; message: string }[]) {
+  return HttpResponse.json(
+    { code: 'VALIDATION_FAILED', message: '项目输入校验失败', detail: { errors } },
+    { status: 422 },
+  )
+}
+
+/** 项目域授权守卫（server policy.rs 判定序列同形，票 B2b-T5/ADR-0014）：
+ *  无成员角色（或项目不存在）→ 404 同形（不可借 403/404 之辨探测存在性）；
+ *  有角色但档位不足 admin → 403；admin → null 放行。 */
+function projectAdminGuard(user: string, name: string): ReturnType<typeof jsonError> | null {
+  const role = db.projectRoleOf(user, name)
+  if (role == null) return jsonError(404, 'NOT_FOUND', '项目不存在')
+  if (role !== 'admin') return jsonError(403, 'FORBIDDEN', '项目权限不足')
+  return null
+}
+
 function sessionUser(request: Request): string | null {
-  // 浏览器态从 document.cookie 读会话：SW 的 fetch 事件请求不带 Cookie 头
-  // （cookie 由网络栈在 SW 之后的网络层附加）；node 态回落请求头。
-  const raw =
-    typeof document !== 'undefined'
-      ? document.cookie
-      : (request.headers.get('cookie') ?? '')
-  const match = raw
-    .split(';')
-    .map((c) => c.trim())
-    .find((c) => c.startsWith(`${SESSION_COOKIE}=`))
-  return match ? decodeURIComponent(match.slice(SESSION_COOKIE.length + 1)) : null
+  // 会话读取三处来源按序：①浏览器态 document.cookie（SW 的 fetch 事件请求
+  //  不带 Cookie 头，cookie 由网络栈在 SW 之后附加）；②请求 Cookie 头（node
+  //  直连态）；③mock-only 测试缝 `x-sisyphus-mock-user`（undici 按 Fetch 规范
+  //  丢弃 Cookie 头、且 jsdom 的 document.cookie 恒为空——角色分流测试显式
+  //  声明；浏览器 worker 永不携带此头）。jsdom 环境下两处 cookie 源皆空，
+  //  顺序兼容三种宿主。
+  const sources: string[] = []
+  if (typeof document !== 'undefined') sources.push(document.cookie)
+  sources.push(request.headers.get('cookie') ?? '')
+  for (const raw of sources) {
+    const match = raw
+      .split(';')
+      .map((c) => c.trim())
+      .find((c) => c.startsWith(`${SESSION_COOKIE}=`))
+    if (match) return decodeURIComponent(match.slice(SESSION_COOKIE.length + 1))
+  }
+  return request.headers.get('x-sisyphus-mock-user')
 }
 
 const sessions = new Set<string>()
@@ -101,6 +127,7 @@ export function createHandlers(options: MockHandlerOptions) {
         return jsonError(401, 'INVALID_CREDENTIALS', '用户名或密码错误')
       }
       const user = db.USERS.find((u) => u.username === username) ?? {
+        id: 0,
         username,
         password: '',
         is_admin: username === 'admin',
@@ -280,8 +307,145 @@ export function createHandlers(options: MockHandlerOptions) {
       const denied = guard(options, request)
       if (denied != null) return denied
       await delay(200)
-      return HttpResponse.json(db.PROJECTS)
+      // 可见性过滤（server projects.rs list 同形）：全局 admin 全量、普通用户
+      // 仅显式成员项目（node 模式缺省用户 admin → 全量，与既有测试一致）。
+      const user = sessionUser(request) ?? 'admin'
+      const visible = db.PROJECTS.filter((p) => db.projectRoleOf(user, p.name) != null)
+      return HttpResponse.json(visible)
     }),
+
+    // ----- 项目详情 / 编辑 / 成员 / 用户目录 / SCM 凭据（票 #108；成员+凭据
+    //       端点属后端 members.rs/scm.rs 既有 REST 面，编辑项目为契约先行——
+    //       本票即契约冻结点，后端阶段照单实现）-----
+    projectGet: http.get('/api/v1/projects/:name', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const name = String(params.name)
+      await delay(150)
+      if (isErrorFixture(name)) {
+        return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+      }
+      const user = sessionUser(request) ?? 'admin'
+      const role = db.projectRoleOf(user, name)
+      const p = db.PROJECTS.find((x) => x.name === name)
+      // 无角色与不存在同形 404（B2b-T5：不暴露存在性）。
+      if (p == null || role == null) return jsonError(404, 'NOT_FOUND', '项目不存在')
+      return HttpResponse.json(p)
+    }),
+
+    // 编辑项目（契约先行）：PATCH 语义 + create 同规则校验（svn 无分支；
+    //  scm_url 提交即整段替换、非空）。项目 admin 档守卫见 projectAdminGuard。
+    projectPatch: http.patch('/api/v1/projects/:name', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const name = String(params.name)
+      await delay(250)
+      if (isErrorFixture(name)) {
+        return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+      }
+      const user = sessionUser(request) ?? 'admin'
+      const deniedAdmin = projectAdminGuard(user, name)
+      if (deniedAdmin != null) return deniedAdmin
+      const body = (await request.json()) as UpdateProjectRequest
+      const current = db.PROJECTS.find((x) => x.name === name)
+      const issues: { path: string; message: string }[] = []
+      if (body.scm_url != null && body.scm_url.trim() === '') {
+        issues.push({ path: 'scm_url', message: '仓库 URL 不能为空' })
+      }
+      if (current?.scm_type === 'svn' && body.default_branch != null) {
+        issues.push({ path: 'default_branch', message: 'svn 项目无分支概念，不支持默认分支' })
+      }
+      if (issues.length > 0) return validationError(issues)
+      const updated = db.updateProject(name, {
+        scm_url: body.scm_url?.trim(),
+        default_branch: body.default_branch,
+      })
+      return HttpResponse.json(updated)
+    }),
+
+    projectMembersList: http.get('/api/v1/projects/:name/members', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const name = String(params.name)
+      await delay(150)
+      if (isErrorFixture(name)) {
+        return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+      }
+      const user = sessionUser(request) ?? 'admin'
+      const deniedAdmin = projectAdminGuard(user, name)
+      if (deniedAdmin != null) return deniedAdmin
+      return HttpResponse.json(db.membersOf(name))
+    }),
+
+    projectMembersReplace: http.put('/api/v1/projects/:name/members', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const name = String(params.name)
+      await delay(250)
+      if (isErrorFixture(name)) {
+        return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+      }
+      const user = sessionUser(request) ?? 'admin'
+      const deniedAdmin = projectAdminGuard(user, name)
+      if (deniedAdmin != null) return deniedAdmin
+      const body = (await request.json()) as MemberAssignment[]
+      // server members.rs:156 同义——整组替换含不存在用户即 400。
+      const unknown = db.unknownMemberOf(body)
+      if (unknown != null) {
+        return jsonError(400, 'BAD_REQUEST', `用户不存在：${unknown}`)
+      }
+      return HttpResponse.json(db.replaceMembersOf(name, body))
+    }),
+
+    usersDirectory: http.get('/api/v1/users/directory', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(120)
+      const user = sessionUser(request) ?? 'admin'
+      // server users.rs directory：全局 admin 或任一项目 admin，其余 403。
+      if (!db.isAnyProjectAdmin(user)) {
+        return jsonError(403, 'FORBIDDEN', '用户目录仅项目或全局管理员可读（成员分配用）')
+      }
+      return HttpResponse.json(db.USERS.map((u) => ({ id: u.id, username: u.username })))
+    }),
+
+    projectScmCredential: http.put(
+      '/api/v1/projects/:name/scm-credential',
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const name = String(params.name)
+        await delay(200)
+        if (isErrorFixture(name)) {
+          return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+        }
+        const user = sessionUser(request) ?? 'admin'
+        const deniedAdmin = projectAdminGuard(user, name)
+        if (deniedAdmin != null) return deniedAdmin
+        // 204 空体（凭据任何端点不回显，ADR-0015/0016）。
+        return new HttpResponse(null, { status: 204 })
+      },
+    ),
+
+    projectTestConnection: http.post(
+      '/api/v1/projects/:name/test-connection',
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const name = String(params.name)
+        await delay(300)
+        if (isErrorFixture(name)) {
+          return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+        }
+        const user = sessionUser(request) ?? 'admin'
+        const deniedAdmin = projectAdminGuard(user, name)
+        if (deniedAdmin != null) return deniedAdmin
+        // 确定性 head（按项目名散列）：页面徽章「连接成功，当前 head：…」可演示。
+        const rng = db.mulberry32([...name].reduce((s, c) => s + c.charCodeAt(0), 0))
+        const head = Array.from({ length: 12 }, () => '0123456789abcdef'[Math.floor(rng() * 16)]).join('')
+        return HttpResponse.json({ head })
+      },
+    ),
 
     pipelineDefinition: http.get(
       '/api/v1/projects/:name/pipelines/:pipeline',

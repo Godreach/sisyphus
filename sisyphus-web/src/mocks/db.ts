@@ -17,6 +17,9 @@ import type {
   CacheEntry,
   FavoriteLatestBuildDto,
   JobStatusDto,
+  MemberAssignment,
+  MemberResponse,
+  MemberRoleDto,
   ModelParameterDecl,
   OverviewSnapshotResponse,
   PipelineFavoriteResponse,
@@ -25,6 +28,7 @@ import type {
   ProjectResponse,
   RecentBuildDto,
   TriggerSourceDto,
+  UpdateProjectRequest,
   VersionDto,
   WorkspaceEntry,
 } from '@/api/types'
@@ -49,28 +53,34 @@ const NOW = Date.now()
 // ---------------------------------------------------------------------------
 
 export interface FixtureUser {
+  id: number
   username: string
   password: string
   is_admin: boolean
 }
 
 export const USERS: FixtureUser[] = [
-  { username: 'admin', password: 'admin123', is_admin: true },
-  { username: 'alice', password: 'alice123', is_admin: false },
-  { username: 'bob', password: 'bob123', is_admin: false },
+  { id: 1, username: 'admin', password: 'admin123', is_admin: true },
+  { id: 2, username: 'alice', password: 'alice123', is_admin: false },
+  { id: 3, username: 'bob', password: 'bob123', is_admin: false },
 ]
 
 // ---------------------------------------------------------------------------
 // 项目
 // ---------------------------------------------------------------------------
 
-function project(id: number, name: string, url: string): ProjectResponse {
+function project(
+  id: number,
+  name: string,
+  url: string,
+  scmType: 'git' | 'svn' = 'git',
+): ProjectResponse {
   return {
     id,
     name,
-    scm_type: 'git',
+    scm_type: scmType,
     scm_url: url,
-    default_branch: 'main',
+    default_branch: scmType === 'git' ? 'main' : null,
     created_at: NOW - 90 * 86400e3,
     updated_at: NOW - 3 * 86400e3,
   }
@@ -89,7 +99,88 @@ export const PROJECTS: ProjectResponse[] = [
   project(10, 'empty-repo', 'https://github.com/acme/empty-repo.git'),
   // 错误态演示项目：其全部端点在 handlers 层固定返回 500（见 handlers.ts）。
   project(11, 'error-demo', 'https://github.com/acme/error-demo.git'),
+  // 空态演示项目：无任何流水线（首装后刚建的项目——项目详情「建立第一条
+  // 流水线」引导与此前的流水线/构建全空态源）。
+  project(12, 'fresh-project', 'https://github.com/acme/fresh-project.git'),
+  // svn 项目（无分支概念）：PATCH 校验「svn 不支持默认分支」与列表 svn 徽章
+  // 的演示源；无成员分配（项目详情对非全局 admin 404 同形）。
+  project(13, 'svn-hooks', 'https://svn.acme/hooks/trunk', 'svn'),
 ]
+
+// ---------------------------------------------------------------------------
+// 项目成员 / 角色分配（票 #108 项目详情成员卡；ADR-0014 项目级三档角色）。
+// 全局 admin 隐含全部项目的项目 admin（不进显式清单——与后端 members 表
+// 语义一致：清单只记显式分配）。
+// ---------------------------------------------------------------------------
+
+const PROJECT_MEMBERS = new Map<string, MemberResponse[]>([
+  [
+    'web-app',
+    [
+      { user_id: 2, username: 'alice', role: 'admin' },
+      { user_id: 3, username: 'bob', role: 'viewer' },
+    ],
+  ],
+  [
+    'api-gateway',
+    [
+      { user_id: 2, username: 'alice', role: 'admin' },
+      { user_id: 3, username: 'bob', role: 'runner' },
+    ],
+  ],
+  ['cli-tool', [{ user_id: 3, username: 'bob', role: 'runner' }]],
+])
+
+/** 某用户在项目内的角色档；全局 admin 隐含 'admin'（server get_one 同形）。 */
+export function projectRoleOf(username: string, project: string): MemberRoleDto | null {
+  const user = USERS.find((u) => u.username === username)
+  if (user?.is_admin) return 'admin'
+  return PROJECT_MEMBERS.get(project)?.find((m) => m.username === username)?.role ?? null
+}
+
+/** 用户目录可读判定（server users.rs directory：全局 admin 或任一项目 admin）。 */
+export function isAnyProjectAdmin(username: string): boolean {
+  const user = USERS.find((u) => u.username === username)
+  if (user?.is_admin) return true
+  return [...PROJECT_MEMBERS.values()].some((rows) =>
+    rows.some((m) => m.username === username && m.role === 'admin'),
+  )
+}
+
+/** 项目成员清单（整组替换语义：PUT body 即完整状态，未列入者移除）。 */
+export function membersOf(project: string): MemberResponse[] {
+  return PROJECT_MEMBERS.get(project) ?? []
+}
+
+/** 未知的分配项用户名（members.rs:156 同义——服务端以 400 拒绝整组替换
+ *  含不存在的用户）。返回 null 即全量已知。 */
+export function unknownMemberOf(assignments: MemberAssignment[]): string | null {
+  for (const a of assignments) {
+    if (!USERS.some((u) => u.username === a.username)) return a.username
+  }
+  return null
+}
+
+/** 整组替换项目成员（username → user_id 由 USERS 解析）。 */
+export function replaceMembersOf(project: string, assignments: MemberAssignment[]): MemberResponse[] {
+  const rows: MemberResponse[] = assignments.map((a) => ({
+    user_id: USERS.find((u) => u.username === a.username)?.id ?? 0,
+    username: a.username,
+    role: a.role,
+  }))
+  PROJECT_MEMBERS.set(project, rows)
+  return rows
+}
+
+/** 编辑项目（契约先行，票 #108，PATCH 语义：字段缺省不动）。返回 null = 不存在。 */
+export function updateProject(name: string, patch: UpdateProjectRequest): ProjectResponse | null {
+  const p = PROJECTS.find((x) => x.name === name)
+  if (p == null) return null
+  if (patch.scm_url != null) p.scm_url = patch.scm_url
+  if (patch.default_branch !== undefined) p.default_branch = patch.default_branch
+  p.updated_at = Date.now()
+  return p
+}
 
 // ---------------------------------------------------------------------------
 // 流水线定义（model Pipeline JSON 形态的 fixture：参数 + 阶段/任务声明）
