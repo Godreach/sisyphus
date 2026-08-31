@@ -8,6 +8,8 @@
 // #96: 迁移 Naive UI——任务 chip 改 NTag（checkable+checked 表达选中态高亮，
 // 有错附 chip-error 类红边）、阶段名/when 改 NInput、增删/重排按钮改 NButton，
 // 交互不变。
+// 票 #109: 定稿设计语言——轨道面板/阶段列走 token 驱动卡片语义（白卡 + 凹陷填充），
+// 角标换定稿胶囊柔和色族（深色系 token 深色跟随），交互不变。
 
 import { useI18n } from 'vue-i18n'
 import { NButton, NInput, NTag } from 'naive-ui'
@@ -168,14 +170,14 @@ function setStageWhen(stage: Stage, v: string): void {
 </template>
 
 <style scoped>
+/* 轨道面板：定稿卡片语义（白底 12px 圆角无描边，同 sisy-card）。 */
 .editor-track {
   flex: 0 0 340px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 12px;
-  border: 1px solid var(--sisy-color-border);
-  border-radius: var(--sisy-radius);
+  padding: 16px;
+  border-radius: var(--sisy-radius-card);
   background: var(--sisy-color-surface);
 }
 
@@ -198,14 +200,15 @@ function setStageWhen(stage: Stage, v: string): void {
   gap: 12px;
 }
 
+/* 阶段列：卡内嵌套容器 = 页面底色的凹陷填充（token 驱动，深色跟随）。 */
 .stage-column {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px;
+  padding: 12px;
   border: 1px solid var(--sisy-color-border);
   border-radius: var(--sisy-radius);
-  background: #fbfcfd;
+  background: var(--sisy-color-bg);
 }
 
 .stage-column.stage-has-error {
@@ -274,31 +277,26 @@ function setStageWhen(stage: Stage, v: string): void {
   font-weight: 600;
 }
 
+/* chip 角标：定稿胶囊语义（柔和底色 + 同族正文色，token 驱动，深色跟随）。 */
 .chip-badge {
   font-size: 11px;
   padding: 1px 6px;
-  border-radius: 999px;
-  border: 1px solid var(--sisy-color-border);
-  background: rgba(128, 128, 128, 0.08);
-  color: var(--sisy-color-text-secondary);
+  border-radius: var(--sisy-radius-pill);
 }
 
 .chip-badge.chip-retry {
-  border-color: #b7dfc2;
-  background: #e6f4ea;
-  color: #1b6b34;
+  background: var(--sisy-color-success-soft);
+  color: var(--sisy-color-success);
 }
 
 .chip-badge.chip-allow-failure {
-  border-color: #e2a56a;
-  background: #fdf1e3;
-  color: #8a4b08;
+  background: var(--sisy-color-warning-soft);
+  color: var(--sisy-color-warning-text);
 }
 
 .chip-badge.chip-container {
-  border-color: #7ab3e8;
-  background: #e8f3fd;
-  color: #0b5cad;
+  background: var(--sisy-color-primary-soft);
+  color: var(--sisy-color-primary);
 }
 
 .chip-controls {

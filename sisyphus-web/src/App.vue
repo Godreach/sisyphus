@@ -17,7 +17,7 @@
 import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { NButton, NDropdown, NIcon } from 'naive-ui'
+import { NButton, NDropdown, NIcon, zhCN, enUS, dateZhCN, dateEnUS } from 'naive-ui'
 import type { DropdownOption } from 'naive-ui'
 import {
   LogOutOutline,
@@ -47,6 +47,10 @@ const { theme, themeOverrides, preference: themePref, setPreference: setThemePre
 const { isNarrow } = useBreakpoint()
 
 const locale = computed(() => currentLocale())
+// Naive UI 组件内建文案（占位符/分页/空态等）跟随应用语言（票 #109 双语收编——
+// 此前恒缺省 enUS，zh 界面输入框占位露 "Please Input"）。
+const naiveLocale = computed(() => (locale.value === 'zh-CN' ? zhCN : enUS))
+const naiveDateLocale = computed(() => (locale.value === 'zh-CN' ? dateZhCN : dateEnUS))
 const isAuthed = computed(() => auth.isAuthed)
 const isAdmin = computed(() => auth.user?.isAdmin === true)
 const username = computed(() => auth.user?.username ?? '')
@@ -293,7 +297,12 @@ function onCta(): void {
 </script>
 
 <template>
-  <n-config-provider :theme="theme" :theme-overrides="themeOverrides">
+  <n-config-provider
+    :theme="theme"
+    :theme-overrides="themeOverrides"
+    :locale="naiveLocale"
+    :date-locale="naiveDateLocale"
+  >
     <!-- useMessage 注入源（SetupView/PipelinesView/AgentListView 的 toast 反馈
          依赖此 provider；缺它时 useMessage() 返回 undefined、toast 静默失效）。 -->
     <n-message-provider>

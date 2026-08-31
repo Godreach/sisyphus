@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 混合式 pipeline 编辑器（票 B4-T8，ADR-0020 变体 C）。
+// 混合式 pipeline 编辑器（票 B4-T8，ADR-0020 变体 C；票 #109 定稿设计语言统一）。
 //
 // - 加载/保存真实定义：GET `.../pipelines/{pipeline}` 原样读入 model JSON（revision
 //   来自顶层字段，非定义内）；PUT 原样提交（剥离 server 独占 revision）。404 → 空
@@ -10,13 +10,16 @@
 // - revision 展示 + 并发保存冲突可见：保存响应 revision 与「加载版本 +1」不符即弹
 //   冲突弹窗（期间被他人保存），本次保存已覆盖，建议重新加载确认。
 // - 三页签：任务（左轨道 + 右表单）/ 参数（四类型）/ 环境变量。
+// 视觉（票 #109）：以定稿三主页面为推导源，复用共享组件类——breadcrumb 面包屑、
+// badge 胶囊徽章、btn-outline 描边动作；事实态纪律——首载骨架屏、整页报错可重试。
+// 混合交互逻辑（轨道派生导航 + 表单 + 页签）不变，只换视觉。
 // #96: 迁移 Naive UI——页签改 NTabs、保存成功改 NMessage toast、错误面板改
 // NAlert、并发冲突改 NModal、保存/重载改 NButton，交互不变。
 
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { NAlert, NButton, NModal, NTabs, NTabPane, useMessage } from 'naive-ui'
+import { NAlert, NButton, NModal, NSkeleton, NTabs, NTabPane, useMessage } from 'naive-ui'
 
 import { pipelinesApi } from '@/api/client'
 import { ApiError } from '@/api/http'
@@ -252,20 +255,39 @@ const showConflict = computed({
 </script>
 
 <template>
-  <div v-if="status === 'loading'" class="editor-page">
-    <p class="form-hint">{{ t('editor.loading') }}</p>
+  <!-- 首载骨架屏（事实态纪律，同项目详情 #108）。 -->
+  <div v-if="status === 'loading'" class="editor-page" data-testid="editor-skeleton">
+    <n-skeleton text :repeat="1" height="32px" class="editor-skeleton-row" />
+    <n-skeleton text :repeat="2" height="56px" class="editor-skeleton-row" />
+    <n-skeleton text :repeat="4" height="72px" class="editor-skeleton-row" />
   </div>
 
+  <!-- 整页报错可重试（事实态纪律）。 -->
   <div v-else-if="status === 'error'" class="editor-page">
-    <n-alert type="error" :title="loadError || t('editor.loadError')" role="alert" />
+    <n-alert type="error" :title="loadError || t('editor.loadError')" role="alert">
+      <button type="button" class="btn-outline blue" data-testid="editor-retry" @click="load">
+        {{ t('plines.retry') }}
+      </button>
+    </n-alert>
   </div>
 
   <div v-else-if="pipeline" class="editor-page">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <router-link :to="{ name: 'projects' }">{{ t('routes.projects') }}</router-link>
+      <span class="breadcrumb-sep">/</span>
+      <router-link :to="{ name: 'project-detail', params: { name: project } }">
+        {{ project }}
+      </router-link>
+      <span class="breadcrumb-sep">/</span>
+      <span class="breadcrumb-current">{{ pipelineName }}</span>
+    </nav>
+
     <header class="editor-header">
       <h1 class="page-title">{{ pipelineName }}</h1>
       <div class="editor-revision">
-        <span class="editor-rev-label">{{ t('editor.revision') }}</span>
-        <span class="editor-rev-value">{{ loadedRevision ?? t('editor.revisionUnknown') }}</span>
+        <span class="badge neutral">
+          {{ t('editor.revision') }} <span class="editor-rev-value">{{ loadedRevision ?? t('editor.revisionUnknown') }}</span>
+        </span>
         <span v-if="loadedOperator" class="editor-rev-op">
           {{ t('editor.operator') }} {{ loadedOperator }}
         </span>
@@ -388,6 +410,10 @@ const showConflict = computed({
   gap: 14px;
 }
 
+.editor-skeleton-row {
+  display: block;
+}
+
 .editor-header {
   display: flex;
   align-items: center;
@@ -408,6 +434,7 @@ const showConflict = computed({
   color: var(--sisy-color-text-secondary);
 }
 
+/* badge 内联 revision 数字保持原色深一级（胶囊底上是正文反差）。 */
 .editor-rev-value {
   font-weight: 600;
   color: var(--sisy-color-text);
@@ -448,6 +475,23 @@ const showConflict = computed({
   gap: 18px;
   align-items: flex-start;
   padding-top: 12px;
+}
+
+/* 平板档收窄：轨道/表单并排改纵排（轨道全宽在上），表单不被挤死
+ * （响应式承诺不回退，spec #100 story 24）。 */
+@media (max-width: 1024px) {
+  .editor-jobs-pane {
+    flex-direction: column;
+  }
+
+  .editor-jobs-pane :deep(.editor-track) {
+    flex: none;
+    width: 100%;
+  }
+
+  .editor-jobs-pane :deep(.job-form) {
+    width: 100%;
+  }
 }
 
 .editor-tab-pane {

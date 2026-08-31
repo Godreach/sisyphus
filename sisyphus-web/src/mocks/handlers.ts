@@ -23,6 +23,8 @@ import type {
   UpdateProjectRequest,
 } from '@/api/types'
 import type { MeResponse } from '@/api/http'
+import type { Pipeline as ModelPipelineDef } from '@/model/pipeline'
+import { validatePipeline } from '@/model/validate'
 import * as db from './db'
 import {
   allDynamicSummaries,
@@ -50,8 +52,11 @@ function jsonError(status: number, code: string, message: string) {
 
 /** 校验失败 422（server projects.rs validate 同形：detail.errors 错误清单）。 */
 function validationError(errors: { path: string; message: string }[]) {
+  // 契约序列化只取 path/message（调用方传 ValidationError 等超集形态时剥掉
+  // 规则码等前端内部字段——响应形态与 server ValidationIssue 严格同形）。
+  const items = errors.map(({ path, message }) => ({ path, message }))
   return HttpResponse.json(
-    { code: 'VALIDATION_FAILED', message: '项目输入校验失败', detail: { errors } },
+    { code: 'VALIDATION_FAILED', message: '项目输入校验失败', detail: { errors: items } },
     { status: 422 },
   )
 }
@@ -458,17 +463,62 @@ export function createHandlers(options: MockHandlerOptions) {
         if (isErrorFixture(name)) {
           return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
         }
-        const def = db.findPipeline(name, pipeline)
-        if (def == null) return jsonError(404, 'NOT_FOUND', '流水线不存在')
+        // viewer 档（server policy.rs 判定序列同形）：无成员角色与项目不存在同形 404。
+        const user = sessionUser(request) ?? 'admin'
+        if (db.projectRoleOf(user, name) == null) {
+          return jsonError(404, 'NOT_FOUND', '项目不存在')
+        }
+        const stored = db.getPipelineDefinition(name, pipeline)
+        if (stored == null) return jsonError(404, 'NOT_FOUND', '流水线不存在')
         return HttpResponse.json({
-          definition: {
-            name: def.name,
-            parameters: def.parameters,
-            stages: def.stages,
-          },
-          revision: 3,
-          operator: 'admin',
-          updated_at: Date.now() - 86400e3,
+          definition: stored.definition,
+          revision: stored.revision,
+          operator: stored.operator,
+          updated_at: stored.updated_at,
+        })
+      },
+    ),
+
+    // ----- Pipeline 定义保存（票 #109 编辑器闭环）：admin 档守卫 + model 校验
+    // 422 整组透传 + overlay 持久化（保存→重载 revision 递增演示闭环）-----
+    pipelineDefinitionSave: http.put(
+      '/api/v1/projects/:name/pipelines/:pipeline',
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const name = String(params.name)
+        const pipeline = String(params.pipeline)
+        await delay(200)
+        if (isErrorFixture(name)) {
+          return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+        }
+        const user = sessionUser(request) ?? 'admin'
+        // admin 档守卫（server pipelines.rs RequireAdmin 同形）：无角色 404 同形
+        // （不泄露存在性）/ 档位不足 403。
+        const deniedAdmin = projectAdminGuard(user, name)
+        if (deniedAdmin != null) return deniedAdmin
+        // 形态错也是校验失败（server parse_body 同形：path="$"），不落 model 校验。
+        const body = (await request.json()) as ModelPipelineDef
+        if (
+          body == null ||
+          !Array.isArray(body.parameters) ||
+          !Array.isArray(body.env) ||
+          !Array.isArray(body.stages)
+        ) {
+          return validationError([{ path: '$', message: '请求体形态不符 model Pipeline' }])
+        }
+        // model 校验失败 422 整组透传（与前端本地校验同一 TS 端口——单一事实源，
+        // server InvalidDefinition 同义；ValidationError 的 code 字段经
+        // validationError 剥离，响应形态与 server ValidationIssue 同形）。
+        const errors = validatePipeline(body)
+        if (errors.length > 0) {
+          return validationError(errors)
+        }
+        const stored = db.savePipelineDefinition(name, pipeline, body, user)
+        return HttpResponse.json({
+          revision: stored.revision,
+          operator: stored.operator,
+          updated_at: stored.updated_at,
         })
       },
     ),

@@ -32,6 +32,7 @@ import type {
   VersionDto,
   WorkspaceEntry,
 } from '@/api/types'
+import type { Job as ModelJob, Pipeline as ModelPipelineDef } from '@/model/pipeline'
 
 /** 种子随机（mulberry32）：全量 fixture 确定性可复现。 */
 export function mulberry32(seed: number): () => number {
@@ -324,6 +325,93 @@ const GPU_JOB_PROJECT = 'android-sdk'
 
 export function findPipeline(project: string, pipeline: string): FixturePipeline | null {
   return PIPELINES.find((p) => p.project === project && p.name === pipeline) ?? null
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline 定义读/存（编辑器闭环，票 #109）：GET 输出 model JSON 形态（fixture
+// decl 派生——steps 归 shell tagged union、pipeline 级 env 永发 []），PUT 落
+// 运行时 overlay（只进内存，重启回 fixture——mock 数据面不做持久存储）。
+// ---------------------------------------------------------------------------
+
+/** 定义存储形态：model JSON + 修订版本语义（server PipelineDefinitionResponse 字段）。 */
+export interface StoredPipelineDefinition {
+  definition: ModelPipelineDef
+  revision: number
+  operator: string
+  updated_at: number
+}
+
+/** fixture decl → model JSON 定义（编辑器消费的完整形态）。fixture step decl 的
+ *  `name`（SSE 回显用）不属 model Step，定义输出丢弃。 */
+function toModelDefinition(p: FixturePipeline): ModelPipelineDef {
+  return {
+    name: p.name,
+    parameters: p.parameters.map((param) => ({ required: false, ...param })),
+    env: [],
+    stages: p.stages.map((s) => ({
+      name: s.name,
+      jobs: s.jobs.map(
+        (j): ModelJob => ({
+          name: j.name,
+          labels: j.labels,
+          allow_failure: j.allow_failure,
+          artifact_uploads: j.artifact_uploads,
+          steps: j.steps.map((st) => ({
+            type: 'shell',
+            config: { command: st.command, shell: null },
+          })),
+        }),
+      ),
+    })),
+  }
+}
+
+/** 已保存定义的运行时 overlay（key = `${project}/${pipeline}`）。 */
+const savedDefinitions = new Map<string, StoredPipelineDefinition>()
+
+/** fixture 流水线的演示基线修订版本（「已保存过几轮」态；overlay 首存沿用同基线）。 */
+const FIXTURE_BASE_REVISION = 3
+
+/** 读定义：overlay 优先，fixture 派生兜底；不存在 → null（handlers 映射 404）。 */
+export function getPipelineDefinition(
+  project: string,
+  pipeline: string,
+): StoredPipelineDefinition | null {
+  const key = `${project}/${pipeline}`
+  const saved = savedDefinitions.get(key)
+  if (saved != null) return saved
+  const fixture = findPipeline(project, pipeline)
+  if (fixture == null) return null
+  return {
+    definition: toModelDefinition(fixture),
+    revision: FIXTURE_BASE_REVISION,
+    operator: 'admin',
+    updated_at: NOW - 86400e3,
+  }
+}
+
+/** 存定义（upsert，server Revision 语义同形）：新 pipeline 首存 revision=1，
+ *  已有定义（overlay 或 fixture）续存 +1。返回落库后的存储形态。 */
+export function savePipelineDefinition(
+  project: string,
+  pipeline: string,
+  definition: ModelPipelineDef,
+  operator: string,
+): StoredPipelineDefinition {
+  const key = `${project}/${pipeline}`
+  const prev = savedDefinitions.get(key)
+  const base =
+    prev?.revision ?? (findPipeline(project, pipeline) != null ? FIXTURE_BASE_REVISION : 0)
+  // updated_at 是 overlay 时刻（非确定性）——与 fixture 的确定性 NOW 基线不同，
+  // 契约测试不断言其具体值。
+  const stored: StoredPipelineDefinition = {
+    definition,
+    revision: base + 1,
+    operator,
+    updated_at: Date.now(),
+  }
+  savedDefinitions.set(key, stored)
+  return stored
 }
 
 /** 流水线清单（契约票 #105，P1）：跨项目全量，(project, pipeline) 字典序

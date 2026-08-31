@@ -556,7 +556,6 @@
     "empty": "暂无令牌"
   },
   "editor": {
-    "loading": "正在加载 pipeline 定义…",
     "loadError": "加载 pipeline 定义失败",
     "notFound": "pipeline 尚未配置——以空定义开始，保存即创建（首存 revision=1）。",
     "revision": "修订版本",

@@ -1,29 +1,31 @@
-// 混合式 pipeline 编辑器行为测试（票 B4-T8，ADR-0020 变体 C）。
+// 混合式 pipeline 编辑器行为测试（票 B4-T8，ADR-0020 变体 C；票 #109 迁移
+// MSW 单一缝——组件经真实 http client 打 src/mocks handlers，per-test 用
+// server.use 覆盖定义端点响应；请求形态断言经覆盖 handler 内捕获）。
 //
 // 只测外部行为：轨道导航表单、字段联动、增删/重排、保存校验整组展示 + 字段定位、
 // PUT 原样提交 + revision、并发冲突弹窗、服务端 422、404 空定义、参数/环境变量页签。
-// API 层以 fetch mock（method + URL 前缀路由，最长前缀匹配）驱动——同 SecretsView 纪律。
+// 定义端点本身的契约（档位守卫/422 形态/revision 语义/往返）对账另见
+// src/mocks/__tests__/pipelinesContract.spec.ts。
 //
-// 关键：mount 须在 fetch mock 路由设好之后（onMounted 即发 GET 定义）。
+// 关键：mount 须在 handler 覆盖之后（onMounted 即发 GET 定义）。
 // #96: 编辑器迁移 Naive UI——chip 改 NTag（update:checked 驱动选中）、数字输入改
 // NInputNumber、开关改 NSwitch、页签改 NTabs、成功 toast / 冲突弹窗 teleport 不在
 // wrapper 内——toast 文案与 NModal 弹层经 document 断言（同 UsersView.spec 纪律）；
 // NSelect 经 findComponent + $emit 驱动（无原生 select，同 SecretsView.spec）。
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { NMessageProvider, NInputNumber, NSelect } from 'naive-ui'
 import { defineComponent, h } from 'vue'
+import { http, HttpResponse } from 'msw'
 
 import PipelineEditorView from '@/views/PipelineEditorView.vue'
 import { i18n, setLocale } from '@/i18n'
+import { server } from '@/mocks/node'
 
-function jsonResponse(status: number, body: unknown): Response {
-  const headers = new Headers({ 'Content-Type': 'application/json' })
-  return new Response(JSON.stringify(body), { status, headers })
-}
+const DEF_URL = '/api/v1/projects/proj-a/pipelines/main'
 
 /** GET 定义响应（model Pipeline JSON + 顶层 revision/operator/updated_at）。 */
 function defResp(revision = 1, definition?: unknown) {
@@ -53,6 +55,32 @@ function saveResp(revision: number) {
   return { revision, operator: 'alice', updated_at: 1700000000001 }
 }
 
+/** 覆盖 GET 定义端点（记录命中次数——「重新加载再拉一次」类断言用）。 */
+let getCalls = 0
+function mockDefinition(body: Record<string, unknown>, status = 200): void {
+  server.use(
+    http.get(DEF_URL, () => {
+      getCalls += 1
+      return HttpResponse.json(body, { status })
+    }),
+  )
+}
+
+/** 覆盖 PUT 保存端点（捕获请求体——PUT 形态断言 + 「未提交」断言共用）。 */
+let putBodies: unknown[]
+function mockSave(
+  impl: (body: unknown) => { body: Record<string, unknown>; status?: number },
+): void {
+  server.use(
+    http.put(DEF_URL, async ({ request }) => {
+      const body = await request.json()
+      putBodies.push(body)
+      const r = impl(body)
+      return HttpResponse.json(r.body, { status: r.status ?? 200 })
+    }),
+  )
+}
+
 /** 包装组件：NMessageProvider + 编辑器，保证 useMessage 注入可用。 */
 const EditorWrapper = defineComponent({
   name: 'EditorWrapper',
@@ -64,28 +92,6 @@ const EditorWrapper = defineComponent({
 describe('PipelineEditorView 混合式编辑器', () => {
   let pinia: Pinia
   let router: Router
-
-  const routes = new Map<string, Response>()
-  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input)
-    const method = (init?.method ?? 'GET').toUpperCase()
-    let best: { len: number; res: Response } | null = null
-    for (const [key, res] of routes) {
-      const sep = key.indexOf(' ')
-      const [m, prefix] = [key.slice(0, sep), key.slice(sep + 1)]
-      if (method !== m.toUpperCase()) continue
-      if (url.startsWith(prefix) && (best == null || prefix.length > best.len)) {
-        best = { len: prefix.length, res }
-      }
-    }
-    return best
-      ? best.res
-      : jsonResponse(404, { code: 'NOT_FOUND', message: `no mock for ${method} ${url}` })
-  })
-
-  function setRoute(method: string, prefix: string, res: Response): void {
-    routes.set(`${method.toUpperCase()} ${prefix}`, res)
-  }
 
   function mountView(): VueWrapper {
     return mount(EditorWrapper, { global: { plugins: [pinia, router, i18n] } })
@@ -105,14 +111,26 @@ describe('PipelineEditorView 混合式编辑器', () => {
     await sel!.vm.$emit('update:value', value)
   }
 
+  beforeAll(() => {
+    server.listen({ onUnhandledRequest: 'error' })
+  })
+
   beforeEach(async () => {
     setLocale('zh-CN')
-    routes.clear()
+    getCalls = 0
+    putBodies = []
     pinia = createPinia()
     setActivePinia(pinia)
     router = createRouter({
       history: createMemoryHistory(),
       routes: [
+        // 面包屑链接目标（不导航，仅占位防 unknown-name 警告）。
+        { path: '/projects', name: 'projects', component: { template: '<div />' } },
+        {
+          path: '/projects/:name/detail',
+          name: 'project-detail',
+          component: { template: '<div />' },
+        },
         {
           path: '/projects/:name/pipelines/:pipeline',
           name: 'pipeline-edit',
@@ -122,15 +140,19 @@ describe('PipelineEditorView 混合式编辑器', () => {
     })
     await router.push('/projects/proj-a/pipelines/main')
     await router.isReady()
-    globalThis.fetch = fetchMock
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
+    server.resetHandlers()
+  })
+
+  afterAll(() => {
+    server.close()
   })
 
   it('加载定义 → 轨道阶段列 + 任务 chip，表单选中首任务', async () => {
-    setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp()))
+    mockDefinition(defResp())
 
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.stage-column').length).toBe(1))
@@ -146,7 +168,7 @@ describe('PipelineEditorView 混合式编辑器', () => {
   })
 
   it('点击 chip → 表单导航到该任务（字段联动）+ 选中态高亮', async () => {
-    setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp()))
+    mockDefinition(defResp())
 
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
@@ -165,7 +187,7 @@ describe('PipelineEditorView 混合式编辑器', () => {
   })
 
   it('表单字段编辑 → 轨道 chip 联动（名称 / 重试 / allow-failure 角标）', async () => {
-    setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp()))
+    mockDefinition(defResp())
 
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
@@ -194,7 +216,7 @@ describe('PipelineEditorView 混合式编辑器', () => {
   })
 
   it('增删/重排阶段与任务', async () => {
-    setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp()))
+    mockDefinition(defResp())
 
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.stage-column').length).toBe(1))
@@ -218,9 +240,9 @@ describe('PipelineEditorView 混合式编辑器', () => {
   })
 
   it('保存校验：本地拦下 + 整组展示 + 字段路径定位 + 不提交', async () => {
-    setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp()))
-    // PUT 若被误调用 → 给个会失败断言的响应（不应到达）。
-    setRoute('PUT', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, saveResp(2)))
+    mockDefinition(defResp())
+    // PUT 若被误调用会记录 putBodies（断言不应到达）。
+    mockSave(() => ({ body: saveResp(2) }))
 
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
@@ -239,15 +261,13 @@ describe('PipelineEditorView 混合式编辑器', () => {
     expect(wrapper.find('.n-form-item-feedback').text()).toContain(
       'stages[0].jobs[0].steps[0].command',
     )
-    expect(fetchMock.mock.calls.some((c) => (c[1] as RequestInit | undefined)?.method === 'PUT')).toBe(
-      false,
-    )
+    expect(putBodies.length).toBe(0)
     wrapper.unmount()
   })
 
   it('保存合法定义 → PUT 原样提交 model JSON（剥离 revision）+ 成功 toast + revision', async () => {
-    setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp(1)))
-    setRoute('PUT', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, saveResp(2)))
+    mockDefinition(defResp(1))
+    mockSave(() => ({ body: saveResp(2) }))
 
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
@@ -256,12 +276,9 @@ describe('PipelineEditorView 混合式编辑器', () => {
     // 成功 toast teleport 到 body（NMessage）。
     await vi.waitFor(() => expect(document.body.textContent).toContain('已保存'))
 
-    // PUT 形态：URL + 原样 definition（无 revision）。
-    const put = fetchMock.mock.calls.find(
-      (c) => (c[1] as RequestInit | undefined)?.method === 'PUT',
-    ) as [string, RequestInit]
-    expect(put[0]).toBe('/api/v1/projects/proj-a/pipelines/main')
-    expect(JSON.parse(put[1].body as string)).toEqual(defResp(1).definition)
+    // PUT 形态：原样 definition（无 revision）。
+    expect(putBodies.length).toBe(1)
+    expect(putBodies[0]).toEqual(defResp(1).definition)
 
     // 成功回执含新 revision（toast）；revision 区更新为新版本。
     expect(document.body.textContent).toContain('revision 2')
@@ -270,8 +287,8 @@ describe('PipelineEditorView 混合式编辑器', () => {
   })
 
   it('并发保存冲突：加载 revision 3，PUT 返回 revision 5 → 冲突弹窗（可重新加载）', async () => {
-    setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp(3)))
-    setRoute('PUT', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, saveResp(5)))
+    mockDefinition(defResp(3))
+    mockSave(() => ({ body: saveResp(5) }))
 
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
@@ -284,35 +301,25 @@ describe('PipelineEditorView 混合式编辑器', () => {
     expect(msg).toContain('revision 4')
     expect(msg).toContain('revision 5')
 
-    // 弹窗内「重新加载」→ 重新 GET 定义（fetch 第二次）。
-    const getsBefore = fetchMock.mock.calls.filter(
-      (c) => (c[1] as RequestInit | undefined)?.method !== 'PUT',
-    ).length
+    // 弹窗内「重新加载」→ 重新 GET 定义（命中计数 +1）。
+    const getsBefore = getCalls
     await (document.querySelector('.n-modal button[name="conflict-reload"]') as HTMLElement).click()
-    await vi.waitFor(() =>
-      expect(
-        fetchMock.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method !== 'PUT')
-          .length,
-      ).toBe(getsBefore + 1),
-    )
+    await vi.waitFor(() => expect(getCalls).toBe(getsBefore + 1))
     wrapper.unmount()
   })
 
   it('服务端 422 → 服务端校验清单整组展示（字段定位）', async () => {
-    setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp()))
-    setRoute(
-      'PUT',
-      '/api/v1/projects/proj-a/pipelines/main',
-      jsonResponse(422, {
+    mockDefinition(defResp())
+    mockSave(() => ({
+      status: 422,
+      body: {
         code: 'VALIDATION_FAILED',
         message: 'model 校验失败',
         detail: {
-          errors: [
-            { path: 'parameters[0].target.required', message: '必填参数必须带默认值' },
-          ],
+          errors: [{ path: 'parameters[0].target.required', message: '必填参数必须带默认值' }],
         },
-      }),
-    )
+      },
+    }))
 
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
@@ -326,7 +333,7 @@ describe('PipelineEditorView 混合式编辑器', () => {
   })
 
   it('GET 404 → 空定义开始（未保存），新增阶段可用', async () => {
-    setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(404, { code: 'NOT_FOUND', message: 'pipeline 不存在' }))
+    mockDefinition({ code: 'NOT_FOUND', message: 'pipeline 不存在' }, 404)
 
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.text()).toContain('未保存'))
@@ -340,8 +347,8 @@ describe('PipelineEditorView 混合式编辑器', () => {
   })
 
   it('参数页签：四类型 + 必填带默认值校验 + enum 候选项', async () => {
-    setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp()))
-    setRoute('PUT', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, saveResp(2)))
+    mockDefinition(defResp())
+    mockSave(() => ({ body: saveResp(2) }))
 
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
@@ -363,15 +370,13 @@ describe('PipelineEditorView 混合式编辑器', () => {
     await wrapper.find('[name="editor-save"]').trigger('click')
     await vi.waitFor(() => expect(wrapper.find('.editor-errors').exists()).toBe(true))
     expect(wrapper.find('.editor-errors').text()).toContain('parameters[0].target.required')
-    expect(fetchMock.mock.calls.some((c) => (c[1] as RequestInit | undefined)?.method === 'PUT')).toBe(
-      false,
-    )
+    expect(putBodies.length).toBe(0)
     wrapper.unmount()
   })
 
   it('环境变量页签：增改后保存 → PUT 体含 env', async () => {
-    setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp()))
-    setRoute('PUT', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, saveResp(2)))
+    mockDefinition(defResp())
+    mockSave(() => ({ body: saveResp(2) }))
 
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
@@ -384,10 +389,7 @@ describe('PipelineEditorView 混合式编辑器', () => {
     await wrapper.find('[name="editor-save"]').trigger('click')
     await vi.waitFor(() => expect(document.body.textContent).toContain('已保存'))
 
-    const put = fetchMock.mock.calls.find(
-      (c) => (c[1] as RequestInit | undefined)?.method === 'PUT',
-    ) as [string, RequestInit]
-    const body = JSON.parse(put[1].body as string)
+    const body = putBodies[0] as { env: { name: string; value: string }[] }
     expect(body.env).toEqual([{ name: 'RUST_LOG', value: 'debug' }])
     wrapper.unmount()
   })
@@ -395,8 +397,8 @@ describe('PipelineEditorView 混合式编辑器', () => {
   it('任务级 env：job.env 初始 undefined，增改后落回 job 并随保存提交（回归）', async () => {
     // defResp 的任务无 env 字段（undefined）——验证 EnvListEditor 的懒初始化
     // 把 job.env 钉成响应式数组、add 的 push 落回 job.env（评审实测的硬 bug）。
-    setRoute('GET', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, defResp()))
-    setRoute('PUT', '/api/v1/projects/proj-a/pipelines/main', jsonResponse(200, saveResp(2)))
+    mockDefinition(defResp())
+    mockSave(() => ({ body: saveResp(2) }))
 
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
@@ -414,11 +416,58 @@ describe('PipelineEditorView 混合式编辑器', () => {
     await vi.waitFor(() => expect(document.body.textContent).toContain('已保存'))
 
     // PUT 体含任务级 env（落回 job，非临时数组）。
-    const put = fetchMock.mock.calls.find(
-      (c) => (c[1] as RequestInit | undefined)?.method === 'PUT',
-    ) as [string, RequestInit]
-    const body = JSON.parse(put[1].body as string)
-    expect(body.stages[0].jobs[0].env).toEqual([{ name: 'DEBUG', value: '1' }])
+    const body = putBodies[0] as { stages: { jobs: { env: unknown }[] }[] }
+    expect(body.stages[0]!.jobs[0]!.env).toEqual([{ name: 'DEBUG', value: '1' }])
+    wrapper.unmount()
+  })
+
+  // ---- 票 #109 增补：编辑器直消费 mock fixture（不覆盖端点）的真闭环 ----
+
+  it('mock fixture（web-app/main）：model 形态定义全字段渲染 + 真 mock PUT 往返（revision 3→4 持久化）', async () => {
+    // 不覆盖端点——直接消费 mock db fixture（防「fixture decl 形态漂移编辑器渲染
+    // 全挂」回归；fixture 即测试数据，单一缝纪律）。
+    await router.push('/projects/web-app/pipelines/main')
+    await router.isReady()
+
+    const wrapper = mountView()
+    // fixture：build（compile/unit-test）→ check（lint/audit）两阶段四任务。
+    await vi.waitFor(() => expect(wrapper.findAll('.stage-column').length).toBe(2))
+    expect(wrapper.findAll('.job-chip').length).toBe(4)
+    await vi.waitFor(() =>
+      expect((wrapper.find('input[name="job-name"]').element as HTMLInputElement).value).toBe(
+        'compile',
+      ),
+    )
+    // fixture 步骤（shell 型 tagged union）渲染——命令字段有值。
+    expect(
+      (wrapper.find('textarea[name="job-step-0-command"]').element as HTMLTextAreaElement).value
+        .length,
+    ).toBeGreaterThan(0)
+
+    // 保存走真 mock PUT（overlay 持久化）：fixture 基线 revision 3 → 4。
+    await wrapper.find('[name="editor-save"]').trigger('click')
+    await vi.waitFor(() => expect(document.body.textContent).toContain('已保存'))
+    await vi.waitFor(() => expect(wrapper.find('.editor-rev-value').text()).toBe('4'))
+
+    // 重载读回 overlay：revision 保持 4（保存→重载往返闭环）。
+    await wrapper.find('[name="editor-reload"]').trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('.editor-rev-value').text()).toBe('4'))
+    wrapper.unmount()
+  })
+
+  it('双语切换不炸布局：en-US 下三页签/表单/轨道完整渲染（表单标签按最长语言设计）', async () => {
+    mockDefinition(defResp())
+    setLocale('en-US')
+
+    const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.findAll('.job-chip').length).toBe(2))
+    // 任务页签（en）：轨道 + 表单并排均在，表单首字段标签为英文。
+    expect(wrapper.find('.editor-jobs-pane').exists()).toBe(true)
+    expect(wrapper.find('label').text()).toContain('Job name')
+    // 三页签 en 标签齐全可切换。
+    await switchTab(wrapper, 'Parameters')
+    await switchTab(wrapper, 'Env vars')
+    await switchTab(wrapper, 'Jobs')
     wrapper.unmount()
   })
 })

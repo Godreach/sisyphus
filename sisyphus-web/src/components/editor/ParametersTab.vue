@@ -9,6 +9,8 @@
 // 清默认（旧默认的类型已与新类型不符）。
 // #96: 迁移 Naive UI——类型改 NSelect、必填改 NSwitch、number 默认改
 // NInputNumber、bool 默认改三态 NSelect、其余输入改 NInput，交互不变。
+// 票 #109: 定稿设计语言——参数卡走白卡语义（12px 圆角无描边）+ 卡片清单间距，
+// 交互不变。
 
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -196,14 +198,18 @@ function paramErrors(i: number): { path: string; message: string }[] {
   margin: 0;
 }
 
+/* 参数卡纵排间距（卡片清单形态，同构建列表 rows gap）。 */
 .params-form {
   width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
+/* 参数卡：顶层条目 = 定稿卡片语义（白底 12px 圆角无描边，同 sisy-card）。 */
 .param-card {
-  border: 1px solid var(--sisy-color-border);
-  border-radius: var(--sisy-radius);
-  padding: 12px;
+  border-radius: var(--sisy-radius-card);
+  padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 4px;

@@ -9,6 +9,8 @@
 // 经 NFormItem validation-status + feedback 插槽就地红显（输入框同步染红）。
 // #96: 迁移 Naive UI——输入改 NInput、解释器改 NSelect、开关改 NSwitch、
 // 数字改 NInputNumber、增删/重排按钮改 NButton，交互不变。
+// 票 #109: 定稿设计语言——表单面板白卡语义、步骤/缓存嵌套卡凹陷填充、步骤类型徽章
+// 换定稿胶囊柔和色族（全 token 驱动，深色跟随），交互不变。
 
 import { useI18n } from 'vue-i18n'
 import { NButton, NForm, NFormItem, NInput, NInputNumber, NRadio, NRadioGroup, NSelect, NSwitch } from 'naive-ui'
@@ -579,15 +581,15 @@ function setCheckoutSubmodules(step: Step, v: boolean): void {
   text-align: center;
 }
 
+/* 表单面板：定稿卡片语义（白底 12px 圆角无描边，同 sisy-card）。 */
 .job-form {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 14px 16px;
-  border: 1px solid var(--sisy-color-border);
-  border-radius: var(--sisy-radius);
+  padding: 16px 18px;
+  border-radius: var(--sisy-radius-card);
   background: var(--sisy-color-surface);
 }
 
@@ -650,29 +652,18 @@ function setCheckoutSubmodules(step: Step, v: boolean): void {
   width: 100%;
 }
 
-.cache-card {
-  border: 1px solid var(--sisy-color-border);
-  border-radius: var(--sisy-radius);
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  align-items: stretch;
-  width: 100%;
-  background: #fbfcfd;
-}
-
-/* 步骤卡 */
+/* 缓存卡 / 步骤卡：表单卡内嵌套容器 = 页面底色的凹陷填充（token 驱动，深色跟随）。 */
+.cache-card,
 .step-card {
   border: 1px solid var(--sisy-color-border);
   border-radius: var(--sisy-radius);
-  padding: 10px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
   align-items: stretch;
   width: 100%;
-  background: #fbfcfd;
+  background: var(--sisy-color-bg);
 }
 
 .step-head {
@@ -682,26 +673,24 @@ function setCheckoutSubmodules(step: Step, v: boolean): void {
   gap: 8px;
 }
 
+/* 步骤类型徽章：定稿胶囊语义（柔和底色 + 同族正文色，token 驱动，深色跟随）。 */
 .step-type-badge {
   font-size: 11px;
   font-weight: 600;
   padding: 1px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--sisy-color-border);
-  background: var(--sisy-color-surface);
+  border-radius: var(--sisy-radius-pill);
+  background: var(--sisy-color-offline-soft);
   color: var(--sisy-color-text-secondary);
 }
 
 .step-type-badge.step-type-shell {
-  border-color: #7ab3e8;
-  background: #e8f3fd;
-  color: #0b5cad;
+  background: var(--sisy-color-primary-soft);
+  color: var(--sisy-color-primary);
 }
 
 .step-type-badge.step-type-checkout {
-  border-color: #b7dfc2;
-  background: #e6f4ea;
-  color: #1b6b34;
+  background: var(--sisy-color-success-soft);
+  color: var(--sisy-color-success);
 }
 
 .step-controls {
