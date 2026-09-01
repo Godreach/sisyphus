@@ -66,3 +66,20 @@ export function agentStateTagType(
       return 'default'
   }
 }
+
+/** 徽标态 → 胶囊徽章语义类（定稿设计语言 `.badge` 类：构建机列表/升级页
+ *  共用同一映射，颜色编码不漂移——票 #111 起单点在此）。 */
+export function agentStateBadgeClass(state: AgentBadgeState): string {
+  switch (state) {
+    case 'online':
+      return 'online'
+    case 'draining':
+      return 'draining'
+    case 'incompatible':
+      return 'failed'
+    case 'offline':
+      return 'offline'
+    default:
+      return 'neutral'
+  }
+}

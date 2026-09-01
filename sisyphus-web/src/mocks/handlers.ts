@@ -73,6 +73,16 @@ function projectAdminGuard(user: string, name: string): ReturnType<typeof jsonEr
   return null
 }
 
+/** 全局 admin 守卫（server policy.rs RequireGlobalAdmin 同形）：非全局
+ *  admin → 403。node 模式缺省用户 admin（与 handlers 既有缺省一致）。 */
+function globalAdminGuard(request: Request): ReturnType<typeof jsonError> | null {
+  const user = sessionUser(request) ?? 'admin'
+  if (!db.isGlobalAdmin(user)) {
+    return jsonError(403, 'FORBIDDEN', '非全局管理员')
+  }
+  return null
+}
+
 function sessionUser(request: Request): string | null {
   // 会话读取三处来源按序：①浏览器态 document.cookie（SW 的 fetch 事件请求
   //  不带 Cookie 头，cookie 由网络栈在 SW 之后附加）；②请求 Cookie 头（node
@@ -939,7 +949,239 @@ export function createHandlers(options: MockHandlerOptions) {
       },
     ),
 
-    // ----- 审计（spec #110，后端 api/audit.rs 契约同形；仅全局 admin）-----
+    // ----- 升级包 / Agent 升级指令（spec #111；升级端点后端已交付——票 #76
+    //       B5-T4/ADR-0017，此处 mock 与 api/upgrade_packages.rs、agents.rs
+    //       契约同形：raw octet 上传 + X-Sisyphus-Filename 头、窗口 409、
+    //       文件名非法 422、全量 issued/skipped 汇总、单台已在目标版本 409）-----
+    upgradePackagesList: http.get('/api/v1/upgrade-packages', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const deniedAdmin = globalAdminGuard(request)
+      if (deniedAdmin != null) return deniedAdmin
+      await delay(150)
+      return HttpResponse.json(db.UPGRADE_PACKAGES)
+    }),
+
+    upgradePackageUpload: http.post('/api/v1/upgrade-packages', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const user = sessionUser(request) ?? 'admin'
+      const deniedAdmin = globalAdminGuard(request)
+      if (deniedAdmin != null) return deniedAdmin
+      await delay(300)
+      // 包名在 X-Sisyphus-Filename 头（raw octet body 只有包字节）。
+      const packageName = request.headers.get('x-sisyphus-filename')?.trim() ?? ''
+      if (packageName === '') {
+        return validationError([{ path: 'filename', message: '缺少 X-Sisyphus-Filename 头' }])
+      }
+      const bytes = await request.arrayBuffer()
+      const result = db.uploadUpgradePackage(packageName, bytes.byteLength)
+      if ('error' in result) {
+        if (result.error === 'window') {
+          return jsonError(409, 'CONFLICT', `版本窗外（须 ≥ N-1 且 ≤ Server ${db.SERVER_VERSION.major}.${db.SERVER_VERSION.minor}.${db.SERVER_VERSION.patch}）：${packageName}`)
+        }
+        return validationError([
+          { path: 'filename', message: `文件名不可解析（ADR-0010 规范 sisyphus-agent-<ver>-<os>-<arch>）：${packageName}` },
+        ])
+      }
+      db.insertAudit(user, 'upgrade_package_uploaded', null, { package: packageName })
+      return HttpResponse.json(result.ok, { status: 201 })
+    }),
+
+    upgradePackageDelete: http.delete(
+      '/api/v1/upgrade-packages/:name',
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const user = sessionUser(request) ?? 'admin'
+        const deniedAdmin = globalAdminGuard(request)
+        if (deniedAdmin != null) return deniedAdmin
+        await delay(200)
+        const name = String(params.name)
+        if (!db.deleteUpgradePackage(name)) {
+          return jsonError(404, 'NOT_FOUND', `升级包不存在：${name}`)
+        }
+        db.insertAudit(user, 'upgrade_package_deleted', null, { package: name })
+        return new HttpResponse(null, { status: 204 })
+      },
+    ),
+
+    agentsUpgradeAll: http.post('/api/v1/agents/upgrade', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const user = sessionUser(request) ?? 'admin'
+      const deniedAdmin = globalAdminGuard(request)
+      if (deniedAdmin != null) return deniedAdmin
+      await delay(300)
+      const body = (await request.json()) as { package_name?: string }
+      const pkgRow = db.UPGRADE_PACKAGES.find((p) => p.package_name === body.package_name)
+      if (pkgRow == null) {
+        return jsonError(404, 'NOT_FOUND', `升级包不存在：${body.package_name ?? ''}`)
+      }
+      const { issued, skipped, targets } = db.upgradeAllAgents(pkgRow)
+      db.insertAudit(user, 'upgrade_command_issued', null, { package: pkgRow.package_name, agents: targets })
+      return HttpResponse.json(
+        { package_name: pkgRow.package_name, issued, skipped },
+        { status: 202 },
+      )
+    }),
+
+    agentsUpgradeOne: http.post('/api/v1/agents/:name/upgrade', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const user = sessionUser(request) ?? 'admin'
+      const deniedAdmin = globalAdminGuard(request)
+      if (deniedAdmin != null) return deniedAdmin
+      await delay(300)
+      const name = String(params.name)
+      const body = (await request.json()) as { package_name?: string }
+      const pkgRow = db.UPGRADE_PACKAGES.find((p) => p.package_name === body.package_name)
+      if (pkgRow == null) {
+        return jsonError(404, 'NOT_FOUND', `升级包不存在：${body.package_name ?? ''}`)
+      }
+      const result = db.upgradeOneAgent(name, pkgRow)
+      if (result == null) {
+        return jsonError(404, 'AGENT_NOT_FOUND', `构建机 ${name} 不存在`)
+      }
+      if (result === 'already') {
+        return jsonError(409, 'CONFLICT', `构建机 ${name} 已在目标版本`)
+      }
+      db.insertAudit(user, 'upgrade_command_issued', null, { package: pkgRow.package_name, agents: [name] })
+      return HttpResponse.json(result, { status: 202 })
+    }),
+
+    // ----- 用户管理（spec #111；后端 api/users.rs 契约同形：全局 admin 专属、
+    //       建号 409 重名/422 校验、禁用即踢线级联删 PAT、代办重置密码）-----
+    usersList: http.get('/api/v1/users', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const deniedAdmin = globalAdminGuard(request)
+      if (deniedAdmin != null) return deniedAdmin
+      await delay(150)
+      return HttpResponse.json(db.listUsers())
+    }),
+
+    userCreate: http.post('/api/v1/users', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const user = sessionUser(request) ?? 'admin'
+      const deniedAdmin = globalAdminGuard(request)
+      if (deniedAdmin != null) return deniedAdmin
+      await delay(250)
+      const body = (await request.json()) as {
+        username?: string
+        password?: string
+        is_admin?: boolean
+      }
+      const username = body.username?.trim() ?? ''
+      const issues: { path: string; message: string }[] = []
+      if (!db.validUsername(username)) {
+        issues.push({ path: 'username', message: '用户名须为 1-64 位字母数字或 _ . -' })
+      }
+      if ((body.password ?? '').length < 8) {
+        issues.push({ path: 'password', message: '密码最小长度 8 位' })
+      }
+      if (issues.length > 0) return validationError(issues)
+      if (db.USERS.some((u) => u.username === username)) {
+        return jsonError(409, 'CONFLICT', `用户名已存在：${username}`)
+      }
+      const created = db.createUser(username, body.password ?? '', body.is_admin ?? false)
+      db.insertAudit(user, 'user_created', null, { username })
+      return HttpResponse.json(created, { status: 201 })
+    }),
+
+    userPatch: http.patch('/api/v1/users/:name', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const actor = sessionUser(request) ?? 'admin'
+      const deniedAdmin = globalAdminGuard(request)
+      if (deniedAdmin != null) return deniedAdmin
+      await delay(200)
+      const name = String(params.name)
+      const body = (await request.json()) as { disabled?: boolean }
+      const updated = db.patchUser(name, body.disabled === true)
+      if (updated == null) {
+        return jsonError(404, 'NOT_FOUND', `用户不存在：${name}`)
+      }
+      db.insertAudit(actor, body.disabled ? 'user_disabled' : 'user_enabled', null, { username: name })
+      return HttpResponse.json(updated)
+    }),
+
+    userResetPassword: http.put('/api/v1/users/:name/password', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const actor = sessionUser(request) ?? 'admin'
+      const deniedAdmin = globalAdminGuard(request)
+      if (deniedAdmin != null) return deniedAdmin
+      await delay(200)
+      const name = String(params.name)
+      const body = (await request.json()) as { new_password?: string }
+      if ((body.new_password ?? '').length < 8) {
+        return validationError([{ path: 'new_password', message: '密码最小长度 8 位' }])
+      }
+      if (!db.resetUserPassword(name, body.new_password ?? '')) {
+        return jsonError(404, 'NOT_FOUND', `用户不存在：${name}`)
+      }
+      db.insertAudit(actor, 'password_reset', null, { username: name })
+      return new HttpResponse(null, { status: 204 })
+    }),
+
+    // ----- PAT（spec #111；后端 api/tokens.rs 契约同形：权限 = owner 本人、
+    //       值仅创建响应一次（此后任何端点不回显）、吊销 id+属主双条件 404
+    //       同形、过期时间须晚于当前时间 422）-----
+    tokensList: http.get('/api/v1/auth/tokens', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(120)
+      const user = sessionUser(request) ?? 'admin'
+      return HttpResponse.json(db.patsOf(user))
+    }),
+
+    tokenCreate: http.post('/api/v1/auth/tokens', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const user = sessionUser(request) ?? 'admin'
+      await delay(250)
+      const body = (await request.json()) as { name?: string; expires_at?: number | null }
+      const name = body.name?.trim() ?? ''
+      const issues: { path: string; message: string }[] = []
+      if (name === '') {
+        issues.push({ path: 'name', message: '令牌名不能为空' })
+      }
+      if (body.expires_at != null && body.expires_at <= Date.now()) {
+        issues.push({ path: 'expires_at', message: '过期时间须晚于当前时间' })
+      }
+      if (issues.length > 0) return validationError(issues)
+      const row = db.addPat(user, name, body.expires_at ?? null)
+      db.insertAudit(user, 'pat_created', null, { name })
+      // 完整令牌仅此一次返回（db 只记行——值不落 fixture，任何端点不再回显）。
+      const token = `sis_${Array.from({ length: 43 }, () => 'abcdefghijklmnopqrstuvwxyz234567'[Math.floor(Math.random() * 32)]).join('')}`
+      return HttpResponse.json(
+        {
+          token,
+          id: row.id,
+          name: row.name,
+          expires_at: row.expires_at,
+          created_at: row.created_at,
+        },
+        { status: 201 },
+      )
+    }),
+
+    tokenRevoke: http.delete('/api/v1/auth/tokens/:id', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const user = sessionUser(request) ?? 'admin'
+      await delay(200)
+      const row = db.revokePat(user, Number(params.id))
+      if (row == null) {
+        return jsonError(404, 'NOT_FOUND', '令牌不存在')
+      }
+      db.insertAudit(user, 'pat_revoked', null, { name: row.name })
+      return new HttpResponse(null, { status: 204 })
+    }),
+
+
     // 参数合法性同 parse_filter/parse_paging：未知事件类型 422、limit 越界
     // 422、offset 负 422；user/project trim 后空串视为未过滤。
     auditList: http.get('/api/v1/audit', async ({ request }) => {

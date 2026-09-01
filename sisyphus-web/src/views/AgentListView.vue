@@ -21,6 +21,8 @@
 //   M5）；平板档降级次要列（M5/G2）。
 // - 编辑槽位/标签 `PATCH`；行/详情进 Agent 详情页。
 // - 顶栏搜索（`?q=`）按名称过滤。
+// - 排空/版本不兼容机器就地「去升级」（M7 后置项，票 #111）：动作列深链
+//   升级页并预选该机器为单台目标。
 
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -525,9 +527,27 @@ const columns = computed<DataTableColumns<AgentResponse>>(() => {
   {
     title: t('agents.colActions'),
     key: 'actions',
-    width: 180,
+    width: 200,
     render: (row) =>
       h('div', { class: 'machine-row-actions' }, [
+        // M7（票 #106 后置到 #111）：排空/版本不兼容机器就地「去升级」入口
+        // ——深链 /admin/upgrade?agent=<name> 预选单台目标。
+        ...(row.draining || !row.version_compatible
+          ? [
+              h(
+                NButton,
+                {
+                  size: 'tiny',
+                  type: 'warning',
+                  secondary: true,
+                  name: `agent-upgrade-${row.name}`,
+                  onClick: () =>
+                    void router.push({ path: '/admin/upgrade', query: { agent: row.name } }),
+                },
+                { default: () => t('agents.upgradeAction') },
+              ),
+            ]
+          : []),
         h(NSwitch, {
           size: 'small',
           class: 'machine-toggle',

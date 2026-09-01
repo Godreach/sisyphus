@@ -347,13 +347,13 @@ async function runAuthed(browser) {
   await visit(page, '/admin/upgrade', '构建机升级', 'admin-upgrade')
   await visit(page, '/admin/users', '用户', 'admin-users')
 
-  // 关键动作 1：升级页升级包表格渲染（占位态消除——mock 回非空包，
-  // NDataTable 包表出现且含包名）。B5-T4 起升级端点已交付，页不再退化。
+  // 关键动作 1：升级页升级包清单渲染（占位态消除——mock 回非空包，断言包行
+  // 出现；#111 定稿设计语言后包表为行式清单 data-testid）。
   try {
     await page.goto(`${BASE}/admin/upgrade`, { waitUntil: 'domcontentloaded' })
     await page.locator('.app-topbar-title', { hasText: '构建机升级' }).first().waitFor({ timeout: 10000 })
     await page
-      .locator('.upgrade-packages-table td', { hasText: 'sisyphus-agent-1.0.0-linux-x86_64.tar.gz' })
+      .locator('[data-testid="upgrade-package-sisyphus-agent-1.0.0-linux-x86_64.tar.gz"]')
       .first()
       .waitFor({ timeout: 5000 })
     ok('admin-upgrade package table renders', true)

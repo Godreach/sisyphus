@@ -1,5 +1,7 @@
 <script setup lang="ts">
-// 用户 / PAT 管理页（ADR-0014，票 B4-T6）：用户生命周期 + 个人访问令牌。
+// 用户 / PAT 管理页（ADR-0014，票 B4-T6；spec #111 定稿设计语言铺开）：
+// 用户生命周期 + 个人访问令牌。设计语言与三主页面/机密审计页同源——
+// sisy-card 双卡（行式清单 + 胶囊徽章 + 描边小按钮）+ NModal 表单。
 //
 // 管理区全局 admin 面。用户管理端点全局 admin 专属（403 → admin-only 退化态）；
 // PAT 端点权限 = owner 本人（v1 无 scope 细分），本页消费当前（全局 admin）用户
@@ -8,24 +10,20 @@
 // - 用户：`GET/POST /users` + `PATCH /users/{name}` { disabled }（禁用/启用）+
 //   `PUT /users/{name}/password`（代办重置密码）。建号时经 `is_admin` 设全局
 //   admin；**切换已有用户 admin 标志的端点尚未交付**（PATCH 仅 disabled）→
-//   退化标注（建号时可设，已有用户展示只读 NTag）。
+//   退化标注（建号时可设，已有用户展示只读徽章）。
 // - PAT：`GET/POST /auth/tokens` + `DELETE /auth/tokens/{id}`。创建响应一次性
-//   返回完整令牌（明文仅此一次，NCode 展示后即丢弃）；列表无值形态；吊销
+//   返回完整令牌（明文仅此一次，展示后即丢弃）；列表无值形态；吊销
 //   删行（NPopconfirm 确认——吊销立即生效）。
-// #95: 使用 Naive UI 组件重写——用户/PAT 分区改 NCard（header-extra 新建入口）、
-// 两张清单改 NDataTable（角色/状态列 NTag、启用/禁用改 NSwitch、吊销经
-// NPopconfirm）、建号/重置密码/建令牌改 NModal + NForm、一次性令牌 NCode +
-// 复制按钮（与 AgentListView 凭据弹窗同纪律）、成功操作 NMessage toast、
-// 错误态 NAlert。
+//
+// 事实态纪律：双卡各自骨架屏/空态、清单失败卡内报错 + 重试、表单失败弹窗内
+// 就地报错、行级动作失败 toast。
 
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   NAlert,
   NButton,
-  NCard,
   NCode,
-  NDataTable,
   NDatePicker,
   NDescriptions,
   NDescriptionsItem,
@@ -38,11 +36,9 @@ import {
   NPopconfirm,
   NSkeleton,
   NSwitch,
-  NTag,
   useMessage,
-  type DataTableColumns,
 } from 'naive-ui'
-import { ClipboardOutline } from '@vicons/ionicons5'
+import { AddOutline, ClipboardOutline } from '@vicons/ionicons5'
 
 import { tokensApi, usersApi } from '@/api/client'
 import { describeSubmitError } from '@/api/errors'
@@ -107,106 +103,17 @@ const canCreateUser = computed(
 
 const canCreateToken = computed(() => tokenName.value.trim() !== '' && !creatingToken.value)
 
-/** 用户表列（角色/状态列 NTag；动作列 NSwitch 启用/禁用 + 重置密码按钮）。 */
-const userColumns = computed<DataTableColumns<UserResponse>>(() => [
-  {
-    title: t('users.username'),
-    key: 'username',
-    render: (row) => h('span', { class: 'mono' }, row.username),
-  },
-  {
-    title: t('users.role'),
-    key: 'role',
-    render: (row) =>
-      h(
-        NTag,
-        { size: 'small', type: row.is_admin ? 'warning' : 'default', bordered: false },
-        { default: () => (row.is_admin ? t('users.adminBadge') : t('users.userBadge')) },
-      ),
-  },
-  {
-    title: t('users.status'),
-    key: 'status',
-    render: (row) =>
-      h(
-        NTag,
-        { size: 'small', type: row.disabled ? 'error' : 'success', bordered: false },
-        { default: () => (row.disabled ? t('users.disabled') : t('users.active')) },
-      ),
-  },
-  {
-    title: t('users.actions'),
-    key: 'actions',
-    render: (row) =>
-      h('div', { class: 'user-row-actions' }, [
-        h(NSwitch, {
-          size: 'small',
-          class: 'user-toggle',
-          value: !row.disabled,
-          loading: togglingUserName.value === row.username,
-          'onUpdate:value': () => void toggleUserDisabled(row),
-        }),
-        h(
-          NButton,
-          { size: 'small', name: 'user-reset', onClick: () => startResetPassword(row) },
-          { default: () => t('users.resetPassword') },
-        ),
-      ]),
-  },
-])
+/** 用户卡副标（计数；与机密页 card-subtitle 同形态）。 */
+const usersCountText = computed(() =>
+  users.value != null ? t('users.count', { n: users.value.length }) : '',
+)
 
-const userRowKey = (row: UserResponse): number => row.id
-
-/** PAT 表列（吊销经 NPopconfirm——立即生效不可逆）。 */
-const tokenColumns = computed<DataTableColumns<TokenResponse>>(() => [
-  {
-    title: t('tokens.name'),
-    key: 'name',
-    render: (row) => h('span', { class: 'mono' }, row.name),
-  },
-  {
-    title: t('tokens.expiresAt'),
-    key: 'expires_at',
-    render: (row) => (row.expires_at != null ? formatDateTime(row.expires_at) : t('tokens.neverExpires')),
-  },
-  {
-    title: t('tokens.createdAt'),
-    key: 'created_at',
-    render: (row) => formatDateTime(row.created_at),
-  },
-  {
-    title: '',
-    key: 'actions',
-    width: 100,
-    render: (row) =>
-      h(
-        NPopconfirm,
-        {
-          positiveText: t('common.confirm'),
-          negativeText: t('common.cancel'),
-          onPositiveClick: () => void revokeToken(row.id),
-        },
-        {
-          trigger: () =>
-            h(
-              NButton,
-              {
-                size: 'small',
-                name: 'token-revoke',
-                loading: revokingTokenId.value === row.id,
-              },
-              { default: () => t('tokens.revoke') },
-            ),
-          default: () => t('tokens.revokeConfirm'),
-        },
-      ),
-  },
-])
-
-const tokenRowKey = (row: TokenResponse): number => row.id
+/** PAT 卡副标（计数）。 */
+const tokensCountText = computed(() => t('tokens.count', { n: tokens.value.length }))
 
 /** 加载用户清单（全局 admin 专属）。403 → admin-only 退化。 */
 async function loadUsers(): Promise<void> {
+  usersLoading.value = true
   usersError.value = ''
   adminOnly.value = false
   try {
@@ -247,7 +154,8 @@ async function createUser(): Promise<void> {
   }
 }
 
-/** 禁用/启用切换：`PATCH /users/{name}` { disabled }，禁用即踢线。 */
+/** 禁用/启用切换：`PATCH /users/{name}` { disabled }，禁用即踢线。失败 toast
+ *  行内感知（只影响该行，不整页报错——与构建机开关同纪律）。 */
 async function toggleUserDisabled(user: UserResponse): Promise<void> {
   togglingUserName.value = user.username
   try {
@@ -255,7 +163,7 @@ async function toggleUserDisabled(user: UserResponse): Promise<void> {
     message.success(user.disabled ? t('users.enabledMsg') : t('users.disabledMsg'))
     await loadUsers()
   } catch (err) {
-    usersError.value = describeSubmitError(err)
+    message.error(describeSubmitError(err))
   } finally {
     togglingUserName.value = null
   }
@@ -342,7 +250,7 @@ async function copyText(text: string): Promise<void> {
   }
 }
 
-/** 吊销 PAT：`DELETE /auth/tokens/{id}`，下一请求即 401 + 刷新。 */
+/** 吊销 PAT：`DELETE /auth/tokens/{id}`，下一请求即 401 + 刷新。失败 toast。 */
 async function revokeToken(id: number): Promise<void> {
   revokingTokenId.value = id
   try {
@@ -350,7 +258,7 @@ async function revokeToken(id: number): Promise<void> {
     message.success(t('tokens.revokedMsg'))
     await loadTokens()
   } catch (err) {
-    tokensError.value = describeSubmitError(err)
+    message.error(describeSubmitError(err))
   } finally {
     revokingTokenId.value = null
   }
@@ -363,78 +271,158 @@ async function revokeToken(id: number): Promise<void> {
     <p v-if="adminOnly" class="form-hint">{{ t('admin.adminOnly') }}</p>
 
     <template v-else>
-      <!-- 用户管理。 -->
-      <n-card :title="t('users.title')" size="small" class="users-card">
-        <template #header-extra>
-          <n-button type="primary" size="small" name="user-new" @click="showUserForm = true">
+      <!-- 用户管理（行式清单：角色/状态胶囊徽章 + 开关/重置密码动作）。 -->
+      <section class="sisy-card users-table-card" aria-label="users">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">{{ t('users.title') }}</h2>
+            <div v-if="usersCountText" class="card-subtitle">{{ usersCountText }}</div>
+          </div>
+          <button type="button" class="btn-outline blue" name="user-new" @click="showUserForm = true">
+            <n-icon :component="AddOutline" />
             {{ t('users.newUser') }}
-          </n-button>
-        </template>
+          </button>
+        </div>
 
-        <n-alert v-if="usersError" type="error" :title="usersError" role="alert" class="users-card-alert" />
+        <n-alert v-if="usersError" type="error" :title="usersError" role="alert" class="card-alert">
+          <button type="button" class="btn-outline users-retry" name="users-retry" @click="loadUsers">
+            {{ t('users.retry') }}
+          </button>
+        </n-alert>
 
         <!-- 切换已有用户全局 admin 标志的端点尚未交付（PATCH 仅 disabled）：
-             建号时可设 is_admin，已有用户仅展示只读 NTag——显式标注退化。 -->
-        <p class="form-hint">{{ t('users.adminToggleUnavailable') }}</p>
+             建号时可设 is_admin，已有用户仅展示只读徽章——显式标注退化。 -->
+        <p class="form-hint users-admin-hint">{{ t('users.adminToggleUnavailable') }}</p>
 
-        <div v-if="usersLoading && !usersError" class="users-skeleton">
-          <n-skeleton v-for="i in 3" :key="i" text :repeat="1" height="28px" class="users-skeleton-row" />
+        <div v-if="usersLoading && !usersError" class="card-skeleton">
+          <n-skeleton text :repeat="3" height="44px" />
         </div>
 
         <div v-else-if="users && users.length === 0" class="users-empty">
-          <n-empty :description="t('users.empty')" />
+          <n-empty :description="t('users.empty')">
+            <template #extra>
+              <n-button type="primary" size="small" name="user-new-empty" @click="showUserForm = true">
+                {{ t('users.newUser') }}
+              </n-button>
+            </template>
+          </n-empty>
         </div>
 
-        <n-data-table
-          v-else-if="users"
-          :columns="userColumns"
-          :data="users"
-          :row-key="userRowKey"
-          :bordered="false"
-          :single-line="true"
-          size="small"
-          :scroll-x="560"
-          class="users-table"
-        />
-      </n-card>
+        <template v-else-if="users">
+          <div class="users-thead">
+            <span>{{ t('users.username') }}</span>
+            <span>{{ t('users.role') }}</span>
+            <span>{{ t('users.status') }}</span>
+            <span class="users-thead-actions">{{ t('users.actions') }}</span>
+          </div>
+          <div
+            v-for="row in users"
+            :key="row.id"
+            class="users-row"
+            :data-testid="`user-row-${row.username}`"
+          >
+            <span class="mono users-name">{{ row.username }}</span>
+            <!-- 角色徽章只读（admin 切换端点未交付，建号时可设）。 -->
+            <span class="badge" :class="row.is_admin ? 'info' : 'neutral'">
+              {{ row.is_admin ? t('users.adminBadge') : t('users.userBadge') }}
+            </span>
+            <span class="badge" :class="row.disabled ? 'failed' : 'success'">
+              {{ row.disabled ? t('users.disabled') : t('users.active') }}
+            </span>
+            <div class="users-row-actions">
+              <n-switch
+                size="small"
+                class="user-toggle"
+                :value="!row.disabled"
+                :loading="togglingUserName === row.username"
+                @update:value="() => toggleUserDisabled(row)"
+              />
+              <button
+                type="button"
+                class="btn-outline"
+                name="user-reset"
+                @click="startResetPassword(row)"
+              >
+                {{ t('users.resetPassword') }}
+              </button>
+            </div>
+          </div>
+        </template>
+      </section>
 
       <!-- PAT 管理（当前用户令牌；创建时明文一次 + 可吊销）。 -->
-      <n-card :title="t('tokens.title')" size="small" class="users-card">
-        <template #header-extra>
-          <n-button
+      <section class="sisy-card users-table-card" aria-label="personal access tokens">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">{{ t('tokens.title') }}</h2>
+            <div class="card-subtitle">{{ tokensCountText }}</div>
+          </div>
+          <button
             v-if="!createdToken"
-            type="primary"
-            size="small"
+            type="button"
+            class="btn-outline blue"
             name="token-new"
             @click="showTokenForm = true"
           >
+            <n-icon :component="AddOutline" />
             {{ t('tokens.newToken') }}
-          </n-button>
-        </template>
+          </button>
+        </div>
 
-        <n-alert v-if="tokensError" type="error" :title="tokensError" role="alert" class="users-card-alert" />
+        <n-alert v-if="tokensError" type="error" :title="tokensError" role="alert" class="card-alert">
+          <button type="button" class="btn-outline users-retry" name="tokens-retry" @click="loadTokens">
+            {{ t('tokens.retry') }}
+          </button>
+        </n-alert>
 
         <!-- 首载骨架屏（防止「暂无令牌」空态闪烁——数据到达后替换）。 -->
-        <div v-if="tokensLoading && !tokensError" class="users-skeleton">
-          <n-skeleton v-for="i in 2" :key="i" text height="28px" class="users-skeleton-row" />
+        <div v-if="tokensLoading && !tokensError" class="card-skeleton">
+          <n-skeleton text :repeat="2" height="44px" />
         </div>
 
         <div v-else-if="tokens.length === 0 && !tokensError" class="users-empty">
           <n-empty :description="t('tokens.empty')" />
         </div>
 
-        <n-data-table
-          v-else
-          :columns="tokenColumns"
-          :data="tokens"
-          :row-key="tokenRowKey"
-          :bordered="false"
-          :single-line="true"
-          size="small"
-          :scroll-x="640"
-          class="tokens-table"
-        />
-      </n-card>
+        <template v-else-if="!tokensError">
+          <div class="users-thead tokens-thead">
+            <span>{{ t('tokens.name') }}</span>
+            <span>{{ t('tokens.expiresAt') }}</span>
+            <span>{{ t('tokens.createdAt') }}</span>
+            <span class="users-thead-actions" />
+          </div>
+          <div
+            v-for="row in tokens"
+            :key="row.id"
+            class="users-row tokens-row"
+            :data-testid="`token-row-${row.id}`"
+          >
+            <span class="mono users-name">{{ row.name }}</span>
+            <span class="users-cell">{{ row.expires_at != null ? formatDateTime(row.expires_at) : t('tokens.neverExpires') }}</span>
+            <span class="users-cell">{{ formatDateTime(row.created_at) }}</span>
+            <div class="users-row-actions">
+              <!-- 吊销经原生气泡确认（立即生效不可逆）。 -->
+              <n-popconfirm
+                :positive-text="t('common.confirm')"
+                :negative-text="t('common.cancel')"
+                @positive-click="revokeToken(row.id)"
+              >
+                <template #trigger>
+                  <button
+                    type="button"
+                    class="btn-outline red"
+                    name="token-revoke"
+                    :disabled="revokingTokenId === row.id"
+                  >
+                    {{ t('tokens.revoke') }}
+                  </button>
+                </template>
+                {{ t('tokens.revokeConfirm') }}
+              </n-popconfirm>
+            </div>
+          </div>
+        </template>
+      </section>
 
       <!-- 建号弹窗（用户名 + 密码 + 全局 admin 开关——建号时设 admin）。 -->
       <n-modal
@@ -614,38 +602,102 @@ async function revokeToken(id: number): Promise<void> {
 </template>
 
 <style scoped>
-.users-card {
-  margin-top: 4px;
+.users-page {
+  gap: 16px;
 }
 
-.users-card-alert {
-  margin-bottom: 8px;
+.card-subtitle {
+  font-size: 12px;
+  color: var(--sisy-color-text-secondary);
+  margin-top: 2px;
 }
 
-.users-skeleton {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.card-alert {
+  margin: 0 20px 12px;
 }
 
-.users-skeleton-row {
-  width: 100%;
+.card-alert button {
+  margin-top: 8px;
 }
 
-.users-empty {
-  padding: 16px 0;
+.card-skeleton {
+  padding: 0 20px 16px;
 }
 
-.user-row-actions {
-  display: flex;
+/* 退化标注（admin 切换端点未交付）收在卡头下、不与表单耦合。 */
+.users-admin-hint {
+  padding: 0 20px;
+  margin: -4px 0 8px;
+  line-height: 1.6;
+  max-width: 720px;
+}
+
+/* 行式清单（表头 + 分隔行；与机密页 secrets-thead/row 同形态）。 */
+.users-thead {
+  display: grid;
+  align-items: center;
+  padding: 0 20px;
+  height: 40px;
+  border-top: 1px solid var(--sisy-color-border);
+  border-bottom: 1px solid var(--sisy-color-border);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--sisy-color-text-secondary);
+  grid-template-columns: minmax(120px, 1fr) 130px 100px 200px;
+}
+
+.tokens-thead {
+  grid-template-columns: minmax(120px, 1fr) 180px 180px 100px;
+}
+
+.users-row {
+  display: grid;
   align-items: center;
   gap: 12px;
+  padding: 0 20px;
+  min-height: 48px;
+  border-bottom: 1px solid var(--sisy-color-border-light);
+  transition: background 0.15s;
+  grid-template-columns: minmax(120px, 1fr) 130px 100px 200px;
+}
+
+.tokens-row {
+  grid-template-columns: minmax(120px, 1fr) 180px 180px 100px;
+}
+
+.users-row:last-of-type {
+  border-bottom: none;
+}
+
+.users-row:hover {
+  background: var(--sisy-color-bg);
+}
+
+.users-thead-actions {
+  justify-self: end;
+}
+
+.users-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.users-cell {
+  font-size: 13px;
 }
 
 .users-token-expiry {
   width: 100%;
 }
 
+/* 空态。 */
+.users-empty {
+  padding: 24px 0 32px;
+}
+
+/* 弹窗。 */
 .modal-actions {
   display: flex;
   justify-content: flex-end;

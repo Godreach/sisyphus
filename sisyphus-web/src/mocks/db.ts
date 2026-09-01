@@ -30,6 +30,8 @@ import type {
   RecentBuildDto,
   TriggerSourceDto,
   UpdateProjectRequest,
+  UpgradePackageResponse,
+  UserResponse,
   VersionDto,
   WorkspaceEntry,
 } from '@/api/types'
@@ -54,18 +56,131 @@ const NOW = Date.now()
 // 用户（登录 mock：admin/admin123、alice/alice123、bob/bob123）
 // ---------------------------------------------------------------------------
 
+/** 用户行（含 mock 登录用的明文密码；UserResponse 映射永不带 password）。 */
 export interface FixtureUser {
   id: number
   username: string
   password: string
   is_admin: boolean
+  disabled: boolean
+  created_at: number
+  updated_at: number
 }
 
 export const USERS: FixtureUser[] = [
-  { id: 1, username: 'admin', password: 'admin123', is_admin: true },
-  { id: 2, username: 'alice', password: 'alice123', is_admin: false },
-  { id: 3, username: 'bob', password: 'bob123', is_admin: false },
+  { id: 1, username: 'admin', password: 'admin123', is_admin: true, disabled: false, created_at: NOW - 120 * 86400e3, updated_at: NOW - 3 * 86400e3 },
+  { id: 2, username: 'alice', password: 'alice123', is_admin: false, disabled: false, created_at: NOW - 90 * 86400e3, updated_at: NOW - 6 * 86400e3 },
+  { id: 3, username: 'bob', password: 'bob123', is_admin: false, disabled: false, created_at: NOW - 60 * 86400e3, updated_at: NOW - 10 * 86400e3 },
 ]
+
+// ---------------------------------------------------------------------------
+// 用户管理 / PAT（spec #111，票 B2b-T3/T4 契约同形）：管理页两卡在 mock 上
+// 走通。PAT 行永不含令牌值——值只在创建响应出现一次（db 只记名/时间行，
+// 与后端「库里只存 SHA-256」对齐）；禁用用户级联删其全部 PAT（踢线语义）。
+// 用户动作（建号/禁用/启用/重置密码/PAT 创建/吊销）同步落审计（ADR-0015
+// 闭环，同机密/审计票 #110 纪律）。
+// ---------------------------------------------------------------------------
+
+/** 用户清单（server users.rs list 同形：含已禁用、按用户名排序、无密码）。 */
+export function listUsers(): UserResponse[] {
+  return [...USERS]
+    .sort((a, b) => a.username.localeCompare(b.username))
+    .map(({ password: _password, ...row }) => row)
+}
+
+/** 全局 admin 判定（server policy.rs RequireGlobalAdmin 同形）。 */
+export function isGlobalAdmin(username: string): boolean {
+  return USERS.find((u) => u.username === username)?.is_admin ?? false
+}
+
+/** 用户名合法性（server validate_new_account 同形：1-64 位字母数字或 `_ . -`）。 */
+export function validUsername(name: string): boolean {
+  return name.length >= 1 && name.length <= 64 && /^[A-Za-z0-9_.-]+$/.test(name)
+}
+
+/** 建号（409 冲突由 handler 裁决；此处只管落行）。 */
+export function createUser(username: string, password: string, isAdmin: boolean): UserResponse {
+  const user: FixtureUser = {
+    id: Math.max(...USERS.map((u) => u.id)) + 1,
+    username,
+    password,
+    is_admin: isAdmin,
+    disabled: false,
+    created_at: Date.now(),
+    updated_at: Date.now(),
+  }
+  USERS.push(user)
+  const { password: _password, ...row } = user
+  return row
+}
+
+/** 禁用/启用（server PATCH 语义：禁用即踢线——session 与 PAT 同删）。返回
+ *  null = 用户不存在。 */
+export function patchUser(name: string, disabled: boolean): UserResponse | null {
+  const user = USERS.find((u) => u.username === name)
+  if (user == null) return null
+  user.disabled = disabled
+  user.updated_at = Date.now()
+  if (disabled) PATS.set(name, []) // 踢线：PAT 同秒全删（server 同事务级联）
+  const { password: _password, ...row } = user
+  return row
+}
+
+/** 代办重置密码（成功 204 由 handler 裁决）。返回 false = 用户不存在。 */
+export function resetUserPassword(name: string, newPassword: string): boolean {
+  const user = USERS.find((u) => u.username === name)
+  if (user == null) return false
+  user.password = newPassword
+  user.updated_at = Date.now()
+  return true
+}
+
+/** PAT 行（无值形态：名/时间/过期——令牌值任何端点不回显）。 */
+export interface FixturePat {
+  id: number
+  name: string
+  expires_at: number | null
+  created_at: number
+}
+
+const PATS = new Map<string, FixturePat[]>([
+  [
+    'admin',
+    [
+      { id: 1, name: 'ci-deploy', expires_at: null, created_at: NOW - 20 * 86400e3 },
+      { id: 2, name: 'nightly-cleanup', expires_at: NOW + 30 * 86400e3, created_at: NOW - 5 * 86400e3 },
+    ],
+  ],
+  ['alice', [{ id: 3, name: 'laptop-cli', expires_at: null, created_at: NOW - 10 * 86400e3 }]],
+])
+
+let nextPatId = 4
+
+/** 某用户的 PAT 清单（owner 本人语义由 handler 守卫；值形态不存在）。 */
+export function patsOf(user: string): FixturePat[] {
+  return PATS.get(user) ?? []
+}
+
+/** 建 PAT 行（handler 生成一次性令牌返回；db 只记行）。 */
+export function addPat(user: string, name: string, expiresAt: number | null): FixturePat {
+  const row: FixturePat = { id: nextPatId++, name, expires_at: expiresAt, created_at: Date.now() }
+  const list = PATS.get(user) ?? []
+  list.push(row)
+  PATS.set(user, list)
+  return row
+}
+
+/** 吊销 PAT（id + 属主双条件——他人的 id 不命中即 404 同形，不暴露存在性）。 */
+export function revokePat(user: string, id: number): FixturePat | null {
+  const list = PATS.get(user) ?? []
+  const row = list.find((p) => p.id === id)
+  if (row == null) return null
+  PATS.set(
+    user,
+    list.filter((p) => p.id !== id),
+  )
+  return row
+}
 
 // ---------------------------------------------------------------------------
 // 项目
@@ -877,7 +992,155 @@ export const AGENTS: AgentResponse[] = [
 ]
 
 // ---------------------------------------------------------------------------
-// 工作区 / 缓存条目（票 #106，M1：构建机详情清理面在 mock 上可体验）。
+// 升级包（spec #111，票 #76/B5-T4 契约同形，ADR-0017）：升级页上传/全量/
+// 单台在 mock 上走通。包名按 ADR-0010 规范解析（版本 + 目标三元组）；窗口
+// 校验（≥ N-1 且 ≤ Server）窗外拒收；全量升级 = 向所有「版本非目标包」的
+// 未停用 Agent 下发（target Agent 自排空进入 draining 阶段——ADR-0017 语义
+// 演示）。上传/删除/升级指令同步落审计。
+// ---------------------------------------------------------------------------
+
+/** Server 版本（窗口上界；fixture Agent 目标版本同源）。 */
+export const SERVER_VERSION: VersionDto = AGENT_VERSION_TARGET
+
+/** 版本比较（a < b）。 */
+function versionLt(a: VersionDto, b: VersionDto): boolean {
+  return a.major !== b.major
+    ? a.major < b.major
+    : a.minor !== b.minor
+      ? a.minor < b.minor
+      : a.patch < b.patch
+}
+
+/** 版本相等（null 版本永不等于任何版本——从未握手的机器总要升级）。 */
+function versionEq(a: VersionDto | null | undefined, b: VersionDto): boolean {
+  return (
+    a != null && a.major === b.major && a.minor === b.minor && a.patch === b.patch
+  )
+}
+
+/** N-1 窗口下界（minor 减一；major 差即窗外——v1 语义够用）。 */
+function windowFloor(): VersionDto {
+  const { major, minor, patch } = SERVER_VERSION
+  return minor > 0 ? { major, minor: minor - 1, patch } : { major: major - 1, minor: 0, patch }
+}
+
+/** 包名 → 确定性 sha256（十六进制 64 位；演示校验和形态，非真哈希）。 */
+function pkgSha(packageName: string): string {
+  const rng = mulberry32([...packageName].reduce((s, c) => s + c.charCodeAt(0), 0))
+  return Array.from({ length: 64 }, () => '0123456789abcdef'[Math.floor(rng() * 16)]).join('')
+}
+
+function pkg(
+  name: string,
+  version: VersionDto,
+  targetOs: string,
+  targetArch: string,
+  sizeMb: number,
+  agoDays: number,
+): UpgradePackageResponse {
+  return {
+    package_name: name,
+    version,
+    target_os: targetOs,
+    target_arch: targetArch,
+    size: Math.round(sizeMb * 1e6),
+    sha256: pkgSha(name),
+    created_at: NOW - agoDays * 86400e3,
+  }
+}
+
+export const UPGRADE_PACKAGES: UpgradePackageResponse[] = [
+  pkg('sisyphus-agent-1.5.0-linux-x86_64.tar.gz', version(1, 5, 0), 'linux', 'x86_64', 18.4, 6),
+  pkg('sisyphus-agent-1.5.0-linux-aarch64.tar.gz', version(1, 5, 0), 'linux', 'aarch64', 17.1, 6),
+  pkg('sisyphus-agent-1.5.0-windows-x86_64.zip', version(1, 5, 0), 'windows', 'x86_64', 19.8, 5),
+  pkg('sisyphus-agent-1.4.3-macos-x86_64.tar.gz', version(1, 4, 3), 'macos', 'x86_64', 16.2, 20),
+]
+
+/** ADR-0010 包名规范：sisyphus-agent-<ver>-<os>-<arch>.<suffix>。 */
+const PKG_NAME_RE =
+  /^sisyphus-agent-(\d+)\.(\d+)\.(\d+)-(linux|macos|windows)-(x86_64|aarch64)\.(?:tar\.gz|zip|tar)$/
+
+/** 上传结果：ok（已落包，含解析出的元数据）| name_invalid（422）| window（409）。 */
+export type UploadPackageResult =
+  | { ok: UpgradePackageResponse }
+  | { error: 'name_invalid' | 'window' }
+
+/** 上传升级包：文件名解析（版本 + 目标三元组）+ 窗口校验（≥ N-1 且 ≤
+ *  Server）+ 落包（同名重传覆盖）。size = 上传字节数。 */
+export function uploadUpgradePackage(packageName: string, size: number): UploadPackageResult {
+  const m = PKG_NAME_RE.exec(packageName)
+  if (m == null) return { error: 'name_invalid' }
+  const version = { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) }
+  const floor = windowFloor()
+  if (versionLt(version, floor) || versionLt(SERVER_VERSION, version)) {
+    return { error: 'window' }
+  }
+  const row: UpgradePackageResponse = {
+    package_name: packageName,
+    version,
+    target_os: m[4] as string,
+    target_arch: m[5] as string,
+    size,
+    sha256: pkgSha(packageName),
+    created_at: Date.now(),
+  }
+  const i = UPGRADE_PACKAGES.findIndex((p) => p.package_name === packageName)
+  if (i >= 0) UPGRADE_PACKAGES[i] = row
+  else UPGRADE_PACKAGES.push(row)
+  return { ok: row }
+}
+
+/** 删除升级包。返回 false = 不存在（handler 404）。 */
+export function deleteUpgradePackage(packageName: string): boolean {
+  const i = UPGRADE_PACKAGES.findIndex((p) => p.package_name === packageName)
+  if (i < 0) return false
+  UPGRADE_PACKAGES.splice(i, 1)
+  return true
+}
+
+/** Agent 收到升级指令的 mock 落定（ADR-0017：Agent 侧自排空 → 下载 → …）：
+ *  排空置位 + 阶段登记 draining（后续阶段演示由人工重载体验，mock 不模拟
+ *  异步推进）。 */
+function applyUpgrade(agent: AgentResponse): void {
+  agent.draining = true
+  agent.upgrade_phase = 'draining'
+  agent.upgrade_error = null
+  agent.updated_at = Date.now()
+}
+
+/** 全量升级（server upgrade_all 同形）：跳过停用与已在目标版本者，其余
+ *  下发（issued）并落 draining。返回 summary + 下发目标名（审计 detail 用）。 */
+export function upgradeAllAgents(
+  pkgRow: UpgradePackageResponse,
+): { issued: number; skipped: number; targets: string[] } {
+  let skipped = 0
+  const targets: string[] = []
+  for (const agent of AGENTS) {
+    if (agent.disabled) continue
+    if (versionEq(agent.agent_version, pkgRow.version)) {
+      skipped += 1
+      continue
+    }
+    applyUpgrade(agent)
+    targets.push(agent.name)
+  }
+  return { issued: targets.length, skipped, targets }
+}
+
+/** 单台升级（server upgrade_one 同形）：返回落定后的 Agent | 'already'
+ *  （已在目标版本，409）| null（Agent 不存在）。 */
+export function upgradeOneAgent(
+  name: string,
+  pkgRow: UpgradePackageResponse,
+): AgentResponse | 'already' | null {
+  const agent = AGENTS.find((a) => a.name === name)
+  if (agent == null) return null
+  if (versionEq(agent.agent_version, pkgRow.version)) return 'already'
+  applyUpgrade(agent)
+  return agent
+}
+
+
 // 按机器名确定性生成（在线机器经通道往返可达；离线机器 handler 层 409，
 // 不会走到这里）。
 // ---------------------------------------------------------------------------

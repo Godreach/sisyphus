@@ -1,109 +1,89 @@
-// Agent 升级页行为测试（ADR-0017，票 B5-T4）：升级端点已交付——包上传 +
-// 全量/单台升级指令 + 排空/升级阶段列真值。只测外部行为，API 层以 fetch
-// mock 驱动。视图在 onMounted 即发 Agent 清单 + 升级包清单请求：mount 须在
-// 设置 fetch mock 之后。
-// - 包上传：NUpload 选文件即传 → POST /upgrade-packages（X-Sisyphus-Filename
-//   头 + body；NUpload 内部 input[type=file] 注入 files + change 驱动）
-// - 全量升级：选包 + 按钮 → POST /agents/upgrade → 受理摘要
-// - 单台升级：选 Agent + 选包 + 按钮 → POST /agents/{name}/upgrade
-// - 排空/升级阶段列取 Agent 清单真值（draining / upgrade_phase → NProgress）
-// #95: NDataTable 迁移后行经 .n-data-table-tr 定位；成功反馈 NMessage
-// teleport 到 body——文案经 document.body 断言（与 AgentListView.spec 同纪律）。
+// Agent 升级页行为测试（票 #111 定稿铺开，spec #100；ADR-0017）。
+// 数据驱动：MSW node 模式（ADR-0024 单一缝，淘汰旧手写 fetch mock 双份
+// 维护）——组件经真实 http client 打 src/mocks handlers（fixture 即测试
+// 数据）；确定性场景（403/空态/阶段真值）用 server.use 覆盖。只测外部行为
+// （用户可见状态、DOM 事件、网络请求形态断言）。
+//
+// 覆盖面：首载双清单（包行 + Agent 行 + 胶囊徽章）、升级阶段列真值
+// （downloading 进度条 50% / fallback 红条 / 排空「是」）、包上传
+// （X-Sisyphus-Filename 头 + raw body + 新行入列 + 422 文件名非法）、
+// 全量升级（POST /agents/upgrade 受理摘要 issued/skipped）、单台升级
+// （含 409 已在目标版本 + M7 深链 ?agent= 预选）、删除包、403 退化态、
+// 空态。
+//
+// 共享 db 注意：全量/单台升级会落定 fixture Agent 的 draining/阶段（模块级
+// 可变态）——命令型用例排在读断言之后，读断言所需状态一律经 server.use
+// 覆盖注入，不受前序用例影响。
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import { NDataTable, NMessageProvider, NProgress, NTag } from 'naive-ui'
+import { NMessageProvider, NSelect } from 'naive-ui'
 import { defineComponent, h } from 'vue'
+import { http, HttpResponse } from 'msw'
 
 import AgentUpgradeView from '@/views/AgentUpgradeView.vue'
 import { i18n, setLocale } from '@/i18n'
-import type { AgentResponse, UpgradePackageResponse } from '@/api/types'
+import { server } from '@/mocks/node'
+import type { AgentResponse } from '@/api/types'
 
-function jsonResponse(status: number, body: unknown): Response {
-  const headers = new Headers({ 'Content-Type': 'application/json' })
-  return new Response(JSON.stringify(body), { status, headers })
-}
+/** fixture 首包（加载后默认选中的目标升级包）。 */
+const DEFAULT_PKG = 'sisyphus-agent-1.5.0-linux-x86_64.tar.gz'
 
+/** 受控 Agent（读断言用 server.use 覆盖注入，不依赖共享 fixture 状态）。 */
 function agent(name: string, overrides: Partial<AgentResponse> = {}): AgentResponse {
   return {
     name,
-    online: false,
+    online: true,
     disabled: false,
-    system_labels: ['sisyphus/os=linux'],
+    system_labels: ['linux'],
     custom_labels: [],
-    max_concurrency: 1,
+    max_concurrency: 2,
     active_jobs: 0,
-    last_seen_at: null,
-    agent_version: null,
+    last_seen_at: 1,
+    disk_usage: null,
+    agent_version: { major: 1, minor: 4, patch: 0 },
     version_compatible: true,
     draining: false,
     upgrade_phase: null,
     upgrade_error: null,
-    cpu_usage: 20,
-    memory_usage: 35,
+    cpu_usage: 10,
+    memory_usage: 20,
     created_at: 0,
     updated_at: 0,
     ...overrides,
   }
 }
 
-function pkg(name: string, overrides: Partial<UpgradePackageResponse> = {}): UpgradePackageResponse {
-  return {
-    package_name: name,
-    version: { major: 1, minor: 0, patch: 0 },
-    target_os: 'linux',
-    target_arch: 'x86_64',
-    size: 100,
-    sha256: 'abc',
-    created_at: 0,
-    ...overrides,
-  }
-}
-
 /** 包装组件：NMessageProvider + AgentUpgradeView，保证 useMessage 注入可用。 */
-const UpgradeWrapper = defineComponent({
-  name: 'UpgradeWrapper',
+const Host = defineComponent({
+  name: 'UpgradeHost',
   setup(_, { attrs }) {
     return () => h(NMessageProvider, () => h(AgentUpgradeView, { ...attrs }))
   },
 })
 
-describe('AgentUpgradeView 升级端点已交付', () => {
+describe('AgentUpgradeView 包上传 + 全量/单台升级 + 排空阶段列（#111 定稿）', () => {
   let pinia: Pinia
   let router: Router
   let wrapper: VueWrapper | null = null
 
-  const routes = new Map<string, Response>()
-  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input)
-    const method = (init?.method ?? 'GET').toUpperCase()
-    let best: { len: number; res: Response } | null = null
-    for (const [key, res] of routes) {
-      const [m, prefix] = [key.slice(0, key.indexOf(' ')), key.slice(key.indexOf(' ') + 1)]
-      if (method !== m.toUpperCase()) continue
-      if (url.startsWith(prefix) && (best == null || prefix.length > best.len)) {
-        best = { len: prefix.length, res }
-      }
-    }
-    return best
-      ? best.res
-      : jsonResponse(404, { code: 'NOT_FOUND', message: `no mock for ${method} ${url}` })
+  /** 经 MSW 观测到的请求（method + path + body + 关键头）。 */
+  interface Observed {
+    method: string
+    path: string
+    body: unknown
+    filename: string | null
+  }
+  let requests: Observed[]
+
+  beforeAll(() => {
+    server.listen({ onUnhandledRequest: 'error' })
   })
-
-  function setRoute(method: string, prefix: string, res: Response): void {
-    routes.set(`${method.toUpperCase()} ${prefix}`, res)
-  }
-
-  function mountView(): VueWrapper {
-    wrapper = mount(UpgradeWrapper, { global: { plugins: [pinia, router, i18n] } })
-    return wrapper
-  }
 
   beforeEach(async () => {
     setLocale('zh-CN')
-    routes.clear()
     pinia = createPinia()
     setActivePinia(pinia)
     router = createRouter({
@@ -112,180 +92,264 @@ describe('AgentUpgradeView 升级端点已交付', () => {
     })
     await router.push('/admin/upgrade')
     await router.isReady()
-    globalThis.fetch = fetchMock
+    requests = []
+    server.events.on('request:start', ({ request }) => {
+      void request
+        .clone()
+        .json()
+        .then(
+          (body) =>
+            requests.push({
+              method: request.method,
+              path: new URL(request.url).pathname,
+              body,
+              filename: request.headers.get('x-sisyphus-filename'),
+            }),
+          () =>
+            requests.push({
+              method: request.method,
+              path: new URL(request.url).pathname,
+              body: null,
+              filename: request.headers.get('x-sisyphus-filename'),
+            }),
+        )
+    })
   })
 
   afterEach(() => {
     wrapper?.unmount()
     wrapper = null
+    document.body.innerHTML = ''
     vi.restoreAllMocks()
+    server.resetHandlers()
+    server.events.removeAllListeners()
   })
 
-  it('加载 Agent 清单 + 升级包清单（mount 即两个 GET，两表齐渲染）', async () => {
-    setRoute('GET', '/api/v1/agents', jsonResponse(200, [agent('linux-1', { online: true })]))
-    setRoute('GET', '/api/v1/upgrade-packages', jsonResponse(200, [pkg('sisyphus-agent-1.0.0-linux-x86_64.tar.gz')]))
-    const w = mountView()
-    await vi.waitFor(() =>
-      expect(w.findAll('.upgrade-agents-table .n-data-table-tbody .n-data-table-tr')).toHaveLength(1),
-    )
-    await vi.waitFor(() =>
-      expect(w.findAll('.upgrade-packages-table .n-data-table-tbody .n-data-table-tr')).toHaveLength(1),
-    )
-
-    // 升级包清单区 + Agent 状态区各一表。
-    expect(w.text()).toContain('sisyphus-agent-1.0.0-linux-x86_64.tar.gz')
-    expect(w.text()).toContain('linux-1')
-    // 平板窄视口：两表各设最小表宽（包清单 / Agent 状态），容器更窄时横向滚动。
-    const scrollXs = w.findAllComponents(NDataTable).map((table) => table.props('scrollX'))
-    expect(scrollXs).toEqual([680, 760])
-    // 两个 GET 都发出。
-    const urls = fetchMock.mock.calls.map((c) => String(c[0]))
-    expect(urls.some((u) => u === '/api/v1/agents')).toBe(true)
-    expect(urls.some((u) => u === '/api/v1/upgrade-packages')).toBe(true)
+  afterAll(() => {
+    server.close()
   })
 
-  it('排空/升级阶段列取真值：draining → 是，upgrade_phase=downloading → NProgress 50% + 下载中', async () => {
-    setRoute(
-      'GET',
-      '/api/v1/agents',
-      jsonResponse(200, [agent('linux-1', { online: true, draining: true, upgrade_phase: 'downloading' })]),
-    )
-    setRoute('GET', '/api/v1/upgrade-packages', jsonResponse(200, []))
-    const w = mountView()
-    await vi.waitFor(() =>
-      expect(w.findAll('.upgrade-agents-table .n-data-table-tbody .n-data-table-tr')).toHaveLength(1),
-    )
+  function mountView(): VueWrapper {
+    wrapper = mount(Host, { global: { plugins: [pinia, router, i18n] } })
+    return wrapper
+  }
 
-    // 状态列 NTag；排空列 = 是；阶段列 = NProgress(50%) + 阶段文案。
-    const cells = w.findAll('.upgrade-agents-table .n-data-table-tbody .n-data-table-tr')[0]!.findAll('td')
-    // 列序：Agent / 状态 / 版本 / 排空 / 升级阶段
-    expect(cells[3]!.text()).toBe('是')
-    expect(cells[4]!.text()).toContain('下载中')
-    const progress = w.findComponent(NProgress)
-    expect(progress.props('percentage')).toBe(50)
-    expect(progress.props('status')).toBe('default')
-    // 状态徽标沿用列表页同源色标（NTag）：在线 + 排空 → 派生为「排空」黄标
-    //（agentBadgeState 优先级 draining > online，ADR-0017）。
-    expect(w.findComponent(NTag).props('type')).toBe('warning')
-    expect(w.findComponent(NTag).text()).toBe('排空')
+  function requestsOf(method: string, path: string): Observed[] {
+    return requests.filter((r) => r.method === method && r.path === path)
+  }
+
+  /** 等待：fixture 首包行渲染完成（双清单加载完毕的 a11y 锚）。 */
+  async function waitLoaded(w: VueWrapper): Promise<void> {
+    await vi.waitFor(() =>
+      expect(w.find(`[data-testid="upgrade-package-${DEFAULT_PKG}"]`).exists()).toBe(true),
+    )
+  }
+
+  it('首载双清单：包行 + Agent 行（计数副标/胶囊徽章/默认选中首包）', async () => {
+    const w = mountView()
+    await waitLoaded(w)
+
+    // fixture：4 个升级包 + 7 台构建机。
+    expect(w.findAll('.upgrade-pkg-row')).toHaveLength(4)
+    await vi.waitFor(() => expect(w.findAll('.upgrade-agent-row')).toHaveLength(7))
+    expect(w.text()).toContain('共 4 个包')
+    expect(w.text()).toContain('共 7 台构建机')
+
+    // 徽章取真值：build-06 在线且排空 → 「排空」；build-07 版本不兼容 → 红标。
+    expect(w.find('[data-testid="upgrade-agent-build-06"] .badge').classes()).toContain('draining')
+    expect(w.find('[data-testid="upgrade-agent-build-06"] .badge').text()).toBe('排空')
+    expect(w.find('[data-testid="upgrade-agent-build-07"] .badge').classes()).toContain('failed')
+    expect(w.find('[data-testid="upgrade-agent-build-07"] .badge').text()).toBe('版本不兼容')
+
+    // 默认选中首包（全量/单台指令的目标包）。
+    const selects = w.findAllComponents(NSelect)
+    expect(selects[0]!.props('value')).toBe(DEFAULT_PKG)
+    expect(selects[1]!.props('value')).toBe('build-01')
+
+    // 网络形态：mount 即两个 GET。
+    expect(requestsOf('GET', '/api/v1/agents')).toHaveLength(1)
+    expect(requestsOf('GET', '/api/v1/upgrade-packages')).toHaveLength(1)
   })
 
-  it('fallback 阶段 → NProgress error 红条（已退回旧版本）', async () => {
-    setRoute(
-      'GET',
-      '/api/v1/agents',
-      jsonResponse(200, [agent('linux-1', { online: true, upgrade_phase: 'fallback' })]),
+  it('升级阶段列取真值：downloading → 进度条 50% + 下载中；fallback → 红条 100% + 退回文案；排空列「是」', async () => {
+    server.use(
+      http.get('/api/v1/agents', () =>
+        HttpResponse.json([
+          agent('demo-1', { draining: true, upgrade_phase: 'downloading' }),
+          agent('demo-2', { upgrade_phase: 'fallback', upgrade_error: 'sha256 校验失败（fixture 模拟）' }),
+        ]),
+      ),
     )
-    setRoute('GET', '/api/v1/upgrade-packages', jsonResponse(200, []))
     const w = mountView()
-    await vi.waitFor(() =>
-      expect(w.findAll('.upgrade-agents-table .n-data-table-tbody .n-data-table-tr')).toHaveLength(1),
-    )
+    await vi.waitFor(() => expect(w.findAll('.upgrade-agent-row')).toHaveLength(2))
 
-    expect(w.text()).toContain('已退回旧版本')
-    const progress = w.findComponent(NProgress)
-    expect(progress.props('percentage')).toBe(100)
-    expect(progress.props('status')).toBe('error')
+    const row1 = w.find('[data-testid="upgrade-agent-demo-1"]')
+    expect(row1.text()).toContain('下载中')
+    expect(row1.text()).toContain('是') // 排空列
+    const fill1 = row1.get('.usage-row .fill')
+    expect(fill1.attributes('style')).toContain('width: 50%')
+    expect(fill1.classes()).not.toContain('red')
+
+    const row2 = w.find('[data-testid="upgrade-agent-demo-2"]')
+    expect(row2.text()).toContain('已退回旧版本')
+    const fill2 = row2.get('.usage-row .fill')
+    expect(fill2.attributes('style')).toContain('width: 100%')
+    expect(fill2.classes()).toContain('red')
+    // upgrade_error 就地灰字提示。
+    expect(row2.text()).toContain('sha256 校验失败')
   })
 
-  it('包上传：NUpload 选文件即传 → POST /upgrade-packages（X-Sisyphus-Filename 头 + body）', async () => {
-    setRoute('GET', '/api/v1/agents', jsonResponse(200, [agent('linux-1')]))
-    setRoute('GET', '/api/v1/upgrade-packages', jsonResponse(200, []))
-    setRoute(
-      'POST',
-      '/api/v1/upgrade-packages',
-      jsonResponse(201, pkg('sisyphus-agent-1.0.0-linux-x86_64.tar.gz')),
-    )
+  it('包上传：文件选择即传 → POST /upgrade-packages（X-Sisyphus-Filename 头 + raw body）+ 新行入列', async () => {
     const w = mountView()
-    await vi.waitFor(() =>
-      expect(w.findAll('.upgrade-agents-table .n-data-table-tbody .n-data-table-tr')).toHaveLength(1),
-    )
+    await waitLoaded(w)
 
-    // NUpload 内部 input[type=file]：注入 files + 派发 change 即触发 custom-request。
+    // 新包名（fixture 未有；上传后入列）。
     const input = w.get('input[type="file"]').element as HTMLInputElement
-    const file = new File(['x'], 'sisyphus-agent-1.0.0-linux-x86_64.tar.gz', { type: 'application/octet-stream' })
+    const file = new File(['pkg-bytes'], 'sisyphus-agent-1.4.4-linux-x86_64.tar.gz', {
+      type: 'application/octet-stream',
+    })
     Object.defineProperty(input, 'files', { value: [file], configurable: true })
     await input.dispatchEvent(new Event('change'))
 
-    // 成功 toast（NMessage teleport 到 body）。
+    // 网络形态：包名在 X-Sisyphus-Filename 头、body 为原始字节（长度 10）。
+    await vi.waitFor(() => {
+      const post = requestsOf('POST', '/api/v1/upgrade-packages').at(-1)
+      expect(post).toBeTruthy()
+      expect(post!.filename).toBe('sisyphus-agent-1.4.4-linux-x86_64.tar.gz')
+    })
     await vi.waitFor(() => expect(document.body.textContent).toContain('已上传'))
-
-    const uploadCall = fetchMock.mock.calls.find(
-      (c) => String(c[0]) === '/api/v1/upgrade-packages' && (c[1]?.method ?? 'POST') === 'POST',
+    await vi.waitFor(() =>
+      expect(w.find('[data-testid="upgrade-package-sisyphus-agent-1.4.4-linux-x86_64.tar.gz"]').exists()).toBe(true),
     )
-    expect(uploadCall).toBeTruthy()
-    expect(uploadCall![1]!.headers).toMatchObject({ 'X-Sisyphus-Filename': 'sisyphus-agent-1.0.0-linux-x86_64.tar.gz' })
-    expect(uploadCall![1]!.body).toBe(file)
+
+    // 收尾：API 直删（恢复共享 fixture，本用例不留痕）。
+    await fetch('/api/v1/upgrade-packages/sisyphus-agent-1.4.4-linux-x86_64.tar.gz', { method: 'DELETE' })
   })
 
-  it('全量升级：选包 + 按钮 → POST /agents/upgrade → 受理摘要', async () => {
-    setRoute('GET', '/api/v1/agents', jsonResponse(200, [agent('linux-1')]))
-    setRoute(
-      'GET',
-      '/api/v1/upgrade-packages',
-      jsonResponse(200, [pkg('sisyphus-agent-1.0.0-linux-x86_64.tar.gz')]),
-    )
-    setRoute(
-      'POST',
-      '/api/v1/agents/upgrade',
-      jsonResponse(202, { package_name: 'sisyphus-agent-1.0.0-linux-x86_64.tar.gz', issued: 1, skipped: 0 }),
-    )
+  it('包上传 422（文件名不可解析）→ 卡内就地报错', async () => {
     const w = mountView()
-    await vi.waitFor(() =>
-      expect(w.findAll('.upgrade-packages-table .n-data-table-tbody .n-data-table-tr')).toHaveLength(1),
-    )
+    await waitLoaded(w)
+
+    const input = w.get('input[type="file"]').element as HTMLInputElement
+    const file = new File(['x'], 'not-a-package.bin', { type: 'application/octet-stream' })
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    await input.dispatchEvent(new Event('change'))
+
+    await vi.waitFor(() => expect(w.find('.upgrade-card-alert').exists()).toBe(true))
+    expect(w.text()).toContain('不可解析')
+  })
+
+  it('全量升级：默认选包 + 按钮 → POST /agents/upgrade → 受理摘要（issued/skipped 真值）', async () => {
+    const w = mountView()
+    await waitLoaded(w)
 
     await w.get('button[name="upgrade-all"]').trigger('click')
-    await vi.waitFor(() => expect(document.body.textContent).toContain('已下发升级指令'))
 
-    const call = fetchMock.mock.calls.find(
-      (c) => String(c[0]) === '/api/v1/agents/upgrade' && (c[1]?.method ?? 'POST') === 'POST',
-    )
-    expect(call).toBeTruthy()
-    expect(JSON.parse(call![1]!.body as string)).toEqual({ package_name: 'sisyphus-agent-1.0.0-linux-x86_64.tar.gz' })
-  })
-
-  it('单台升级：选 Agent + 选包 + 按钮 → POST /agents/{name}/upgrade', async () => {
-    setRoute('GET', '/api/v1/agents', jsonResponse(200, [agent('linux-1', { online: true })]))
-    setRoute(
-      'GET',
-      '/api/v1/upgrade-packages',
-      jsonResponse(200, [pkg('sisyphus-agent-1.0.0-linux-x86_64.tar.gz')]),
-    )
-    setRoute(
-      'POST',
-      '/api/v1/agents/linux-1/upgrade',
-      jsonResponse(202, agent('linux-1', { online: true, draining: true, upgrade_phase: 'draining' })),
-    )
-    const w = mountView()
+    await vi.waitFor(() => {
+      const post = requestsOf('POST', '/api/v1/agents/upgrade').at(-1)
+      expect(post).toBeTruthy()
+      expect(post!.body).toEqual({ package_name: DEFAULT_PKG })
+    })
+    // fixture 真值：未停用且非 1.5.0 的 4 台下发（build-02/04/06/07），
+    // 已在目标版本的 2 台跳过（build-01/03）。
     await vi.waitFor(() =>
-      expect(w.findAll('.upgrade-agents-table .n-data-table-tbody .n-data-table-tr')).toHaveLength(1),
+      expect(document.body.textContent).toContain('下发 4 台，跳过 2 台'),
     )
-
-    await w.get('button[name="upgrade-one"]').trigger('click')
-    await vi.waitFor(() => expect(document.body.textContent).toContain('已向 linux-1 下发升级指令'))
-
-    expect(
-      fetchMock.mock.calls.some(
-        (c) => String(c[0]) === '/api/v1/agents/linux-1/upgrade' && (c[1]?.method ?? 'POST') === 'POST',
-      ),
-    ).toBe(true)
+    // 下发目标落定 draining 阶段（刷新后可见）。
+    await vi.waitFor(() =>
+      expect(w.find('[data-testid="upgrade-agent-build-02"]').text()).toContain('排空'),
+    )
   })
 
-  it('403（非全局 admin）→ admin-only 退化态，不渲染动作/表格', async () => {
-    setRoute('GET', '/api/v1/agents', jsonResponse(403, { code: 'FORBIDDEN', message: '非全局管理员' }))
-    setRoute('GET', '/api/v1/upgrade-packages', jsonResponse(403, { code: 'FORBIDDEN', message: '非全局管理员' }))
+  it('单台升级：409（已在目标版本）→ 卡内就地报错', async () => {
+    const w = mountView()
+    await waitLoaded(w)
+
+    // 默认目标 build-01 已在 1.5.0（fixture）→ 409 就地报错，不 toast。
+    await w.get('button[name="upgrade-one"]').trigger('click')
+    await vi.waitFor(() => {
+      expect(requestsOf('POST', '/api/v1/agents/build-01/upgrade')).toHaveLength(1)
+    })
+    await vi.waitFor(() => expect(w.find('.upgrade-card-alert').exists()).toBe(true))
+    expect(w.text()).toContain('已在目标版本')
+  })
+
+  it('单台升级（M7 深链预选）：?agent=build-07 → 直发该机器 + 下发后落定排空阶段', async () => {
+    await router.push({ path: '/admin/upgrade', query: { agent: 'build-07' } })
+    await router.isReady()
+    const w = mountView()
+    await waitLoaded(w)
+
+    // 深链预选：单台目标 = build-07（版本不兼容机器，M7 入口直达）。
+    expect(w.findAllComponents(NSelect)[1]!.props('value')).toBe('build-07')
+    await w.get('button[name="upgrade-one"]').trigger('click')
+
+    await vi.waitFor(() => {
+      expect(requestsOf('POST', '/api/v1/agents/build-07/upgrade')).toHaveLength(1)
+    })
+    await vi.waitFor(() => expect(document.body.textContent).toContain('已向 build-07 下发升级指令'))
+    await vi.waitFor(() =>
+      expect(w.find('[data-testid="upgrade-agent-build-07"]').text()).toContain('排空'),
+    )
+  })
+
+  it('删除包：NPopconfirm 确认 → DELETE + 刷新后行消失', async () => {
+    // 造一个可删条目（API 直传——命令型用例专用名，不碰 fixture 既有包；
+    // 包名在 X-Sisyphus-Filename 头、字节在 raw body）。
+    await fetch('/api/v1/upgrade-packages', {
+      method: 'POST',
+      headers: { 'X-Sisyphus-Filename': 'sisyphus-agent-1.4.4-macos-aarch64.tar.gz' },
+      body: 'victim-bytes',
+    })
+
+    const w = mountView()
+    await waitLoaded(w)
+    await vi.waitFor(() =>
+      expect(w.find('[data-testid="upgrade-package-sisyphus-agent-1.4.4-macos-aarch64.tar.gz"]').exists()).toBe(true),
+    )
+
+    await w.get('[data-testid="upgrade-package-delete-sisyphus-agent-1.4.4-macos-aarch64.tar.gz"]').trigger('click')
+    await vi.waitFor(() => expect(document.querySelector('.n-popconfirm')).toBeTruthy())
+    const btn = [...document.querySelectorAll('.n-popconfirm button')].find(
+      (b) => b.textContent?.trim() === '确认',
+    )
+    expect(btn, 'popconfirm 确认按钮').toBeTruthy()
+    await (btn as HTMLElement).click()
+
+    await vi.waitFor(() => {
+      expect(
+        requestsOf('DELETE', '/api/v1/upgrade-packages/sisyphus-agent-1.4.4-macos-aarch64.tar.gz'),
+      ).toHaveLength(1)
+    })
+    await vi.waitFor(() => expect(document.body.textContent).toContain('升级包已删除'))
+    await vi.waitFor(() =>
+      expect(w.find('[data-testid="upgrade-package-sisyphus-agent-1.4.4-macos-aarch64.tar.gz"]').exists()).toBe(false),
+    )
+  })
+
+  it('403（非全局 admin）→ admin-only 退化态，不渲染动作/清单', async () => {
+    server.use(
+      http.get('/api/v1/agents', () =>
+        HttpResponse.json({ code: 'FORBIDDEN', message: '非全局管理员' }, { status: 403 }),
+      ),
+      http.get('/api/v1/upgrade-packages', () =>
+        HttpResponse.json({ code: 'FORBIDDEN', message: '非全局管理员' }, { status: 403 }),
+      ),
+    )
     const w = mountView()
     await vi.waitFor(() => expect(w.text()).toContain('仅全局管理员可见'))
-    expect(w.find('.n-card').exists()).toBe(false)
-    expect(w.find('.n-data-table').exists()).toBe(false)
+    expect(w.find('.sisy-card').exists()).toBe(false)
+    expect(w.find('button[name="upgrade-all"]').exists()).toBe(false)
   })
 
-  it('无 Agent → 空态提示', async () => {
-    setRoute('GET', '/api/v1/agents', jsonResponse(200, []))
-    setRoute('GET', '/api/v1/upgrade-packages', jsonResponse(200, []))
+  it('无 Agent / 无包 → 空态提示', async () => {
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json([])),
+      http.get('/api/v1/upgrade-packages', () => HttpResponse.json([])),
+    )
     const w = mountView()
     await vi.waitFor(() => expect(w.find('.n-empty').exists()).toBe(true))
     expect(w.text()).toContain('暂无构建机')
+    expect(w.text()).toContain('暂无已上传升级包')
   })
 })

@@ -284,7 +284,8 @@
     "diskUnreported": "—",
     "machineList": "构建机列表",
     "machineCount": "共 {n} 台构建机",
-    "detailAction": "详情"
+    "detailAction": "详情",
+    "upgradeAction": "去升级"
   },
   "nav": {
     "main": "主区",
@@ -514,7 +515,10 @@
     "stageDownloading": "下载中",
     "stageSwapping": "换入中",
     "stageRestarting": "重启中",
-    "stageFallback": "已退回旧版本"
+    "stageFallback": "已退回旧版本",
+    "packagesCount": "共 {n} 个包",
+    "agentsCount": "共 {n} 台构建机",
+    "retry": "重试"
   },
   "users": {
     "title": "用户",
@@ -543,7 +547,9 @@
     "resetting": "重置中…",
     "resetSubmit": "重置",
     "passwordReset": "密码已重置",
-    "empty": "暂无用户"
+    "empty": "暂无用户",
+    "count": "共 {n} 个用户",
+    "retry": "重试"
   },
   "tokens": {
     "title": "个人访问令牌",
@@ -565,7 +571,9 @@
     "create": "创建",
     "creating": "创建中…",
     "createdMsg": "令牌已创建",
-    "empty": "暂无令牌"
+    "empty": "暂无令牌",
+    "count": "共 {n} 个令牌",
+    "retry": "重试"
   },
   "editor": {
     "loadError": "加载 pipeline 定义失败",

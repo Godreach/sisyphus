@@ -284,7 +284,8 @@
     "diskUnreported": "—",
     "machineList": "Machine list",
     "machineCount": "{n} machines in total",
-    "detailAction": "Details"
+    "detailAction": "Details",
+    "upgradeAction": "Upgrade"
   },
   "nav": {
     "main": "Main",
@@ -514,7 +515,10 @@
     "stageDownloading": "downloading",
     "stageSwapping": "swapping",
     "stageRestarting": "restarting",
-    "stageFallback": "rolled back to old version"
+    "stageFallback": "rolled back to old version",
+    "packagesCount": "{n} package(s)",
+    "agentsCount": "{n} machine(s)",
+    "retry": "Retry"
   },
   "users": {
     "title": "Users",
@@ -543,7 +547,9 @@
     "resetting": "Resetting…",
     "resetSubmit": "Reset",
     "passwordReset": "Password has been reset",
-    "empty": "No users yet"
+    "empty": "No users yet",
+    "count": "{n} user(s)",
+    "retry": "Retry"
   },
   "tokens": {
     "title": "Personal access tokens",
@@ -565,7 +571,9 @@
     "create": "Create",
     "creating": "Creating…",
     "createdMsg": "Token created",
-    "empty": "No tokens yet"
+    "empty": "No tokens yet",
+    "count": "{n} token(s)",
+    "retry": "Retry"
   },
   "editor": {
     "loadError": "Failed to load pipeline definition",
