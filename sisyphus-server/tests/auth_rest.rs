@@ -12,6 +12,9 @@ use common::{
 
 const SETUP_BODY: &str = r#"{ "username": "admin", "password": "admin-password-1" }"#;
 const LOGIN_BODY: &str = r#"{ "username": "admin", "password": "admin-password-1" }"#;
+/// 登录勾选「保持登录」（票 #114）：remember_me=true → 30 天持久 cookie。
+const LOGIN_REMEMBER_BODY: &str =
+    r#"{ "username": "admin", "password": "admin-password-1", "remember_me": true }"#;
 
 /// 读响应 Set-Cookie 原文（属性断言用）。
 fn set_cookie(resp: &axum::response::Response) -> String {
@@ -35,6 +38,30 @@ fn cookie_of_setcookie_style(set_cookie: &str) -> String {
         .and_then(|kv| kv.split_once('='))
         .map(|(_, v)| v.to_string())
         .expect("cookie 键值对")
+}
+
+/// 会话行快照（created_at / expires_at / remember_me，票 #114 测试用）。
+struct SessionRowSnapshot {
+    created_at: i64,
+    expires_at: i64,
+    remember_me: bool,
+}
+
+/// 按 cookie 里的 session id 值查会话行（id 哈希 = SHA-256(session_id)）。
+async fn session_row(app: &TestApp, session_id: &str) -> SessionRowSnapshot {
+    let id_hash = sisyphus_server::auth::session_id_hash(session_id);
+    let (created_at, expires_at, remember_me): (i64, i64, i64) = sqlx::query_as(
+        "SELECT created_at, expires_at, remember_me FROM sessions WHERE id_hash = ?",
+    )
+    .bind(&id_hash)
+    .fetch_one(&app.pool)
+    .await
+    .expect("查 session 行");
+    SessionRowSnapshot {
+        created_at,
+        expires_at,
+        remember_me: remember_me != 0,
+    }
 }
 
 /// 空库 setup 建首个全局 admin；用户表非空后一律 404（不暴露状态）。
@@ -132,7 +159,12 @@ async fn login_sets_cookie_and_wrong_credentials_unified_401() {
     for attr in ["HttpOnly", "SameSite=Lax", "Path=/"] {
         assert!(cookie.contains(attr), "缺属性 {attr}：{cookie}");
     }
-    assert!(cookie.contains("Max-Age=604800"), "7 天对齐：{cookie}");
+    // 缺省登录（未带 remember_me）为会话级 cookie：无 Max-Age，关浏览器即失效
+    //（票 #114）。
+    assert!(
+        !cookie.contains("Max-Age"),
+        "缺省登录应无 Max-Age（会话级 cookie）：{cookie}"
+    );
     assert!(!cookie.contains("Secure"), "v1 不设 Secure：{cookie}");
     let session_id = cookie
         .split(';')
@@ -141,6 +173,15 @@ async fn login_sets_cookie_and_wrong_credentials_unified_401() {
         .map(|(_, v)| v)
         .expect("cookie 键值对");
     assert_eq!(session_id.len(), 43, "32 字节 base64url 无填充");
+
+    // 缺省会话行：7 天滑动 TTL + remember_me=0（票 #114）。
+    let row = session_row(&app, session_id).await;
+    assert_eq!(
+        row.expires_at - row.created_at,
+        sisyphus_server::auth::SESSION_TTL_MS,
+        "缺省登录服务端 7 天 TTL"
+    );
+    assert!(!row.remember_me, "缺省登录 remember_me=false");
 
     // 错密码与未知用户：同一 401 形态（不区分两者存在性）。
     for body in [
@@ -160,6 +201,61 @@ async fn login_sets_cookie_and_wrong_credentials_unified_401() {
     // 请求体非法 JSON：422 校验形态（与业务端点一致）。
     let resp = post(&app, "/api/v1/auth/login", "{ not json").await;
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// remember_me=true（票 #114）：30 天持久 cookie（Max-Age=2592000）+ 服务端
+/// 30 天滑动；中间件续发刷新 Max-Age 并按 30 天滑动。审计 login_success 不受
+/// 影响（成功即记，与 remember_me 无关）。
+#[tokio::test]
+async fn login_remember_me_sets_30day_persistent_session() {
+    let app = test_app().await;
+    post(&app, "/api/v1/auth/setup", SETUP_BODY).await;
+
+    let resp = post(&app, "/api/v1/auth/login", LOGIN_REMEMBER_BODY).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cookie = set_cookie(&resp);
+    assert!(
+        cookie.contains("Max-Age=2592000"),
+        "remember_me=true 应带 30 天 Max-Age（持久 cookie）：{cookie}"
+    );
+    for attr in ["HttpOnly", "SameSite=Lax", "Path=/"] {
+        assert!(cookie.contains(attr), "缺属性 {attr}：{cookie}");
+    }
+    let session_id = cookie_of_setcookie_style(&cookie);
+
+    // 服务端行：30 天 TTL + remember_me=1。
+    let row = session_row(&app, &session_id).await;
+    assert_eq!(
+        row.expires_at - row.created_at,
+        sisyphus_server::auth::REMEMBER_ME_TTL_MS,
+        "remember_me=true 服务端 30 天 TTL"
+    );
+    assert!(row.remember_me, "remember_me=true 应落库");
+
+    // 审计 login_success 已记（与 remember_me 无关）。
+    let login_audits: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE event_type = 'login_success'")
+            .fetch_one(&app.pool)
+            .await
+            .expect("查审计");
+    assert_eq!(login_audits, 1, "登录成功应记一次 login_success");
+
+    // 中间件续发：认证响应刷新 30 天 Max-Age + 行按 30 天滑动。
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let resp = me(&app, &cookie).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let renewed = set_cookie(&resp);
+    assert!(
+        renewed.contains("Max-Age=2592000"),
+        "持久会话续发应刷新 30 天 Max-Age：{renewed}"
+    );
+    let row_after = session_row(&app, &session_id).await;
+    assert!(
+        row_after.expires_at > row.expires_at,
+        "持久会话应按 30 天滑动：{} -> {}",
+        row.expires_at,
+        row_after.expires_at
+    );
 }
 
 /// GET /auth/me：带 cookie 返回当前用户；无/坏 cookie 401。
@@ -296,12 +392,13 @@ async fn session_slides_on_auth_and_expired_fails() {
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let resp = me(&app, &cookie).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    // 浏览器侧同步滑动：认证响应续发同值 cookie（刷新 Max-Age）。
+    // 浏览器侧同步滑动：认证响应续发同值 cookie。缺省（未勾选 remember_me）
+    // 为会话级 cookie，续发不带 Max-Age（票 #114）。
     let renewed = set_cookie(&resp);
     assert!(renewed.starts_with(&cookie), "续发同值 cookie：{renewed}");
     assert!(
-        renewed.contains("Max-Age=604800"),
-        "续发刷新存活期：{renewed}"
+        !renewed.contains("Max-Age"),
+        "会话级会话续发不带 Max-Age：{renewed}"
     );
     let expires_after: i64 =
         sqlx::query_scalar("SELECT expires_at FROM sessions WHERE id_hash = ?")

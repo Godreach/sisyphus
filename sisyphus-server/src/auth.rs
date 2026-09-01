@@ -33,13 +33,29 @@ use crate::store::StoreError;
 
 /// 会话 cookie 名（固定，ADR-0014）。
 pub const SESSION_COOKIE_NAME: &str = "sisyphus_session";
-/// 会话存活时长：7 天滑动过期（毫秒；认证通过即顺延）。
+/// 缺省（未勾选「保持登录」）会话的服务端存活时长：7 天滑动过期（毫秒；
+/// 认证通过即顺延）。cookie 为会话级（无 Max-Age，关浏览器即失效），服务端
+/// 7 天滑动是过期清理面（票 #114）。
 pub const SESSION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-/// 会话 cookie 的 Max-Age（秒，由 [`SESSION_TTL_MS`] 推导避免双处维护：
-/// 浏览器关了再开仍在登录态）。
-pub const SESSION_MAX_AGE_SECS: u64 = (SESSION_TTL_MS / 1000) as u64;
+/// 「保持登录」会话存活时长：30 天滑动过期（毫秒；票 #114，登录勾选
+/// remember_me 时启用——cookie 带 30 天 Max-Age，关浏览器再开仍登录）。
+pub const REMEMBER_ME_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// 「保持登录」会话 cookie 的 Max-Age（秒，由 [`REMEMBER_ME_TTL_MS`] 推导
+/// 避免双处维护：cookie 与服务端行同窗口）。
+pub const REMEMBER_ME_MAX_AGE_SECS: u64 = (REMEMBER_ME_TTL_MS / 1000) as u64;
 /// 密码最小长度（无复杂度规则、无强制过期，ADR-0014）。
 pub const MIN_PASSWORD_LEN: usize = 8;
+
+/// 按「保持登录」标志选会话服务端滑动 TTL（票 #114）：`true` → 30 天，
+/// `false` → 7 天。login 建会话与中间件滑动顺延共用——单点收口，新增档位
+/// 只改这里。
+pub fn session_ttl_ms(remember_me: bool) -> i64 {
+    if remember_me {
+        REMEMBER_ME_TTL_MS
+    } else {
+        SESSION_TTL_MS
+    }
+}
 
 /// 固定参数实例（OWASP：m=19MiB/t=2/p=1）。
 fn argon2id() -> Argon2<'static> {

@@ -1202,7 +1202,7 @@
         },
         "responses": {
           "200": {
-            "description": "登录成功，Set-Cookie 下发会话（HttpOnly + SameSite=Lax + Path=/）",
+            "description": "登录成功，Set-Cookie 下发会话（HttpOnly + SameSite=Lax + Path=/；remember_me=true 带 30 天 Max-Age 持久 cookie，缺省/false 为会话级 cookie 无 Max-Age）",
             "content": {
               "application/json": {
                 "schema": {
@@ -5308,6 +5308,10 @@
           "password": {
             "type": "string",
             "description": "密码（最小长度 8，无复杂度规则）。"
+          },
+          "remember_me": {
+            "type": "boolean",
+            "description": "保持登录（票 #114）：`true` → 会话 cookie 带 30 天 Max-Age（持久，关浏览器\n再开仍登录）+ 服务端 30 天滑动；缺省/`false` → 会话级 cookie（无 Max-Age，\n关浏览器即失效）+ 服务端 7 天滑动。setup 不建会话，本字段对其无意义（忽略）。"
           },
           "username": {
             "type": "string",

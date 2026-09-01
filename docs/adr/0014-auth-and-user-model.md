@@ -18,7 +18,7 @@
 
 **会话与密码**
 
-- 服务端 session + HttpOnly cookie（SameSite=Lax），session 行存 SQLite：7 天滑动过期、Server 重启不掉线、登出/禁用即删。
+- 服务端 session + HttpOnly cookie（SameSite=Lax），session 行存 SQLite：滑动过期、Server 重启不掉线、登出/禁用即删。会话有效期按登录「保持登录」标志分岔（票 #114 增补，2026-09-01）：勾选 `remember_me` → 30 天滑动 + cookie 带 30 天 Max-Age（持久，关浏览器再开仍登录）；缺省/`false` → 7 天滑动 + 会话级 cookie（无 Max-Age，关浏览器即失效）。形态落 session 行 `remember_me` 列，中间件凭行还原滑动 TTL 与续发 cookie 形态。
 - 密码 argon2id（RustCrypto `argon2` crate，纯 Rust、交叉编译友好），OWASP 参数 m=19MiB/t=2/p=1；最小长度 8，无复杂度规则、无强制过期。
 - CSRF：Lax 之上加集中 middleware，非安全方法（POST/PUT/DELETE）校验 Origin / Sec-Fetch-Site 同源，不匹配即拒（Bearer 天然免疫，仅管 cookie 面）。
 - 登录限流：进程内内存计数（per-IP + per-username，5 次失败冷却 1 分钟、递增封顶），不持久锁定、重启即清。

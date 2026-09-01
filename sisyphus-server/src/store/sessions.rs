@@ -19,6 +19,10 @@ pub struct SessionRow {
     pub created_at: i64,
     /// 过期时间（Unix 毫秒，滑动顺延）。
     pub expires_at: i64,
+    /// 是否「保持登录」会话（票 #114）：true → 30 天滑动 + cookie 带 Max-Age；
+    /// false → 7 天滑动 + 会话级 cookie（无 Max-Age）。中间件按本字段决定
+    /// 滑动 TTL 与续发 cookie 形态。
+    pub remember_me: bool,
 }
 
 /// 会话 repo：写入 / 有效读取 / 顺延 / 删除。
@@ -34,21 +38,25 @@ impl SessionRepo {
     }
 
     /// 写入会话行；id 哈希撞主键（32 字节随机碰撞，概率上不可达）返回
-    /// [`StoreError::Unique`]，调用侧换 id 重试。
+    /// [`StoreError::Unique`]，调用侧换 id 重试。`remember_me` 落库以跨请求
+    /// 还原会话形态（中间件续发 cookie / 滑动 TTL 按本字段分岔，票 #114）。
     pub async fn insert(
         &self,
         id_hash: &str,
         user_id: i64,
         created_at: i64,
         expires_at: i64,
+        remember_me: bool,
     ) -> Result<(), StoreError> {
         let result = sqlx::query(
-            "INSERT INTO sessions (id_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO sessions (id_hash, user_id, created_at, expires_at, remember_me) \
+             VALUES (?, ?, ?, ?, ?)",
         )
         .bind(id_hash)
         .bind(user_id)
         .bind(created_at)
         .bind(expires_at)
+        .bind(remember_me)
         .execute(&self.pool)
         .await;
         match result {
@@ -67,19 +75,22 @@ impl SessionRepo {
         id_hash: &str,
         now: i64,
     ) -> Result<Option<SessionRow>, StoreError> {
-        let row = sqlx::query_as::<_, (i64, i64, i64)>(
-            "SELECT user_id, created_at, expires_at FROM sessions
+        let row = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            "SELECT user_id, created_at, expires_at, remember_me FROM sessions \
              WHERE id_hash = ? AND expires_at > ?",
         )
         .bind(id_hash)
         .bind(now)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|(user_id, created_at, expires_at)| SessionRow {
-            user_id,
-            created_at,
-            expires_at,
-        }))
+        Ok(row.map(
+            |(user_id, created_at, expires_at, remember_me)| SessionRow {
+                user_id,
+                created_at,
+                expires_at,
+                remember_me: remember_me != 0,
+            },
+        ))
     }
 
     /// 顺延过期时间（滑动过期的写侧；只在 `get_valid` 命中后调用）。
@@ -135,7 +146,7 @@ mod tests {
         let repo = SessionRepo::new(pool);
         let now = 1_000_000_i64;
 
-        repo.insert("hash-a", user.id, now, now + 60_000)
+        repo.insert("hash-a", user.id, now, now + 60_000, false)
             .await
             .expect("写入");
 
@@ -164,7 +175,7 @@ mod tests {
         let (_dir, pool, user) = fixture().await;
         let repo = SessionRepo::new(pool);
         let now = 1_000_000_i64;
-        repo.insert("hash-a", user.id, now, now + 60_000)
+        repo.insert("hash-a", user.id, now, now + 60_000, false)
             .await
             .expect("写入");
 
@@ -186,7 +197,7 @@ mod tests {
         let (_dir, pool, user) = fixture().await;
         let repo = SessionRepo::new(pool);
         let now = 1_000_000_i64;
-        repo.insert("hash-a", user.id, now, now + 60_000)
+        repo.insert("hash-a", user.id, now, now + 60_000, false)
             .await
             .expect("写入");
 
@@ -203,7 +214,7 @@ mod tests {
         let (dir, pool, user) = fixture().await;
         let repo = SessionRepo::new(pool.clone());
         let now = 1_000_000_i64;
-        repo.insert("hash-a", user.id, now, now + 60_000)
+        repo.insert("hash-a", user.id, now, now + 60_000, false)
             .await
             .expect("写入");
         pool.close().await;
@@ -227,11 +238,44 @@ mod tests {
     async fn duplicate_id_hash_is_unique_error() {
         let (_dir, pool, user) = fixture().await;
         let repo = SessionRepo::new(pool);
-        repo.insert("hash-a", user.id, 0, 1).await.expect("首写");
+        repo.insert("hash-a", user.id, 0, 1, false)
+            .await
+            .expect("首写");
         let err = repo
-            .insert("hash-a", user.id, 0, 1)
+            .insert("hash-a", user.id, 0, 1, false)
             .await
             .expect_err("撞主键应拒绝");
         assert!(matches!(err, StoreError::Unique(_)), "应为唯一冲突：{err}");
+    }
+
+    /// remember_me 落库并经 get_valid 还原（票 #114）：中间件凭此分岔滑动 TTL
+    /// 与续发 cookie 形态，故需跨请求持久。
+    #[tokio::test]
+    async fn remember_me_round_trips_and_touch_preserves_it() {
+        let (_dir, pool, user) = fixture().await;
+        let repo = SessionRepo::new(pool);
+        let now = 1_000_000_i64;
+
+        // remember_me=true 落库。
+        repo.insert("hash-rm", user.id, now, now + 60_000, true)
+            .await
+            .expect("写入");
+        let row = repo
+            .get_valid("hash-rm", now)
+            .await
+            .expect("读取")
+            .expect("命中");
+        assert!(row.remember_me, "remember_me=true 应还原");
+
+        // touch 只顺延 expires_at，不改动 remember_me（中间件续发 cookie 仍按
+        // 原会话形态，不因滑动而降级/升级）。
+        repo.touch("hash-rm", now + 120_000).await.expect("顺延");
+        let row = repo
+            .get_valid("hash-rm", now)
+            .await
+            .expect("读取")
+            .expect("顺延后仍命中");
+        assert!(row.remember_me, "touch 不应改动 remember_me");
+        assert_eq!(row.expires_at, now + 120_000);
     }
 }

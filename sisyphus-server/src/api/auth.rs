@@ -4,7 +4,8 @@
 //! 进程内限流（per-IP + per-username）。
 //!
 //! - 认证（401）是全局 middleware，两通道同权重放：cookie 里的 session id
-//!   → SHA-256 查行 → 未过期 → 用户未禁用，通过即顺延 7 天（滑动过期）；
+//!   → SHA-256 查行 → 未过期 → 用户未禁用，通过即顺延（remember_me 30 天 /
+//!   缺省 7 天滑动过期，票 #114）；
 //!   或 `Authorization: Bearer sis_…`（PAT，T3）→ 哈希查行 → 未过期 →
 //!   用户未禁用。携 Bearer scheme 的 Authorization 头按显式凭据对待
 //!   （优先于 cookie，与 CSRF 中间件的「Bearer 免疫」同一模型）；失败/
@@ -36,8 +37,9 @@ use utoipa::ToSchema;
 use super::AppState;
 use super::error::{ApiError, ErrorBody, ValidationIssue, parse_body};
 use crate::auth::{
-    MIN_PASSWORD_LEN, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECS, SESSION_TTL_MS, TokenFamily,
-    generate_session_id, hash_password, session_id_hash, token_family, token_hash, verify_password,
+    MIN_PASSWORD_LEN, REMEMBER_ME_MAX_AGE_SECS, SESSION_COOKIE_NAME, TokenFamily,
+    generate_session_id, hash_password, session_id_hash, session_ttl_ms, token_family, token_hash,
+    verify_password,
 };
 use crate::store::StoreError;
 use crate::store::now_ms;
@@ -80,6 +82,11 @@ pub struct CredentialsRequest {
     pub username: String,
     /// 密码（最小长度 8，无复杂度规则）。
     pub password: String,
+    /// 保持登录（票 #114）：`true` → 会话 cookie 带 30 天 Max-Age（持久，关浏览器
+    /// 再开仍登录）+ 服务端 30 天滑动；缺省/`false` → 会话级 cookie（无 Max-Age，
+    /// 关浏览器即失效）+ 服务端 7 天滑动。setup 不建会话，本字段对其无意义（忽略）。
+    #[serde(default)]
+    pub remember_me: bool,
 }
 
 /// 当前用户视图（setup / login / me 共用；SPA 引导用）。
@@ -209,7 +216,7 @@ pub async fn register(
     tag = "auth",
     request_body = CredentialsRequest,
     responses(
-        (status = 200, description = "登录成功，Set-Cookie 下发会话（HttpOnly + SameSite=Lax + Path=/）", body = MeResponse),
+        (status = 200, description = "登录成功，Set-Cookie 下发会话（HttpOnly + SameSite=Lax + Path=/；remember_me=true 带 30 天 Max-Age 持久 cookie，缺省/false 为会话级 cookie 无 Max-Age）", body = MeResponse),
         (status = 401, description = "用户名或密码错误（不区分两者）", body = ErrorBody),
         (status = 422, description = "请求体不是合法 JSON 或形态不符", body = ErrorBody),
         (status = 429, description = "登录尝试过于频繁（per-IP / per-username 连续 5 败进入冷却，随连续触发递增、封顶 15 分钟）", body = ErrorBody),
@@ -257,13 +264,25 @@ pub async fn login(
     state.login_limiter.record_login_success(&ip, &username);
     record_login_success(&state, &username, now).await?;
 
+    // 会话形态由 remember_me 分岔（票 #114）：勾选 → 30 天滑动 + 持久 cookie；
+    // 缺省 → 7 天滑动 + 会话级 cookie。形态落库（remember_me 列），中间件凭
+    // session 行还原滑动 TTL 与续发 cookie，不读 cookie 属性。
+    let remember_me = req.remember_me;
+    let ttl_ms = session_ttl_ms(remember_me);
+
     // 建会话：撞主键（概率上不可达）换 id 重试。
     let mut session_id = None;
     for _ in 0..SESSION_ID_ATTEMPTS {
         let id = generate_session_id();
         match state
             .sessions
-            .insert(&session_id_hash(&id), user.id, now, now + SESSION_TTL_MS)
+            .insert(
+                &session_id_hash(&id),
+                user.id,
+                now,
+                now + ttl_ms,
+                remember_me,
+            )
             .await
         {
             Ok(()) => {
@@ -286,7 +305,7 @@ pub async fn login(
         is_admin: user.is_admin,
     };
     let mut resp = (StatusCode::OK, Json(me)).into_response();
-    set_session_cookie(&mut resp, &session_id);
+    set_session_cookie(&mut resp, &session_id, remember_me);
     Ok(resp)
 }
 
@@ -397,8 +416,9 @@ pub async fn change_password(
 ///
 /// 携 Bearer scheme 的 Authorization 头按显式凭据对待（优先于 cookie，与
 /// CSRF 中间件的「Bearer 免疫」同一模型）；其它 scheme（Basic 等）回落
-/// cookie 面。会话通道认证通过即顺延 7 天（滑动过期）并随响应续发同值
-/// cookie；PAT 通道无会话动作。
+/// cookie 面。会话通道认证通过即顺延（remember_me 30 天 / 缺省 7 天滑动
+/// 过期，票 #114）并随响应续发同形态 cookie（持久会话刷新 Max-Age / 会话级
+/// 会话续发不带 Max-Age）；PAT 通道无会话动作。
 pub async fn require_auth(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let now = now_ms();
 
@@ -439,11 +459,16 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
         Ok(None) => return ApiError::unauthorized().into_response(),
         Err(e) => return ApiError::internal("session lookup", &e).into_response(),
     };
+    // 会话形态跨请求还原自 session 行（票 #114）：滑动 TTL 与续发 cookie 形态
+    // 都按 remember_me 分岔——持久会话顺延 30 天 + 续发带 Max-Age 的 cookie；
+    // 会话级会话顺延 7 天 + 续发不带 Max-Age 的 cookie（保持「关浏览器即失效」）。
+    let remember_me = session.remember_me;
     let user = match active_user_or_reject(&state, session.user_id).await {
         Ok(user) => user,
         Err(e) => return e.into_response(),
     };
-    if let Err(e) = state.sessions.touch(&hash, now + SESSION_TTL_MS).await {
+    let ttl_ms = session_ttl_ms(remember_me);
+    if let Err(e) = state.sessions.touch(&hash, now + ttl_ms).await {
         return ApiError::internal("session touch", &e).into_response();
     }
 
@@ -456,12 +481,13 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
         },
     });
     let resp = next.run(req).await;
-    // 滑动过期在浏览器侧收口：随认证响应续发同值 cookie（刷新 Max-Age），
-    // 否则浏览器在登录后第 7 天整丢弃 cookie，服务端顺延不再可见。
+    // 滑动过期在浏览器侧收口：随认证响应续发同值 cookie（持久会话刷新 Max-Age，
+    // 否则浏览器在登录后第 30 天整丢弃 cookie，服务端顺延不再可见）。会话级
+    // 会话续发不带 Max-Age 的同值 cookie——保持会话级形态不被升级为持久。
     // handler 已带 Set-Cookie 时（logout 的清空头）不覆盖。
     if !resp.headers().contains_key(header::SET_COOKIE) {
         let mut resp = resp;
-        set_session_cookie(&mut resp, &session_id);
+        set_session_cookie(&mut resp, &session_id, remember_me);
         return resp;
     }
     resp
@@ -560,12 +586,18 @@ pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(|(_, v)| v.trim().to_string())
 }
 
-/// 登录响应下发会话 cookie（HttpOnly + SameSite=Lax + Path=/；v1 不设
-/// Secure；Max-Age 与服务端 7 天滑动过期对齐——浏览器关了再开仍在登录态）。
-fn set_session_cookie(resp: &mut Response, session_id: &str) {
-    let cookie = format!(
-        "{SESSION_COOKIE_NAME}={session_id}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_MAX_AGE_SECS}"
-    );
+/// 登录响应下发会话 cookie（HttpOnly + SameSite=Lax + Path=/；v1 不设 Secure）。
+/// `remember_me=true`：带 30 天 Max-Age（持久 cookie，关浏览器再开仍登录）；
+/// `false`：不带 Max-Age（会话级 cookie，关浏览器即失效）。Max-Age 与服务端
+/// 滑动 TTL 同窗口（票 #114）。
+fn set_session_cookie(resp: &mut Response, session_id: &str, remember_me: bool) {
+    let max_age = if remember_me {
+        format!("; Max-Age={REMEMBER_ME_MAX_AGE_SECS}")
+    } else {
+        String::new()
+    };
+    let cookie =
+        format!("{SESSION_COOKIE_NAME}={session_id}; HttpOnly; SameSite=Lax; Path=/{max_age}");
     insert_set_cookie(resp, &cookie);
 }
 
