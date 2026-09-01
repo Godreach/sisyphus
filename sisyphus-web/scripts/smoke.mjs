@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// Headless 冒烟（票 B4-T9 / #71 AC）：构建产物 + 预览端口点击走通 14 条主路径（spec #99 新 IA：工作台/流水线/构建机 + 详情/管理页）。
+// Headless 冒烟（票 B4-T9 / #71 AC）：构建产物 + 预览端口点击走通 15 条主路径（spec #99 新 IA：工作台/流水线/构建机 + 详情/管理页 + 404 认证面）。
 //
 // 形态基准：原型 `prototype/web-ui-ia` 分支 `web/scripts/smoke.mjs`（playwright
 // + 预览端口点击）。本脚本是其真实前端版：`vite preview` 伺服 `dist/` 构建产物，
 // playwright 在真实浏览器里驱动 SPA——测的是「构建产物在真实浏览器里能启动、
-// 14 条路由能解析渲染、i18n 能切、无运行期崩溃」，这是 vitest（jsdom、源码
+// 15 条路由能解析渲染、i18n 能切、无运行期崩溃」，这是 vitest（jsdom、源码
 // 变换）覆盖不到的构建/路由/历史 API 面。
 //
 // 后端由 playwright `page.route` 在浏览器侧拦截 `/api/v1/**` 注入 mock（替代
@@ -13,7 +13,7 @@
 // 纪律；本冒烟为真实浏览器驱动，起预览端口与浏览器进程是原型同款形态）。两个
 // 上下文：
 //   - authed：mock `/auth/me`→admin、`/auth/setup`→404（非空库，引导已完成），
-//     走 14 条受保护路由（含 /agents→/machines 重定向），断言顶栏标题或页内 h1 渲染。
+//     走 15 条受保护/公开路由（含 /agents→/machines 重定向 + 404 认证面），断言顶栏标题或页内 h1 渲染。
 //   - guest：mock `/auth/me`→401（未登录）、`/auth/setup`→422（空库，需引导），
 //     走受保护页触发守卫 setup-needed 重定向到 `/setup`，断言引导页渲染；
 //     另直访 `/login` 断言登录表单渲染。
@@ -326,7 +326,11 @@ async function runAuthed(browser) {
   page.on('pageerror', (e) => errors.push(String(e)))
   await context.route('**/api/v1/**', mockApi(true))
 
-  // 14 条主路径（zh-CN 源语言；列表页标题在顶栏，详情页保留页内 h1）。
+  // 15 条主路径（zh-CN 源语言；列表页标题在顶栏，详情页保留页内 h1）——票 #113
+  // 收尾：14 条补 404 认证面，覆盖全部页面（含新迁移页与认证面；login/setup
+  // 在 runGuest 守）。404 走自定义块断言 NResult 内容（catch-all 路由无 meta.title，
+  // 顶栏标题回落应用名「sisyphus」，visit 的 h1/顶栏匹配只能证壳渲染、证不了
+  // NotFoundView 内容，故单独断言 .not-found-page + 描述文案）。
   await visit(page, '/', '工作台', 'workbench')
   await visit(page, '/pipelines', '流水线', 'pipelines')
   await visit(page, '/projects', '项目', 'projects')
@@ -346,6 +350,23 @@ async function runAuthed(browser) {
   await visit(page, '/admin/audit', '审计日志', 'admin-audit')
   await visit(page, '/admin/upgrade', '构建机升级', 'admin-upgrade')
   await visit(page, '/admin/users', '用户', 'admin-users')
+
+  // 404 认证面（票 #112 / #113）：已登录直访未知路径 → 壳内就地 NResult
+  // （catch-all 路由 meta.public，守卫放行；showShell=true → 顶栏 + app-main 内
+  // 渲染 NotFoundView）。补全 15 条主路径覆盖全部页面。
+  try {
+    await page.goto(`${BASE}/no-such-page`, { waitUntil: 'domcontentloaded' })
+    await page.locator('.not-found-page').first().waitFor({ timeout: 10000 })
+    await page
+      .locator('.not-found-page')
+      .getByText('抱歉，您访问的页面不存在或已被移除')
+      .first()
+      .waitFor({ timeout: 5000 })
+    ok('not-found 404 renders (in-shell)', true)
+  } catch (err) {
+    const body = await page.locator('body').innerText().catch(() => '<unreachable>')
+    ok('not-found 404 renders (in-shell)', false, `${err.message} | body: ${body.slice(0, 160)}`)
+  }
 
   // 关键动作 1：升级页升级包清单渲染（占位态消除——mock 回非空包，断言包行
   // 出现；#111 定稿设计语言后包表为行式清单 data-testid）。

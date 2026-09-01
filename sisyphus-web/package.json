@@ -17,6 +17,7 @@
     "test:watch": "vitest",
     "i18n:check": "node scripts/i18n-check.mjs",
     "smoke": "node scripts/smoke.mjs",
+    "screenshots": "node scripts/screenshots.mjs",
     "check": "npm run typecheck && npm run test && npm run i18n:check"
   },
   "dependencies": {
