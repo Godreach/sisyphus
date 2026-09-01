@@ -135,6 +135,62 @@ describe('App 壳（三项导航 + 登出闭环）', () => {
   })
 })
 
+// 票 #112：setup 引导在第一步建管理员后即登录（isAuthed 翻 true），但向导
+// 仍未走完（停在 Agent/项目步）。若此时 App.vue 切到 app-shell，向导第二步起
+// 会冒出深侧栏，破坏「全屏无侧栏形态」首装体验。已登录直访 /login 或 /setup
+// 由路由守卫回首页——此处仅兜住向导中途的登录态，认证面恒为无壳居中。
+describe('App 壳（认证面恒无壳，票 #112）', () => {
+  let pinia: Pinia
+  let router: Router
+  let wrapper: VueWrapper
+
+  beforeEach(async () => {
+    setLocale('zh-CN')
+    pinia = createPinia()
+    setActivePinia(pinia)
+    router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/setup', name: 'setup', component: { template: '<div />' } },
+        { path: '/login', name: 'login', component: { template: '<div />' } },
+        { path: '/', name: 'overview', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/setup')
+    await router.isReady()
+    globalThis.fetch = vi.fn()
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    vi.restoreAllMocks()
+  })
+
+  it('setup 引导中途登录（isAuthed 翻 true）仍无侧栏：向导全程全屏无侧栏', async () => {
+    wrapper = mount(App, { global: { plugins: [pinia, router, i18n] } })
+    const auth = useAuthStore()
+    // 向导第一步建管理员后 auth.login 置 authed——模拟此中途态。
+    auth.setAuthed({ username: 'admin', isAdmin: true })
+    await wrapper.vm.$nextTick()
+
+    expect(auth.isAuthed).toBe(true)
+    // 认证面（login/setup）即便已登录也走无壳居中布局。
+    expect(wrapper.find('.app-sidebar').exists()).toBe(false)
+    expect(wrapper.find('.app-bare').exists()).toBe(true)
+  })
+
+  it('已登录访问 /login 同样无壳（守卫已回首页，此处兜底不冒侧栏）', async () => {
+    await router.push('/login')
+    await router.isReady()
+    wrapper = mount(App, { global: { plugins: [pinia, router, i18n] } })
+    const auth = useAuthStore()
+    auth.setAuthed({ username: 'admin', isAdmin: true })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.app-sidebar').exists()).toBe(false)
+  })
+})
+
 describe('App 壳（管理入口收编进用户卡下拉）', () => {
   let pinia: Pinia
   let router: Router

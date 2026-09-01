@@ -324,12 +324,19 @@ body.sidebar-resizing {
   overflow-y: auto;
 }
 
-/* 未登录（登录/初始化引导/404）：无壳居中布局。 */
+/* 未登录（登录/初始化引导/404）：无壳居中布局。app-main 退化为纵向 flex
+   容器，认证页根用 margin:auto 居中——比 justify-content:center 更稳：
+   向导页高于视口时顶部不被裁剪、可上滚（票 #112 全屏无侧栏形态、居中卡片）。 */
 .app-bare {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+
+.app-bare .app-main {
+  display: flex;
+  flex-direction: column;
 }
 
 .footer-user {
@@ -652,129 +659,8 @@ body.sidebar-resizing {
   padding: 6px 10px;
 }
 
-/* 登录页（全屏无侧栏形态，居中卡片——spec #100 story 21）。 */
-.login-page {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 70vh;
-}
-
-.login-card {
-  width: min(420px, 100%);
-}
-
-/* 保持登录复选框（契约先行字段 remember_me，票 #114）。 */
-.login-remember {
-  margin: 4px 0 12px;
-}
-
-.login-tagline {
-  color: var(--sisy-color-text-secondary);
-  margin-top: -8px;
-}
-
-/* 设置页。 */
-.setup-page h1 {
-  margin-top: 0;
-}
-
-/* 初始化引导 wizard（三步可跳过，ADR-0010/0020）。#89: Naive UI 组件迁移。 */
-.setup-page {
-  max-width: 560px;
-  margin: 0 auto;
-  padding: 16px;
-}
-
-.setup-intro {
-  color: var(--sisy-color-text-secondary);
-}
-
-.setup-steps {
-  margin: 16px 0;
-}
-
-.setup-card h2 {
-  margin: 0;
-}
-
-.setup-desc {
-  color: var(--sisy-color-text-secondary);
-  margin: 0;
-}
-
-.setup-fields {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin: 12px 0;
-}
-
-.setup-alert {
-  margin-bottom: 12px;
-}
-
-.setup-cli-card {
-  margin-bottom: 12px;
-}
-
-.setup-creds-list {
-  margin: 0;
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 4px 12px;
-  align-items: center;
-}
-
-.setup-creds-list dt {
-  color: var(--sisy-color-text-secondary);
-}
-
-.setup-creds-list dd {
-  margin: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.setup-creds-warn {
-  margin: 8px 0 0;
-  color: var(--sisy-color-danger-text);
-  font-size: 12px;
-}
-
-.setup-cmd-card {
-  margin-bottom: 8px;
-}
-
-.setup-cmd-note {
-  margin: 0;
-  color: var(--sisy-color-text-secondary);
-  font-size: 12px;
-}
-
-.setup-actions {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-top: 1px solid var(--sisy-color-border);
-  padding-top: 14px;
-  gap: 12px;
-  margin-top: 16px;
-}
-
-.setup-done {
-  margin-top: 16px;
-}
-
-/* 404。 */
-.not-found-page {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 80vh;
-  padding: 24px;
-}
+/* 登录/初始化引导/404 页专属样式收进各视图 scoped 块（票 #112 定稿设计语言：
+   页面专属规则不留在全局）。此处仅保留共享壳层规则（.app-bare/.app-main）。 */
 
 /* 面包屑（ADR-0020：项目 > pipeline > 构建号；Build 列表 / 详情页共用）。 */
 .breadcrumb {

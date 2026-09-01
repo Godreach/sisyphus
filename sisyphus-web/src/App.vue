@@ -11,8 +11,10 @@
 // - 顶栏搜索框（流水线/构建机页）经 `?q=` 查询参数驱动页面过滤（250ms
 //   防抖 replace），主按钮走各页既有创建流（`?create=1`）。
 // - 窄屏（<768px）侧栏折叠为 NDrawer 抽屉（#87 行为保留）。
-// - 未认证（登录/初始化引导）：无壳居中布局，无壳内开关（主题/语言切换
-//   在登录壳不出现）。
+// - 未认证或认证面（登录/初始化引导）：无壳居中布局，无壳内开关（主题/语言切换
+//   在登录壳不出现）。认证面（login/setup）即便已登录也走无壳——setup 引导在
+//   第一步建管理员后即登录，但向导仍未走完，中途不冒侧栏（票 #112「全屏无侧栏
+//   形态」首装体验）；404 对未登录走无壳，已登录则在壳内就地展示。
 
 import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -52,6 +54,12 @@ const locale = computed(() => currentLocale())
 const naiveLocale = computed(() => (locale.value === 'zh-CN' ? zhCN : enUS))
 const naiveDateLocale = computed(() => (locale.value === 'zh-CN' ? dateZhCN : dateEnUS))
 const isAuthed = computed(() => auth.isAuthed)
+// 认证面（login/setup）即便已登录也走无壳居中：setup 引导在第一步建管理员
+// 后即 login（isAuthed 翻 true），但向导仍未走完——若此时切到 app-shell 会在
+// 第二步起冒出深侧栏，破坏「全屏无侧栏形态」首装体验（票 #112）。已登录
+// 直访 /login 或 /setup 由路由守卫回首页，此处仅兜住向导中途登录态。
+const isBareRoute = computed(() => route.name === 'login' || route.name === 'setup')
+const showShell = computed(() => isAuthed.value && !isBareRoute.value)
 const isAdmin = computed(() => auth.user?.isAdmin === true)
 const username = computed(() => auth.user?.username ?? '')
 /** 用户名首字符 → 头像（原型形态：渐变圆底 + 首字）。 */
@@ -306,8 +314,9 @@ function onCta(): void {
     <!-- useMessage 注入源（SetupView/PipelinesView/AgentListView 的 toast 反馈
          依赖此 provider；缺它时 useMessage() 返回 undefined、toast 静默失效）。 -->
     <n-message-provider>
-      <!-- 未认证：无壳居中布局（登录/初始化引导/404）。 -->
-      <template v-if="!isAuthed">
+      <!-- 未认证或认证面（登录/初始化引导）：无壳居中布局。认证面即便
+           已登录也走无壳——setup 引导中途登录不冒侧栏（票 #112）。 -->
+      <template v-if="!showShell">
         <div class="app-bare">
           <main class="app-main">
             <RouterView />

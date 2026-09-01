@@ -11,6 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AuthCard: typeof import('./src/components/base/AuthCard.vue')['default']
     BuildLogView: typeof import('./src/components/BuildLogView.vue')['default']
     EnvListEditor: typeof import('./src/components/editor/EnvListEditor.vue')['default']
     JobFormPanel: typeof import('./src/components/editor/JobFormPanel.vue')['default']
