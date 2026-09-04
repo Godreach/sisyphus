@@ -534,11 +534,11 @@ function createPipeline(): void {
     <header class="page-header project-detail-header">
       <div class="project-title-row">
         <h1 class="page-title project-title" data-testid="project-title">{{ project.name }}</h1>
-        <span class="badge neutral">{{ project.scm_type }}</span>
+          <span class="badge neutral">{{ project.scm_type === 'none' ? t('projects.scmNone') : project.scm_type }}</span>
       </div>
       <div class="project-actions">
         <button
-          v-if="isProjectAdmin"
+          v-if="isProjectAdmin && project.scm_type !== 'none'"
           type="button"
           class="btn-outline"
           data-testid="edit-project-btn"
@@ -569,7 +569,7 @@ function createPipeline(): void {
         </div>
         <div class="meta-item">
           <dt>{{ t('projects.scmUrl') }}</dt>
-          <dd class="mono-url">{{ project.scm_url }}</dd>
+          <dd class="mono-url">{{ project.scm_url || t('projects.scmNone') }}</dd>
         </div>
         <div v-if="project.scm_type === 'git'" class="meta-item">
           <dt>{{ t('projects.metaDefaultBranch') }}</dt>
@@ -798,7 +798,7 @@ function createPipeline(): void {
     </section>
 
     <!-- SCM 凭据卡（项目 admin 档；username + password 皆空 = 清除）。 -->
-    <section class="sisy-card project-cred-card" aria-label="scm credentials">
+    <section v-if="project.scm_type !== 'none'" class="sisy-card project-cred-card" aria-label="scm credentials">
       <div class="card-header">
         <h2 class="card-title">{{ t('projects.scmCredTitle') }}</h2>
       </div>

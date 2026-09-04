@@ -5137,7 +5137,7 @@
           },
           "scm_url": {
             "type": "string",
-            "description": "仓库 URL。"
+            "description": "仓库 URL；`none` 类型传空字符串。"
           },
           "scm_username": {
             "type": [
@@ -5802,11 +5802,11 @@
           },
           "scm_type": {
             "$ref": "#/components/schemas/ScmTypeDto",
-            "description": "仓库类型（`git` / `svn`）。"
+            "description": "仓库类型（`git` / `svn` / `none`）。"
           },
           "scm_url": {
             "type": "string",
-            "description": "仓库 URL。"
+            "description": "仓库 URL；`none` 类型为空字符串。"
           },
           "updated_at": {
             "type": "integer",
@@ -6133,10 +6133,11 @@
       },
       "ScmTypeDto": {
         "type": "string",
-        "description": "仓库类型（API 形态；`git` / `svn`）。",
+        "description": "仓库类型（API 形态；`git` / `svn` / `none`）。",
         "enum": [
           "git",
-          "svn"
+          "svn",
+          "none"
         ]
       },
       "SecretNameResponse": {

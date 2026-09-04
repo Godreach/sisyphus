@@ -31,8 +31,8 @@ export const NETWORK_ERROR_CODE = 'NETWORK_ERROR'
 // 其余字段随消费页面票按需补全。
 // ---------------------------------------------------------------------------
 
-/** 项目仓库类型（后端 `ScmTypeDto`，`git` / `svn`）。 */
-export type ScmTypeDto = 'git' | 'svn'
+/** 项目仓库类型（后端 `ScmTypeDto`，`git` / `svn` / `none`）。 */
+export type ScmTypeDto = 'git' | 'svn' | 'none'
 
 /** 项目视图（后端 `ProjectResponse`：id/name/scm_type/scm_url/default_branch）。 */
 export interface ProjectResponse {

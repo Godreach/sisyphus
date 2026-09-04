@@ -21,7 +21,7 @@ function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers })
 }
 
-function project(id: number, name: string, scmType: 'git' | 'svn', url: string) {
+function project(id: number, name: string, scmType: 'git' | 'svn' | 'none', url: string) {
   return {
     id,
     name,
@@ -92,6 +92,7 @@ describe('ProjectsView 项目列表 + 新建', () => {
     fetchMock.mockResolvedValue(jsonResponse(200, []))
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.text()).toContain('暂无项目'))
+    expect(wrapper.find('.project-modal-mask').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -113,7 +114,7 @@ describe('ProjectsView 项目列表 + 新建', () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain('暂无项目'))
 
     // 展开新建表单。
-    await wrapper.get('button[name="project-new"]').trigger('click')
+    await wrapper.get('.project-empty-action').trigger('click')
     expect(wrapper.text()).toContain('仓库类型')
 
     routes.set('create', jsonResponse(201, project(3, 'newproj', 'git', 'https://x/new.git')))
@@ -159,7 +160,7 @@ describe('ProjectsView 项目列表 + 新建', () => {
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.text()).toContain('暂无项目'))
 
-    await wrapper.get('button[name="project-new"]').trigger('click')
+    await wrapper.get('.project-empty-action').trigger('click')
     // 选 svn（NSelect 下拉：点开菜单再点选项，jsdom 下需 virtual-scroll 关闭）。
     await wrapper.get('.n-base-selection').trigger('click')
     await vi.waitFor(() => {
@@ -190,6 +191,51 @@ describe('ProjectsView 项目列表 + 新建', () => {
     wrapper.unmount()
   })
 
+  it('无 SCM 项目：隐藏仓库字段并允许空 URL 直接创建', async () => {
+    const routes = new Map<string, Response>()
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (url === '/api/v1/projects' && method === 'GET') return routes.get('list') ?? jsonResponse(200, [])
+      if (url === '/api/v1/projects' && method === 'POST') return routes.get('create') ?? jsonResponse(201, project(6, 'artifact-only', 'none', ''))
+      return jsonResponse(404, { code: 'NOT_FOUND', message: `no mock for ${url}` })
+    })
+    routes.set('list', jsonResponse(200, []))
+    const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.text()).toContain('暂无项目'))
+
+    await wrapper.get('.project-empty-action').trigger('click')
+    await wrapper.get('.n-base-selection').trigger('click')
+    await vi.waitFor(() => {
+      const noneOption = [...document.querySelectorAll('.n-base-select-option')].find((o) => o.textContent?.includes('无 SCM'))
+      expect(noneOption).toBeTruthy()
+      ;(noneOption as HTMLElement).click()
+    })
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(wrapper.find('input[name="project-url"]').exists()).toBe(false)
+    expect(wrapper.find('input[name="project-branch"]').exists()).toBe(false)
+    expect(wrapper.find('button[name="project-test-connection"]').exists()).toBe(false)
+    await wrapper.get('input[name="project-name"]').setValue('artifact-only')
+    routes.set('create', jsonResponse(201, project(6, 'artifact-only', 'none', '')))
+    await wrapper.get('button[name="project-save"]').trigger('click')
+
+    await vi.waitFor(() => {
+      const post = fetchMock.mock.calls.find(
+        (c) => (c as [string, RequestInit])[1]?.method === 'POST' && (c as [string])[0] === '/api/v1/projects',
+      )
+      expect(post).toBeTruthy()
+      const [, init] = post as unknown as [string, RequestInit]
+      expect(JSON.parse(init.body as string)).toMatchObject({
+        name: 'artifact-only',
+        scm_type: 'none',
+        scm_url: '',
+        default_branch: null,
+      })
+    })
+    wrapper.unmount()
+  })
+
   it('测试连接按钮已解禁：点击调 scm-probe + scm-branches，预填默认分支、展示 head', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(200, [])) // 列表
@@ -203,7 +249,7 @@ describe('ProjectsView 项目列表 + 新建', () => {
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.text()).toContain('暂无项目'))
 
-    await wrapper.get('button[name="project-new"]').trigger('click')
+    await wrapper.get('.project-empty-action').trigger('click')
     const testBtn = wrapper.get('button[name="project-test-connection"]')
     expect((testBtn.element as HTMLButtonElement).disabled).toBe(false)
     await wrapper.get('input[name="project-url"]').setValue('https://x/repo.git')
@@ -225,7 +271,7 @@ describe('ProjectsView 项目列表 + 新建', () => {
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.text()).toContain('暂无项目'))
 
-    await wrapper.get('button[name="project-new"]').trigger('click')
+    await wrapper.get('.project-empty-action').trigger('click')
     fetchMock.mockResolvedValueOnce(
       jsonResponse(201, project(5, 'credproj', 'git', 'https://x/c.git')),
     )
@@ -259,7 +305,7 @@ describe('ProjectsView 项目列表 + 新建', () => {
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.text()).toContain('暂无项目'))
 
-    await wrapper.get('button[name="project-new"]').trigger('click')
+    await wrapper.get('.project-empty-action').trigger('click')
     fetchMock.mockResolvedValue(jsonResponse(403, { code: 'FORBIDDEN', message: '创建项目为全局管理员专属操作' }))
     await wrapper.get('input[name="project-name"]').setValue('proj')
     await wrapper.get('input[name="project-url"]').setValue('https://x/p.git')
@@ -325,6 +371,25 @@ describe('ProjectsView Naive UI 迁移（#92）', () => {
     const demoCard = wrapper.findAll('.project-card').find((c) => c.text().includes('demo'))!
     expect(demoCard.text()).toContain('git')
     expect(demoCard.text()).toContain('main')
+  })
+
+  it('项目搜索按名称、URL 和 SCM 类型过滤卡片', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, [
+        project(1, 'web-app', 'git', 'https://github.com/acme/web-app.git'),
+        project(2, 'artifact', 'none', ''),
+      ]),
+    )
+    wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.findAll('.project-card')).toHaveLength(2))
+
+    await router.replace({ query: { q: 'artifact' } })
+    await vi.waitFor(() => expect(wrapper.findAll('.project-card')).toHaveLength(1))
+    expect(wrapper.find('.project-card').text()).toContain('artifact')
+
+    await router.replace({ query: { q: 'github.com' } })
+    await vi.waitFor(() => expect(wrapper.findAll('.project-card')).toHaveLength(1))
+    expect(wrapper.find('.project-card').text()).toContain('web-app')
   })
 
   it('空项目列表显示 NEmpty 空状态 + 创建引导按钮', async () => {

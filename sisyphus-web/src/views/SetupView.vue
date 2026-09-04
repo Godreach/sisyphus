@@ -57,10 +57,11 @@ const osOptions: { label: string; value: AgentTargetOs }[] = [
   { label: 'Linux / macOS', value: 'linux' },
   { label: 'Windows', value: 'windows' },
 ]
-/** 仓库类型选项（git 默认带分支；svn 无默认分支输入）。 */
+/** 仓库类型选项（git 默认带分支；svn/none 无默认分支输入）。 */
 const scmTypeOptions = [
   { label: 'git', value: 'git' },
   { label: 'svn', value: 'svn' },
+  { label: t('projects.scmNone'), value: 'none' },
 ]
 
 /** 当前步骤（0 = 管理员，1 = Agent，2 = 项目）。 */
@@ -82,9 +83,17 @@ const targetOs = ref<AgentTargetOs>('linux')
 
 /** 项目步表单。 */
 const projectName = ref('')
-const scmType = ref<'git' | 'svn'>('git')
+const scmType = ref<'git' | 'svn' | 'none'>('git')
 const scmUrl = ref('')
 const defaultBranch = ref('')
+
+function onScmTypeChange(v: 'git' | 'svn' | 'none'): void {
+  scmType.value = v
+  if (v === 'none') {
+    scmUrl.value = ''
+    defaultBranch.value = ''
+  }
+}
 
 const isLastStep = computed(() => step.value === 2)
 
@@ -364,9 +373,13 @@ async function copyToClipboard(text: string): Promise<void> {
             />
           </n-form-item>
           <n-form-item :label="t('projects.scmType')">
-            <n-select v-model:value="scmType" :options="scmTypeOptions" />
+            <n-select
+              v-model:value="scmType"
+              :options="scmTypeOptions"
+              @update:value="onScmTypeChange"
+            />
           </n-form-item>
-          <n-form-item :label="t('projects.scmUrl')">
+          <n-form-item v-if="scmType !== 'none'" :label="t('projects.scmUrl')">
             <n-input
               v-model:value="scmUrl"
               :input-props="{ name: 'project-url' }"
@@ -416,7 +429,7 @@ async function copyToClipboard(text: string): Promise<void> {
         <n-button
           v-else
           type="primary"
-          :disabled="submitting || !projectName.trim() || !scmUrl.trim()"
+          :disabled="submitting || !projectName.trim() || (scmType !== 'none' && !scmUrl.trim())"
           :loading="submitting"
           @click="createProject"
         >

@@ -52,7 +52,7 @@ const routes: RouteRecordRaw[] = [
     redirect: { name: 'machines' },
   },
   {
-    // 项目管理页（侧栏无入口；新建流水线 CTA 与流水线页跳转消费）。
+    // 项目管理页（侧栏无入口；流水线页顶栏从这里选择已有项目）。
     path: '/projects',
     name: 'projects',
     component: () => import('@/views/ProjectsView.vue'),

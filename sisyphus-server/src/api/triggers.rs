@@ -191,6 +191,17 @@ pub async fn create(
     body: Bytes,
 ) -> Result<(StatusCode, Json<TriggerResponse>), ApiError> {
     let req: CreateTriggerRequest = parse_body(&body)?;
+    if req.kind == TriggerKindDto::Poll
+        && access.project.scm_type == crate::store::projects::ScmType::None
+    {
+        return Err(ApiError::validation(
+            "触发器输入校验失败",
+            vec![ValidationIssue {
+                path: "kind".into(),
+                message: "无 SCM 项目不支持 poll 触发器".into(),
+            }],
+        ));
+    }
     // pipeline 须存在（触发器绑定 pipeline；不存在即 404，不建孤儿触发器）。
     if state
         .pipelines
@@ -280,6 +291,17 @@ pub async fn patch(
         )));
     };
     let row = load_one(&state, &access.project.id, &pipeline, kind).await?;
+    if kind == TriggerKindDto::Poll
+        && access.project.scm_type == crate::store::projects::ScmType::None
+    {
+        return Err(ApiError::validation(
+            "触发器输入校验失败",
+            vec![ValidationIssue {
+                path: "kind".into(),
+                message: "无 SCM 项目不支持 poll 触发器".into(),
+            }],
+        ));
+    }
     // spec 必须匹配路径 kind（不匹配 → 422，防误改）。
     let new_spec = build_spec_for_patch(&state, kind, &req)?;
     // 启停：落地后判定 false→true 过渡（poll 重置基线，ADR-0016）。

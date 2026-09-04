@@ -7,13 +7,15 @@ use sqlx::SqlitePool;
 
 use super::{StoreError, is_unique_violation, now_ms};
 
-/// 项目绑定的仓库类型（CONTEXT.md：git 带默认分支、svn 无分支概念）。
+/// 项目绑定的仓库类型（git/svn，或不绑定 SCM 的空工作区）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScmType {
     /// git 仓库（默认分支可空）。
     Git,
     /// svn 仓库（URL 即唯一监控对象）。
     Svn,
+    /// 不绑定版本管理器的空工作区项目。
+    None,
 }
 
 impl ScmType {
@@ -22,6 +24,7 @@ impl ScmType {
         match self {
             Self::Git => "git",
             Self::Svn => "svn",
+            Self::None => "none",
         }
     }
 
@@ -30,6 +33,7 @@ impl ScmType {
         match s {
             "git" => Ok(Self::Git),
             "svn" => Ok(Self::Svn),
+            "none" => Ok(Self::None),
             other => Err(StoreError::Db(sqlx::Error::ColumnDecode {
                 index: "scm_type".into(),
                 source: format!("未知 scm_type：{other}").into(),
@@ -274,5 +278,30 @@ mod tests {
             .await
             .expect_err("重名应拒绝");
         assert!(matches!(err, StoreError::Unique(_)), "应为唯一冲突：{err}");
+    }
+
+    #[tokio::test]
+    async fn empty_workspace_round_trips_without_scm() {
+        let (_dir, pool) = migrated_pool().await;
+        let repo = ProjectRepo::new(pool);
+        let created = repo
+            .create(NewProject {
+                name: "artifact-only".into(),
+                scm_type: ScmType::None,
+                scm_url: String::new(),
+                default_branch: None,
+            })
+            .await
+            .expect("创建空工作区项目");
+
+        assert_eq!(created.scm_type, ScmType::None);
+        assert!(created.scm_url.is_empty());
+        assert_eq!(
+            repo.get_by_name("artifact-only")
+                .await
+                .expect("读取")
+                .unwrap(),
+            created
+        );
     }
 }

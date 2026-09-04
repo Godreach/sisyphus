@@ -59,6 +59,7 @@
   "projects": {
     "name": "Project name",
     "scmType": "Repository type",
+    "scmNone": "No SCM (empty workspace)",
     "scmUrl": "Repository URL",
     "scmUrlPlaceholder": "https://example.com/org/repo.git",
     "nameRequired": "Please enter the project name",
@@ -66,6 +67,8 @@
     "defaultBranch": "Default branch (git)",
     "defaultBranchPlaceholder": "main",
     "newProject": "New project",
+    "searchPlaceholder": "Search projects…",
+    "searchEmpty": "No matching projects",
     "save": "Save",
     "saving": "Saving…",
     "empty": "No projects yet",

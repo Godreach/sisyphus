@@ -333,6 +333,7 @@ impl TriggerEngine {
                     let (commit, revision) = match project.scm_type {
                         ScmType::Git => (Some(head.clone()), None),
                         ScmType::Svn => (None, Some(head.clone())),
+                        ScmType::None => (None, None),
                     };
                     match self
                         .engine

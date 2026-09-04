@@ -19,7 +19,7 @@ use super::error::{ApiError, ErrorBody, ValidationIssue, parse_body};
 use super::policy::RequireViewer;
 use crate::store::projects::{NewProject, Project, ScmType};
 
-/// 仓库类型（API 形态；`git` / `svn`）。
+/// 仓库类型（API 形态；`git` / `svn` / `none`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ScmTypeDto {
@@ -27,6 +27,8 @@ pub enum ScmTypeDto {
     Git,
     /// svn 仓库（URL 即唯一监控对象，无分支概念）。
     Svn,
+    /// 不绑定版本管理器的空工作区项目。
+    None,
 }
 
 impl From<ScmTypeDto> for ScmType {
@@ -34,6 +36,7 @@ impl From<ScmTypeDto> for ScmType {
         match dto {
             ScmTypeDto::Git => Self::Git,
             ScmTypeDto::Svn => Self::Svn,
+            ScmTypeDto::None => Self::None,
         }
     }
 }
@@ -43,6 +46,7 @@ impl From<ScmType> for ScmTypeDto {
         match domain {
             ScmType::Git => Self::Git,
             ScmType::Svn => Self::Svn,
+            ScmType::None => Self::None,
         }
     }
 }
@@ -54,7 +58,7 @@ pub struct CreateProjectRequest {
     pub name: String,
     /// 仓库类型。
     pub scm_type: ScmTypeDto,
-    /// 仓库 URL。
+    /// 仓库 URL；`none` 类型传空字符串。
     pub scm_url: String,
     /// git 默认分支（可空；svn 项目不适用）。
     pub default_branch: Option<String>,
@@ -74,9 +78,9 @@ pub struct ProjectResponse {
     pub id: i64,
     /// 项目名（唯一）。
     pub name: String,
-    /// 仓库类型（`git` / `svn`）。
+    /// 仓库类型（`git` / `svn` / `none`）。
     pub scm_type: ScmTypeDto,
-    /// 仓库 URL。
+    /// 仓库 URL；`none` 类型为空字符串。
     pub scm_url: String,
     /// git 默认分支（可空；svn 恒空）。
     pub default_branch: Option<String>,
@@ -243,16 +247,18 @@ fn validate_create(req: &CreateProjectRequest) -> Vec<ValidationIssue> {
             message: "项目名不能为空".into(),
         });
     }
-    if req.scm_url.trim().is_empty() {
+    if req.scm_type != ScmTypeDto::None && req.scm_url.trim().is_empty() {
         issues.push(ValidationIssue {
             path: "scm_url".into(),
             message: "仓库 URL 不能为空".into(),
         });
     }
-    if req.scm_type == ScmTypeDto::Svn && req.default_branch.is_some() {
+    if matches!(req.scm_type, ScmTypeDto::Svn | ScmTypeDto::None)
+        && req.default_branch.is_some()
+    {
         issues.push(ValidationIssue {
             path: "default_branch".into(),
-            message: "svn 项目无分支概念，不支持默认分支".into(),
+            message: "该项目类型无分支概念，不支持默认分支".into(),
         });
     }
     issues

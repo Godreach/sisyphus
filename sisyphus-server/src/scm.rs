@@ -738,6 +738,7 @@ impl ScmProbe for SystemScmProbe {
                     .await
                     .map_err(|e| e.message())
             }
+            crate::store::projects::ScmType::None => Ok(None),
         }
     }
 }

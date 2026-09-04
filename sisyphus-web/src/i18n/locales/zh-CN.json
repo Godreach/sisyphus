@@ -59,6 +59,7 @@
   "projects": {
     "name": "项目名",
     "scmType": "仓库类型",
+    "scmNone": "无 SCM（空仓库）",
     "scmUrl": "仓库 URL",
     "scmUrlPlaceholder": "https://example.com/org/repo.git",
     "nameRequired": "请输入项目名",
@@ -66,6 +67,8 @@
     "defaultBranch": "默认分支（git）",
     "defaultBranchPlaceholder": "main",
     "newProject": "新建项目",
+    "searchPlaceholder": "搜索项目…",
+    "searchEmpty": "没有匹配的项目",
     "save": "保存",
     "saving": "提交中…",
     "empty": "暂无项目",

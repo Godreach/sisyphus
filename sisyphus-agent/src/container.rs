@@ -505,6 +505,7 @@ impl ContainerTask {
         let need_init = match vcs {
             VcsType::VcsGit => !host_ws.join(".git").exists(),
             VcsType::VcsSvn => !host_ws.join(".svn").exists(),
+            VcsType::VcsNone => false,
         };
         // plan_ws = 容器内路径：git/svn 子命令在容器内操作 /sisyphus/workspace
         // （挂载源是宿主工作区，文件系统状态经挂载落盘）。cred_env 空：凭据经 env

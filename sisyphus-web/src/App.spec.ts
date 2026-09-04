@@ -34,6 +34,7 @@ describe('App 壳（三项导航 + 登出闭环）', () => {
         { path: '/login', name: 'login', component: { template: '<div />' } },
         { path: '/', name: 'overview', component: { template: '<div />' } },
         { path: '/pipelines', name: 'pipelines', component: { template: '<div />' } },
+        { path: '/projects', name: 'projects', component: { template: '<div />' } },
       ],
     })
     await router.push('/')
@@ -67,6 +68,33 @@ describe('App 壳（三项导航 + 登出闭环）', () => {
     const pushSpy = vi.spyOn(router, 'push')
     await items[1]?.trigger('click')
     expect(pushSpy).toHaveBeenCalledWith({ name: 'pipelines' })
+  })
+
+  it('流水线页顶栏新建按钮进入项目列表，不触发新建项目弹窗参数', async () => {
+    const auth = useAuthStore()
+    auth.setAuthed({ username: 'alice', isAdmin: false })
+    await router.push('/pipelines')
+    await wrapper.vm.$nextTick()
+
+    await wrapper.get('[data-testid="topbar-cta"]').trigger('click')
+
+    await vi.waitFor(() => {
+      expect(router.currentRoute.value.name).toBe('projects')
+      expect(router.currentRoute.value.query.create).toBeUndefined()
+    })
+  })
+
+  it('项目页顶栏显示搜索框与新建项目主按钮', async () => {
+    const auth = useAuthStore()
+    auth.setAuthed({ username: 'alice', isAdmin: true })
+    await router.push('/projects')
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[data-testid="topbar-search"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="topbar-cta"]').text()).toContain('新建项目')
+
+    await wrapper.get('[data-testid="topbar-cta"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.query.create).toBe('1'))
   })
 
   it('侧栏宽度可拖拽调整并持久化；双击复位', async () => {

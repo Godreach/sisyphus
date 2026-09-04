@@ -260,8 +260,10 @@ const titleText = computed(() => {
   return typeof key === 'string' ? t(key) : t('app.name')
 })
 
-/** 搜索框只在流水线/构建机两页出现（原型页二/三顶栏形态）。 */
-const showSearch = computed(() => route.name === 'pipelines' || route.name === 'machines')
+/** 搜索框出现在项目、流水线、构建机三张列表页的顶栏。 */
+const showSearch = computed(() =>
+  route.name === 'projects' || route.name === 'pipelines' || route.name === 'machines',
+)
 
 const searchQuery = ref(typeof route.query.q === 'string' ? route.query.q : '')
 let searchTimer: ReturnType<typeof setTimeout> | undefined
@@ -289,13 +291,20 @@ watch(
  *  （Agent 管理面全局 admin 专属，非 admin 不渲染）。 */
 const ctaLabel = computed(() => {
   if (route.name === 'pipelines') return t('plines.newPipeline')
+  if (route.name === 'projects') return t('projects.newProject')
   if (route.name === 'machines' && isAdmin.value) return t('agents.accessMachine')
   return ''
 })
 
 function onCta(): void {
   if (route.name === 'pipelines') {
-    void router.push({ name: 'projects', query: { create: '1' } })
+    // 新建流水线需要先选择已有项目；不要复用项目页的 `create=1`，
+    // 那个参数专门用于打开「新建项目」弹窗。
+    void router.push({ name: 'projects' })
+    return
+  }
+  if (route.name === 'projects') {
+    void router.push({ query: { ...route.query, create: '1' } })
     return
   }
   if (route.name === 'machines') {
@@ -397,7 +406,13 @@ function onCta(): void {
                   <input
                     :value="searchQuery"
                     type="text"
-                    :placeholder="route.name === 'pipelines' ? t('plines.searchPlaceholder') : t('agents.searchPlaceholder')"
+                    :placeholder="
+                      route.name === 'pipelines'
+                        ? t('plines.searchPlaceholder')
+                        : route.name === 'machines'
+                          ? t('agents.searchPlaceholder')
+                          : t('projects.searchPlaceholder')
+                    "
                     data-testid="topbar-search"
                     @input="onSearchInput(($event.target as HTMLInputElement).value)"
                   />

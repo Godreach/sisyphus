@@ -190,7 +190,7 @@ function project(
   id: number,
   name: string,
   url: string,
-  scmType: 'git' | 'svn' = 'git',
+  scmType: 'git' | 'svn' | 'none' = 'git',
 ): ProjectResponse {
   return {
     id,

@@ -313,6 +313,7 @@ pub fn job_spec_message(job: &JobRow, spec: &ResolvedJobSpec) -> sisyphus_proto:
                         vcs: match scm.vcs {
                             Vcs::Git => sisyphus_proto::agent::VcsType::VcsGit as i32,
                             Vcs::Svn => sisyphus_proto::agent::VcsType::VcsSvn as i32,
+                            Vcs::None => sisyphus_proto::agent::VcsType::VcsNone as i32,
                         },
                         repo_url: scm.repo_url.clone(),
                         r#ref: scm.branch.clone(),

@@ -122,7 +122,9 @@ pub async fn scm_probe(
     body: Bytes,
 ) -> Result<Json<ScmProbeResponse>, ApiError> {
     let req: ScmProbeRequest = parse_body(&body)?;
-    validate_url(&req.scm_url)?;
+    if req.scm_type != super::projects::ScmTypeDto::None {
+        validate_url(&req.scm_url)?;
+    }
     let cred = build_cred(req.username.as_deref(), req.password.as_deref());
     let bins = ScmBins::default();
     let head = probe_head_for(req.scm_type.into(), &req.scm_url, cred.as_ref(), &bins).await?;
@@ -191,6 +193,9 @@ pub async fn test_connection(
     let row = state.scm_credentials.get(access.project.id).await?;
     let cred = scm::resolve_plain_cred(row, &state.master_key)
         .map_err(|e| ApiError::internal("scm credential decrypt", &e))?;
+    if access.project.scm_type == ScmType::None {
+        return Ok(Json(ScmProbeResponse { head: None }));
+    }
     let head = probe_head_for(
         access.project.scm_type,
         &access.project.scm_url,
@@ -303,6 +308,7 @@ async fn probe_head_for(
         ScmType::Svn => scm::svn_info_revision(url, cred, bins)
             .await
             .map_err(probe_err_to_api),
+        ScmType::None => Ok(None),
     }
 }
 

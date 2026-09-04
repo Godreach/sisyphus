@@ -252,6 +252,12 @@ export function createHandlers(options: MockHandlerOptions) {
       if (denied != null) return denied
       await delay(250)
       const body = (await request.json()) as CreateProjectRequest
+      if (body.scm_type !== 'none' && body.scm_url.trim() === '') {
+        return validationError([{ path: 'scm_url', message: '仓库 URL 不能为空' }])
+      }
+      if (body.scm_type === 'none' && body.default_branch != null) {
+        return validationError([{ path: 'default_branch', message: '该项目类型无分支概念，不支持默认分支' }])
+      }
       const project: ProjectResponse = {
         id: db.PROJECTS.length + 1,
         name: body.name,

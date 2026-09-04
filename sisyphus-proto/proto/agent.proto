@@ -151,6 +151,7 @@ message CheckoutStep {
 enum VcsType {
   VCS_GIT = 0;
   VCS_SVN = 1;
+  VCS_NONE = 2; // 项目不绑定版本管理器；通常不应出现 checkout 步骤
 }
 
 message ArtifactUpload {

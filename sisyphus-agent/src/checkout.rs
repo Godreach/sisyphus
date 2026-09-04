@@ -93,6 +93,7 @@ pub(crate) fn vcs_of(step: &CheckoutStep) -> Option<VcsType> {
     match step.vcs {
         x if x == VcsType::VcsGit as i32 => Some(VcsType::VcsGit),
         x if x == VcsType::VcsSvn as i32 => Some(VcsType::VcsSvn),
+        x if x == VcsType::VcsNone as i32 => Some(VcsType::VcsNone),
         _ => None,
     }
 }
@@ -109,6 +110,7 @@ pub(crate) fn step_echo(step: &CheckoutStep) -> String {
             };
             format!("svn checkout {} @ r{}", step.repo_url, rev)
         }
+        Some(VcsType::VcsNone) => "无 SCM 项目不应包含 checkout 步骤".into(),
         _ => {
             let target = if !step.commit.is_empty() {
                 step.commit.clone()
@@ -142,6 +144,7 @@ pub(crate) fn plan(
     match vcs_of(step) {
         Some(VcsType::VcsGit) => plan_git(step, ws_dir, need_init, bins, cred_env),
         Some(VcsType::VcsSvn) => plan_svn(step, ws_dir, need_init, bins, credential),
+        Some(VcsType::VcsNone) => Err("无 SCM 项目不应包含 checkout 步骤".into()),
         None => Err("未知 VcsType（CheckoutStep.vcs 越界）".into()),
     }
 }
@@ -680,6 +683,7 @@ pub(crate) async fn run(
     let need_init = match vcs {
         VcsType::VcsGit => !ws_dir.join(".git").exists(),
         VcsType::VcsSvn => !ws_dir.join(".svn").exists(),
+        VcsType::VcsNone => false,
     };
     // git 凭据递送 artifact（svn 不用——svn 走 --username/stdin）。
     let cred = if matches!(vcs, VcsType::VcsGit) {

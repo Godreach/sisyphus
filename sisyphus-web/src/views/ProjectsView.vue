@@ -14,7 +14,7 @@
 // 成功/失败徽章（不离开表单）、空列表 NEmpty + 创建引导按钮、成功 toast
 // 通知；视觉与 #84/#86 主题一致。
 
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import {
@@ -46,6 +46,13 @@ const message = useMessage()
 
 const projects = ref<ProjectResponse[] | null>(null)
 const listError = ref('')
+const searchQuery = computed(() => (typeof route.query.q === 'string' ? route.query.q.trim().toLowerCase() : ''))
+const filteredProjects = computed(() => {
+  if (projects.value === null || searchQuery.value === '') return projects.value
+  return projects.value.filter((project) =>
+    [project.name, project.scm_url, project.scm_type].some((value) => value.toLowerCase().includes(searchQuery.value)),
+  )
+})
 
 /** 新建表单。 */
 const showForm = ref(false)
@@ -76,9 +83,9 @@ const formModel = computed(() => ({
 const rules = computed<FormRules>(() => ({
   name: { required: true, message: t('projects.nameRequired'), trigger: 'blur' },
   scmUrl: {
-    required: true,
     trigger: 'blur',
     validator: (_rule, value: string) => {
+      if (scmType.value === 'none') return true
       if (value == null || value.trim() === '') {
         return new Error(t('projects.scmUrlRequired'))
       }
@@ -90,12 +97,23 @@ const rules = computed<FormRules>(() => ({
   },
 }))
 
-onMounted(() => {
-  // 顶栏「新建流水线」CTA（?create=1）→ 直接展开新建表单并清参。
+function consumeCreateQuery(): void {
+  // 项目页的 `?create=1` 深链 → 打开新建项目弹框并清参。
   if (route.query.create === '1') {
-    showForm.value = true
+    openForm()
     void router.replace({ query: { ...route.query, create: undefined } })
   }
+}
+
+watch(
+  () => route.query.create,
+  (create) => {
+    if (create === '1') consumeCreateQuery()
+  },
+)
+
+onMounted(() => {
+  consumeCreateQuery()
   void load()
 })
 
@@ -116,6 +134,7 @@ async function load(): Promise<void> {
 async function testConnection(): Promise<void> {
   probeState.value = null
   probeMsg.value = ''
+  if (scmType.value === 'none') return
   if (scmUrl.value.trim() === '') {
     probeState.value = 'error'
     probeMsg.value = t('projects.scmUrlRequired')
@@ -178,6 +197,7 @@ async function createProject(): Promise<void> {
     })
     showForm.value = false
     name.value = ''
+    scmType.value = 'git'
     scmUrl.value = ''
     defaultBranch.value = ''
     scmUsername.value = ''
@@ -199,16 +219,30 @@ function openProject(p: ProjectResponse): void {
 }
 
 function toggleForm(): void {
-  showForm.value = !showForm.value
-  if (!showForm.value) {
+  if (showForm.value) {
+    showForm.value = false
     probeState.value = null
     probeMsg.value = ''
+    submitError.value = ''
     formRef.value?.restoreValidation()
+  } else {
+    openForm()
   }
+}
+
+function openForm(): void {
+  submitError.value = ''
+  showForm.value = true
 }
 
 function onScmTypeChange(v: ScmTypeDto): void {
   scmType.value = v
+  if (v === 'none') {
+    scmUrl.value = ''
+    defaultBranch.value = ''
+    scmUsername.value = ''
+    scmPassword.value = ''
+  }
   probeState.value = null
   probeMsg.value = ''
 }
@@ -216,27 +250,28 @@ function onScmTypeChange(v: ScmTypeDto): void {
 
 <template>
   <div class="projects-page">
-    <div class="page-header header-end">
-      <n-button type="primary" name="project-new" @click="toggleForm">
-        <template #icon>
-          <n-icon :component="CreateOutline" />
-        </template>
-        {{ t('projects.newProject') }}
-      </n-button>
-    </div>
-
     <n-alert v-if="listError" type="error" :title="listError" role="alert" class="projects-alert" />
 
-    <!-- 新建项目表单（git/svn + 仓库 URL + git 默认分支 + 可选 SCM 凭据）。 -->
-    <n-form
-      v-if="showForm"
-      ref="formRef"
-      :model="formModel"
-      :rules="rules"
-      label-placement="top"
-      class="project-form"
-      @submit.prevent="createProject"
-    >
+    <!-- 新建项目表单只在主动点击 CTA 后通过弹框出现。 -->
+    <div v-if="showForm" class="project-modal-mask" role="presentation">
+      <n-card
+        class="project-modal"
+        :title="t('projects.newProject')"
+        role="dialog"
+        aria-modal="true"
+        :bordered="false"
+      >
+        <template #header-extra>
+          <n-button quaternary circle aria-label="close" @click="toggleForm">×</n-button>
+        </template>
+      <n-form
+        ref="formRef"
+        :model="formModel"
+        :rules="rules"
+        label-placement="top"
+        class="project-form"
+        @submit.prevent="createProject"
+      >
       <n-form-item path="name" :label="t('projects.name')">
         <n-input
           v-model:value="name"
@@ -252,13 +287,14 @@ function onScmTypeChange(v: ScmTypeDto): void {
           :options="[
             { label: 'git', value: 'git' },
             { label: 'svn', value: 'svn' },
+            { label: t('projects.scmNone'), value: 'none' },
           ]"
           :virtual-scroll="false"
           @update:value="onScmTypeChange"
         />
       </n-form-item>
 
-      <n-form-item path="scmUrl" :label="t('projects.scmUrl')">
+      <n-form-item v-if="scmType !== 'none'" path="scmUrl" :label="t('projects.scmUrl')">
         <n-input
           v-model:value="scmUrl"
           :input-props="{ name: 'project-url' }"
@@ -275,6 +311,7 @@ function onScmTypeChange(v: ScmTypeDto): void {
       </n-form-item>
 
       <!-- SCM 凭据（可选，加密落库；仅私有 https 仓库需填）。 -->
+      <template v-if="scmType !== 'none'">
       <n-form-item path="scmUsername" :label="t('projects.scmUsername')">
         <n-input
           v-model:value="scmUsername"
@@ -292,11 +329,13 @@ function onScmTypeChange(v: ScmTypeDto): void {
         />
       </n-form-item>
       <p class="form-hint">{{ t('projects.scmCredHint') }}</p>
+      </template>
 
       <div class="project-form-actions">
         <!-- 测试连接不阻塞保存（ADR-0016）：验证 URL+凭据、预填默认分支。
              徽章 NSpin → NTag 成功/失败就地展示，无需离开表单。 -->
         <n-button
+          v-if="scmType !== 'none'"
           name="project-test-connection"
           :disabled="probing"
           :loading="probing"
@@ -330,16 +369,18 @@ function onScmTypeChange(v: ScmTypeDto): void {
       </div>
 
       <p v-if="scmType === 'git'" class="form-hint">{{ t('projects.branchPrefillHint') }}</p>
-      <p class="form-hint">{{ t('projects.testConnectionHint') }}</p>
+      <p v-if="scmType !== 'none'" class="form-hint">{{ t('projects.testConnectionHint') }}</p>
 
       <n-alert v-if="submitError" type="error" :title="submitError" role="alert" class="projects-alert" />
-    </n-form>
+      </n-form>
+      </n-card>
+    </div>
 
     <!-- 项目列表（卡片布局；可见性过滤）。 -->
-    <template v-if="projects && projects.length > 0">
+    <template v-if="filteredProjects && filteredProjects.length > 0">
       <div class="project-card-grid" aria-label="projects">
         <n-card
-          v-for="p in projects"
+          v-for="p in filteredProjects"
           :key="p.name"
           class="project-card"
           size="small"
@@ -356,7 +397,8 @@ function onScmTypeChange(v: ScmTypeDto): void {
           <template #header-extra>
             <n-tag size="small" :bordered="false" round>{{ p.scm_type }}</n-tag>
           </template>
-          <p class="project-card-meta mono">{{ p.scm_url }}</p>
+          <p v-if="p.scm_url" class="project-card-meta mono">{{ p.scm_url }}</p>
+          <p v-else class="project-card-meta">{{ t('projects.scmNone') }}</p>
           <div v-if="p.default_branch" class="project-card-branch">
             <n-icon :component="GitBranch" class="project-card-branch-icon" />
             <span class="project-card-branch-text">{{ p.default_branch }}</span>
@@ -366,10 +408,10 @@ function onScmTypeChange(v: ScmTypeDto): void {
     </template>
 
     <!-- 空项目列表：NEmpty 空状态 + 创建引导按钮。 -->
-    <div v-else-if="projects && !listError" class="project-empty">
-      <n-empty :description="t('projects.empty')">
+    <div v-else-if="filteredProjects && !listError" class="project-empty">
+      <n-empty :description="searchQuery ? t('projects.searchEmpty') : t('projects.empty')">
         <template #extra>
-          <n-button type="primary" class="project-empty-action" @click="toggleForm">
+          <n-button v-if="searchQuery === ''" type="primary" class="project-empty-action" @click="toggleForm">
             <template #icon>
               <n-icon :component="CreateOutline" />
             </template>
@@ -385,15 +427,26 @@ function onScmTypeChange(v: ScmTypeDto): void {
 /* #98: 自 main.css 原样收编（.n-form 非 inline 时根部无组件样式，无层叠
  * 冲突）。外围卡片样式 + 操作行布局，其余视觉由 NForm 系列提供。 */
 .project-form {
-  background: var(--sisy-color-surface);
-  border: 1px solid var(--sisy-color-border);
-  border-radius: var(--sisy-radius);
-  padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin: 12px 0 20px;
-  max-width: 480px;
+  padding: 4px 0 0;
+}
+
+.project-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.62);
+}
+
+.project-modal {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
 }
 
 .project-form-actions {

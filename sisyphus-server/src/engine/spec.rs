@@ -39,6 +39,8 @@ pub enum Vcs {
     Git,
     /// svn。
     Svn,
+    /// 不绑定 SCM 的空工作区。
+    None,
 }
 
 /// SCM 上下文（ADR-0016：每次构建都有明确的 SCM 上下文；随规格下发供
@@ -327,6 +329,13 @@ pub(crate) fn scm_context(project: &Project, trigger: &TriggerDetail) -> ScmCont
             branch: String::new(),
             commit: String::new(),
             revision: trigger.revision.clone().unwrap_or_default(),
+        },
+        ScmType::None => ScmContext {
+            vcs: Vcs::None,
+            repo_url: String::new(),
+            branch: String::new(),
+            commit: String::new(),
+            revision: String::new(),
         },
     }
 }
