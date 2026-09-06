@@ -6,12 +6,13 @@
 // 数据：
 // - 清单 `GET /pipelines`（契约票 #105，P1 裁定——服务端权威清单，替代
 //   探测凑数）；清单失败整页报错 + 重试（既有事实态纪律，不做探测回退）。
-// - 每行调统计端点 `GET …/stats?window=20`（契约票 #102）：成功率/平均耗时/
+// - 每行调统计端点 `GET …/stats?window=20`（契约票 #102）：成功率/
 //   构建总数/最近一条构建由服务端聚合；窗口内无终态构建时 success_rate /
-//   avg_duration_ms 为 null → 显示「—」。
+//   avg_duration_ms 为 null → 成功率显示「—」。
 // - 进度（P3 裁定）：最近构建为 running 的行走既有构建详情端点取阶段/任务
 //   态，进度 = 当前 attempt 已落定任务数 / 任务总数（双层进度条）；排队未
-//   开始与非运行行显示「—」。
+//   开始与非运行行显示「—」。卡片统计中的耗时取最近一次成功构建详情，
+//   数据缺失时显示「—」。
 // - 收藏（票 #104 W8 裁定，入口随本票落地）：`GET/PUT/DELETE
 //   /user/pipeline-favorites`；星标切换，失败 toast 行内报错。
 // - 轻轮询（5s）：仅对最近构建为排队/运行中的行重取统计与进度，mock 动态
@@ -51,10 +52,24 @@ interface PipelineRow {
   total: number
   /** 窗口内终态成功率（服务端一位小数；无终态为 null → 「—」）。 */
   rate: string | null
-  /** 窗口内终态平均耗时毫秒（无样本为 null → 「—」）。 */
-  avgMs: number | null
-  /** 最近构建为 running 时的任务进度（0–100 整数；其余为 null → 「—」）。 */
+  /** 最近构建当前任务进度（0–100 整数；详情不可得为 null → 「—」）。 */
   progress: number | null
+  /** 当前构建耗时（运行中/失败卡片展示）。 */
+  currentDurationMs: number | null
+  /** 当前任务（运行中/失败卡片展示）。 */
+  currentStep: string | null
+  /** 最近一次成功构建耗时（卡片/列表统计）。 */
+  lastSuccessfulDurationMs: number | null
+}
+
+interface LiveBuildInfo {
+  progress: number | null
+  currentDurationMs: number | null
+  currentStep: string | null
+}
+
+interface LastSuccessfulBuildInfo {
+  lastSuccessfulDurationMs: number | null
 }
 
 const rows = ref<PipelineRow[]>([])
@@ -133,8 +148,8 @@ async function loadRow(item: { project: string; pipeline: string }): Promise<Pip
       latest,
       total: stats.total_builds,
       rate: stats.success_rate != null ? `${stats.success_rate}%` : null,
-      avgMs: stats.avg_duration_ms,
-      progress: await progressFor(item, latest),
+      ...(await liveBuildInfoFor(item, latest)),
+      ...(await lastSuccessfulBuildInfoFor(item, latest)),
     }
   } catch {
     return {
@@ -143,33 +158,78 @@ async function loadRow(item: { project: string; pipeline: string }): Promise<Pip
       latest: null,
       total: 0,
       rate: null,
-      avgMs: null,
       progress: null,
+      currentDurationMs: null,
+      currentStep: null,
+      lastSuccessfulDurationMs: null,
     }
   }
 }
 
-/** P3：运行中构建 → 任务进度（当前 attempt 已落定任务 / 任务总数）。
- *  排队未开始/非运行/详情不可得 → null（显示「—」，不造假）。 */
-async function progressFor(
+/** 读取最近一次成功构建耗时；当前构建非成功时先从构建列表定位成功构建。 */
+async function lastSuccessfulBuildInfoFor(
   item: { project: string; pipeline: string },
   latest: LatestBuildRef | null,
-): Promise<number | null> {
-  if (latest?.status !== 'running') return null
+): Promise<LastSuccessfulBuildInfo> {
   try {
-    const detail = await buildsApi.detail(item.project, item.pipeline, latest.number)
-    return progressOfDetail(detail)
+    const number =
+      latest?.status === 'succeeded'
+        ? latest.number
+        : (await buildsApi.list(item.project, item.pipeline, { page: 1, limit: 1, status: 'succeeded' })).items[0]
+            ?.number
+    if (number == null) return { lastSuccessfulDurationMs: null }
+    const detail = await buildsApi.detail(item.project, item.pipeline, number)
+    return {
+      lastSuccessfulDurationMs: detail.status === 'succeeded' ? detail.elapsed_ms : null,
+    }
   } catch {
-    return null
+    return { lastSuccessfulDurationMs: null }
   }
 }
 
-function progressOfDetail(detail: BuildDetailResponse): number | null {
-  // 进度口径（P3）与构建详情阶段进度共享 settledPercent。
-  const jobs = detail.stages
-    .flatMap((stage) => stage.jobs)
-    .filter((job) => job.attempt === detail.attempt)
-  return settledPercent(jobs)
+/** 运行中/失败构建的当前信息：进度、耗时和当前任务都来自同一份构建详情。
+ * 排队未开始/其他终态/详情不可得 → null（不造假）。 */
+async function liveBuildInfoFor(
+  item: { project: string; pipeline: string },
+  latest: LatestBuildRef | null,
+): Promise<LiveBuildInfo> {
+  if (latest?.status !== 'running' && latest?.status !== 'failed') {
+    return { progress: null, currentDurationMs: null, currentStep: null }
+  }
+  try {
+    const detail = await buildsApi.detail(item.project, item.pipeline, latest.number)
+    return liveBuildInfoOfDetail(detail)
+  } catch {
+    return { progress: null, currentDurationMs: null, currentStep: null }
+  }
+}
+
+function liveBuildInfoOfDetail(detail: BuildDetailResponse): LiveBuildInfo {
+  // 运行中沿用构建详情的 settledPercent；失败构建只统计成功任务，
+  // 不把失败任务本身计入进度，避免失败构建看起来已经 100% 完成。
+  const jobs = detail.stages.flatMap((stage) =>
+    stage.jobs
+      .filter((job) => job.attempt === detail.attempt)
+      .map((job) => ({ stage, job })),
+  )
+  const current =
+    jobs.find(({ job }) => job.status === 'running') ??
+    jobs.find(({ job }) => job.status === 'failed')
+  return {
+    progress:
+      detail.status === 'failed'
+        ? jobs.length === 0
+          ? null
+          : Math.round((jobs.filter(({ job }) => job.status === 'succeeded').length / jobs.length) * 100)
+        : settledPercent(jobs.map(({ job }) => job)),
+    currentDurationMs: detail.elapsed_ms,
+    currentStep:
+      current == null
+        ? null
+        : current.stage.name === current.job.name
+          ? current.job.name
+          : `${current.stage.name} / ${current.job.name}`,
+  }
 }
 
 /** 轻轮询：仅重取最近构建为排队/运行中的行（统计 + 进度），其余不动。 */
@@ -277,6 +337,10 @@ function statusLabel(status: string | undefined): string {
 
 function triggerLabel(row: PipelineRow): string {
   return row.latest ? t(`triggerSource.${row.latest.trigger}`) : '—'
+}
+
+function currentStepLabel(row: PipelineRow): string {
+  return row.currentStep ?? '—'
 }
 
 function latestRunText(row: PipelineRow): string {
@@ -447,7 +511,7 @@ const hasAny = computed(() => rows.value.length > 0)
             <span class="pc-status">{{ t('plines.colStatus') }}</span>
             <span class="pc-progress">{{ t('plines.colProgress') }}</span>
             <span class="pc-rate">{{ t('plines.colRate') }}</span>
-            <span class="pc-avg">{{ t('plines.colAvg') }}</span>
+              <span class="pc-avg">{{ t('plines.lastSuccessDuration') }}</span>
             <span class="pc-trigger">{{ t('plines.colTrigger') }}</span>
             <span class="pc-action" />
           </div>
@@ -484,7 +548,7 @@ const hasAny = computed(() => rows.value.length > 0)
                 <span v-else class="pct-none">—</span>
               </div>
               <span class="pc-rate">{{ row.rate ?? '—' }}</span>
-              <span class="pc-avg">{{ row.avgMs != null ? formatDuration(row.avgMs) : '—' }}</span>
+              <span class="pc-avg">{{ row.lastSuccessfulDurationMs != null ? formatDuration(row.lastSuccessfulDurationMs) : '—' }}</span>
               <span class="pc-trigger">{{ triggerLabel(row) }}</span>
               <div class="pc-action">
                 <button
@@ -506,7 +570,17 @@ const hasAny = computed(() => rows.value.length > 0)
 
         <!-- 卡片视图（原型 cards-view 2 列网格；P6 定稿默认视图）。 -->
         <section v-else class="cards-view" aria-label="pipeline cards">
-          <article v-for="row in visibleRows" :key="rowKeyOf(row)" class="p-card">
+          <article
+            v-for="row in visibleRows"
+            :key="rowKeyOf(row)"
+            class="p-card p-card-clickable"
+            role="link"
+            tabindex="0"
+            :aria-label="`${row.project}/${row.pipeline}`"
+            @click="openPipeline(row)"
+            @keydown.enter.prevent="openPipeline(row)"
+            @keydown.space.prevent="openPipeline(row)"
+          >
             <div class="p-card-head">
               <div class="p-card-title">
                 <button
@@ -515,18 +589,49 @@ const hasAny = computed(() => rows.value.length > 0)
                   :class="{ active: isFavorite(row) }"
                   :title="isFavorite(row) ? t('plines.favoriteRemove') : t('plines.favoriteAdd')"
                   :data-testid="`fav-${rowKeyOf(row)}`"
-                  @click="toggleFavorite(row)"
+                  @click.stop="toggleFavorite(row)"
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" :fill="isFavorite(row) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="2" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5-5.9-3.2-5.9 3.2 1.2-6.5L2.5 9.4l6.6-.9z"/></svg>
                 </button>
-                <button type="button" class="p-card-name" @click="openPipeline(row)">{{ row.pipeline }}</button>
+                <div class="p-card-identity">
+                  <span class="p-card-project">{{ row.project }}</span>
+                  <span class="p-card-identity-separator" aria-hidden="true">/</span>
+                  <button type="button" class="p-card-name" @click.stop="openPipeline(row)">{{ row.pipeline }}</button>
+                </div>
               </div>
               <span class="badge" :class="statusBadgeClass(row.latest?.status ?? '')">
                 {{ statusLabel(row.latest?.status) }}
               </span>
             </div>
-            <div class="p-card-sub">{{ row.project }} · {{ t('plines.latestRun') }} {{ latestRunText(row) }}</div>
-            <div v-if="row.progress != null" class="p-card-progress">
+          <div v-if="row.latest?.status !== 'running' && row.latest?.status !== 'failed'" class="p-card-sub">
+              {{ t('plines.latestRun') }} {{ latestRunText(row) }}
+            </div>
+            <div
+              v-if="row.latest?.status === 'running' || row.latest?.status === 'failed'"
+              class="p-card-progress p-card-live"
+              :class="{ 'p-card-live-failed': row.latest?.status === 'failed' }"
+              data-testid="p-card-live"
+            >
+              <div class="p-card-live-progress">
+                <div class="usage-row">
+                  <div class="track">
+                    <div v-if="row.progress != null" class="fill" :style="{ width: `${row.progress}%` }" />
+                  </div>
+                  <span class="pct">{{ row.progress != null ? `${row.progress}%` : '—' }}</span>
+                </div>
+              </div>
+              <div class="p-card-live-details">
+                <div class="live-detail" data-testid="p-card-current-duration">
+                  <span class="live-label">{{ t('plines.currentDuration') }}</span>
+                  <strong>{{ row.currentDurationMs != null ? formatDuration(row.currentDurationMs) : '—' }}</strong>
+                </div>
+                <div class="live-detail live-detail-step" data-testid="p-card-current-step">
+                  <span class="live-label">{{ t('plines.currentStep') }}</span>
+                  <strong>{{ currentStepLabel(row) }}</strong>
+                </div>
+              </div>
+            </div>
+            <div v-else-if="row.progress != null" class="p-card-progress">
               <div class="usage-row">
                 <div class="track">
                   <div class="fill" :style="{ width: `${row.progress}%` }" />
@@ -534,14 +639,14 @@ const hasAny = computed(() => rows.value.length > 0)
                 <span class="pct">{{ row.progress }}%</span>
               </div>
             </div>
-            <div class="p-card-stats">
+            <div v-if="row.latest?.status !== 'running' && row.latest?.status !== 'failed'" class="p-card-stats">
               <div class="p-stat">
                 <span class="l">{{ t('plines.colRate') }}</span>
                 <span class="v">{{ row.rate ?? '—' }}</span>
               </div>
               <div class="p-stat">
-                <span class="l">{{ t('plines.colAvg') }}</span>
-                <span class="v">{{ row.avgMs != null ? formatDuration(row.avgMs) : '—' }}</span>
+                <span class="l">{{ t('plines.lastSuccessDuration') }}</span>
+                <span class="v">{{ row.lastSuccessfulDurationMs != null ? formatDuration(row.lastSuccessfulDurationMs) : '—' }}</span>
               </div>
               <div class="p-stat">
                 <span class="l">{{ t('plines.colTrigger') }}</span>
@@ -555,7 +660,7 @@ const hasAny = computed(() => rows.value.length > 0)
                 class="btn-outline"
                 :class="actionFor(row).cls"
                 :disabled="actingKey === rowKeyOf(row)"
-                @click="runAction(row)"
+                @click.stop="runAction(row)"
               >
                 {{ actionFor(row).label }}
               </button>
@@ -875,28 +980,48 @@ const hasAny = computed(() => rows.value.length > 0)
 .p-card {
   background: var(--sisy-color-surface);
   border-radius: var(--sisy-radius-card);
-  padding: 20px;
+  border: 1px solid transparent;
+  padding: 16px;
+  min-height: 225px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  transition: box-shadow 0.15s;
+  gap: 10px;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
 }
 
-.p-card:hover {
+.p-card-clickable {
+  cursor: pointer;
+}
+
+.p-card-clickable:hover,
+.p-card-clickable:focus-visible {
+  border-color: var(--sisy-color-primary);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+}
+
+.p-card-clickable:focus-visible {
+  outline: 2px solid var(--sisy-color-primary);
+  outline-offset: 2px;
 }
 
 .p-card-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
 
 .p-card-title {
   display: flex;
-  align-items: center;
-  gap: 4px;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.p-card-identity {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -906,8 +1031,14 @@ const hasAny = computed(() => rows.value.length > 0)
   padding: 0;
   cursor: pointer;
   font-family: inherit;
-  font-size: 14px;
-  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.25;
   color: var(--sisy-color-text);
 }
 
@@ -916,36 +1047,128 @@ const hasAny = computed(() => rows.value.length > 0)
 }
 
 .p-card-sub {
-  font-size: 12px;
+  min-width: 0;
+  font-size: 13px;
   color: var(--sisy-color-text-secondary);
-  margin-top: -6px;
+  margin-top: -2px;
+  padding-left: 22px;
+}
+
+.p-card-project {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sisy-color-primary);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.p-card-identity-separator {
+  flex-shrink: 0;
+  color: var(--sisy-color-text-secondary);
+  font-size: 16px;
+  font-weight: 500;
 }
 
 .p-card-progress {
   margin-top: -6px;
 }
 
+.p-card-live {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: -2px 0 0;
+  padding: 10px;
+  border-radius: var(--sisy-radius);
+}
+
+.p-card-live-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.p-card-live .usage-row {
+  gap: 12px;
+}
+
+.p-card-live .usage-row .track {
+  width: auto;
+  height: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.p-card-live .usage-row .fill {
+  border-radius: 6px;
+}
+
+.p-card-live-failed .usage-row .fill {
+  background: var(--sisy-color-danger);
+}
+
+.p-card-live .usage-row .pct {
+  min-width: 48px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.live-label {
+  font-size: 11px;
+  color: var(--sisy-color-text-secondary);
+}
+
+.p-card-live-details {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.7fr) minmax(0, 1.3fr);
+  gap: 16px;
+  border-top: 1px solid var(--sisy-color-border-light);
+  padding-top: 10px;
+}
+
+.live-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.live-detail strong {
+  overflow: hidden;
+  color: var(--sisy-color-text);
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-detail-step strong {
+  font-size: 13px;
+}
+
 .p-card-stats {
   display: flex;
   border-top: 1px solid var(--sisy-color-border-light);
-  padding-top: 12px;
+  min-height: 68px;
+  padding-top: 14px;
 }
 
 .p-stat {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
 }
 
 .p-stat .l {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--sisy-color-text-secondary);
 }
 
 .p-stat .v {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--sisy-color-text);
 }
@@ -955,6 +1178,7 @@ const hasAny = computed(() => rows.value.length > 0)
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  margin-top: auto;
 }
 
 .trigger-tag {
@@ -973,7 +1197,7 @@ const hasAny = computed(() => rows.value.length > 0)
 }
 
 /* G2（平板档降级次要列）：≤1024px 收起「触发方式」；≤880px 再收起
-   「进度/成功率」，保留 状态/平均耗时/动作。桌面档不受影响。 */
+   「进度/成功率」，保留 状态/上次耗时/动作。桌面档不受影响。 */
 @media (max-width: 1024px) {
   .pc-trigger {
     display: none;

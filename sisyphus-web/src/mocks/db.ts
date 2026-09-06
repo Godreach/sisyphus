@@ -590,7 +590,7 @@ const EMPTY_PIPELINES = new Set(['empty-repo/main', 'empty-repo/release', 'docs-
 
 {
   let seed = 20260829
-  for (const pl of PIPELINES) {
+  for (const [pipelineIndex, pl] of PIPELINES.entries()) {
     const key = `${pl.project}/${pl.name}`
     // 32 位累积推进（Math.imul 防浮点溢出——普通乘法超 2^53 后低位坍缩，
     // 状态轮换会退化成单一值）。
@@ -603,7 +603,11 @@ const EMPTY_PIPELINES = new Set(['empty-repo/main', 'empty-repo/release', 'docs-
       let status: BuildStatusDto
       if (i === 0 && pl.project === GPU_JOB_PROJECT && pl.name === 'main') {
         status = 'queued' // 强制演示：缺 gpu 标签的排队任务（has_no_match）
-      } else if (i === 0) status = NEWEST_STATUS_CYCLE[seed % NEWEST_STATUS_CYCLE.length] as BuildStatusDto
+      } else if (i === 0) {
+        // 用流水线序号轮换状态；seed 的模 4 递推只会命中索引 1/2，
+        // 会让浏览器演示永远看不到「运行中」和「失败」。
+        status = NEWEST_STATUS_CYCLE[pipelineIndex % NEWEST_STATUS_CYCLE.length] as BuildStatusDto
+      }
       else if (i === 1) status = SECOND_STATUS_CYCLE[(seed + 1) % SECOND_STATUS_CYCLE.length] as BuildStatusDto
       else status = randomStatus(rng)
 
@@ -710,8 +714,8 @@ export function buildDetailOf(project: string, pipeline: string, number: number)
       if (attemptStatus === 'succeeded') out.push({ status: 'succeeded', detail: null })
       else if (attemptStatus === 'queued') out.push({ status: 'queued', detail: null })
       else if (attemptStatus === 'running') {
-        // 至少一个已完成 + 一个运行中（total===1 时直接运行中）。
-        const cur = Math.max(1, Math.floor(rng() * total))
+        // 至少一个运行中任务；单任务流水线直接从第一个任务开始运行。
+        const cur = total === 1 ? 0 : Math.max(1, Math.floor(rng() * total))
         if (i < cur) out.push({ status: 'succeeded', detail: null })
         else if (i === cur) out.push({ status: 'running', detail: null })
         else out.push({ status: 'queued', detail: null })

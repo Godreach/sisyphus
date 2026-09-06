@@ -108,6 +108,54 @@ function mockRunningDetail(project: string, pipeline: string, number: number): v
   )
 }
 
+/** 覆盖失败构建详情：2/3 任务已落定，unit-test 为失败步骤。 */
+function mockFailedDetail(project: string, pipeline: string, number: number): void {
+  server.use(
+    http.get(`/api/v1/projects/${project}/pipelines/${pipeline}/builds/${number}`, () =>
+      HttpResponse.json({
+        number,
+        pipeline_name: pipeline,
+        status: 'failed',
+        trigger: 'manual',
+        trigger_by: 'admin',
+        attempt: 1,
+        started_at: 1_700_000_000_000,
+        finished_at: 1_700_000_012_000,
+        cancelled_at: null,
+        elapsed_ms: 12_000,
+        stages: [
+          { index: 0, name: 'build', jobs: [job('compile', 'succeeded'), job('unit-test', 'failed')] },
+          { index: 1, name: 'check', jobs: [job('lint', 'skipped')] },
+        ],
+      }),
+    ),
+  )
+}
+
+/** 覆盖成功构建详情：用于验证卡片的上次成功耗时。 */
+function mockSuccessfulSummary(project: string, pipeline: string, number: number): void {
+  server.use(
+    http.get(`/api/v1/projects/${project}/pipelines/${pipeline}/builds/${number}`, () =>
+      HttpResponse.json({
+        number,
+        pipeline_name: pipeline,
+        status: 'succeeded',
+        trigger: 'manual',
+        trigger_by: 'admin',
+        attempt: 1,
+        started_at: 1_700_000_000_000,
+        finished_at: 1_700_000_024_000,
+        cancelled_at: null,
+        elapsed_ms: 24_000,
+        stages: [
+          { index: 0, name: 'build', jobs: [job('compile', 'succeeded'), job('unit-test', 'succeeded')] },
+          { index: 1, name: 'check', jobs: [job('lint', 'succeeded')] },
+        ],
+      }),
+    ),
+  )
+}
+
 /** 包装组件：NMessageProvider + PipelinesView（useMessage 注入可用）。 */
 const Host = defineComponent({
   name: 'PipelinesHost',
@@ -183,6 +231,11 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     expect(feet.some((txt) => txt === '共 13 次构建')).toBe(true)
     expect(feet.every((txt) => /^共 \d+ 次构建$/.test(txt))).toBe(true)
 
+    // 演示数据必须覆盖构建中状态，否则页面只能验收到成功/排队两种活跃态。
+    const cardsText = w.findAll('.p-card').map((card) => card.text())
+    expect(cardsText.some((txt) => txt.includes('运行中'))).toBe(true)
+    expect(cardsText.some((txt) => txt.includes('失败'))).toBe(true)
+
     // 契约「—」路径：empty-repo 流水线零构建 → 未运行 + 成功率/平均耗时「—」。
     const emptyCard = w.findAll('.p-card').find((c) => c.text().includes('empty-repo'))
     expect(emptyCard).toBeDefined()
@@ -243,7 +296,7 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     expect(w.findAll('.p-card')[0]!.text()).toContain('fresh')
   })
 
-  it('进度（P3）：运行中行走构建详情算任务进度；非运行行显示「—」；排队/失败/成功各归其位', async () => {
+  it('进度（P3）：运行中/失败行走构建详情显示进度与当前步骤；排队/成功各归其位', async () => {
     mockList([
       { project: 'demo', pipeline: 'main' },
       { project: 'demo', pipeline: 'ci' },
@@ -263,6 +316,11 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     expect(mainCard!.find('.p-card-progress .usage-row').exists()).toBe(true)
     expect(mainCard!.find('.p-card-progress .pct').text()).toBe('33%')
     expect(mainCard!.find('.p-card-progress .fill').attributes('style')).toContain('width: 33%')
+    expect(mainCard!.find('[data-testid="p-card-live"]').exists()).toBe(true)
+    expect(mainCard!.find('[data-testid="p-card-current-duration"]').text()).toContain('5s')
+    expect(mainCard!.find('[data-testid="p-card-current-step"]').text()).toContain('unit-test')
+    expect(mainCard!.find('.p-card-sub').exists()).toBe(false)
+    expect(mainCard!.find('.p-card-stats').exists()).toBe(false)
 
     // 列表视图：进度列运行中显示进度条，其余行显示「—」。
     await w.find('[data-testid="view-list-btn"]').trigger('click')
@@ -275,7 +333,50 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     expect(other!.find('.pc-progress .pct-none').text()).toBe('—')
   })
 
-  it('成功率/平均耗时按契约形态（#102）：取不到显示「—」', async () => {
+  it('失败卡片沿用当前构建布局：显示失败步骤与构建耗时，不显示历史统计', async () => {
+    mockList([{ project: 'demo', pipeline: 'failed-pipeline' }])
+    mockStats({ 'demo/failed-pipeline': statsBody({ number: 12, status: 'failed' }) })
+    mockFailedDetail('demo', 'failed-pipeline', 12)
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.findAll('.p-card')).toHaveLength(1))
+
+    const card = w.find('.p-card')
+    expect(card.find('[data-testid="p-card-live"]').exists()).toBe(true)
+    expect(card.find('.p-card-live .pct').text()).toBe('33%')
+    expect(card.find('.p-card-live').classes()).toContain('p-card-live-failed')
+    expect(card.find('[data-testid="p-card-current-duration"]').text()).toContain('12s')
+    expect(card.find('[data-testid="p-card-current-step"]').text()).toContain('unit-test')
+    expect(card.find('.p-card-sub').exists()).toBe(false)
+    expect(card.find('.p-card-stats').exists()).toBe(false)
+  })
+
+  it('成功卡片显示上次成功耗时，不显示构建摘要区', async () => {
+    mockList([{ project: 'demo', pipeline: 'success-pipeline' }])
+    mockStats({ 'demo/success-pipeline': statsBody({ number: 13, status: 'succeeded' }) })
+    mockSuccessfulSummary('demo', 'success-pipeline', 13)
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.findAll('.p-card')).toHaveLength(1))
+
+    const card = w.find('.p-card')
+    expect(card.find('[data-testid="p-card-latest-summary"]').exists()).toBe(false)
+    expect(card.findAll('.p-stat').some((n) => n.text().includes('上次耗时') && n.text().includes('24s'))).toBe(true)
+  })
+
+  it('卡片主体可进入流水线信息，操作按钮保持独立', async () => {
+    mockList([{ project: 'demo', pipeline: 'main' }])
+    mockStats({ 'demo/main': statsBody({ number: 13, status: 'succeeded' }) })
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.findAll('.p-card')).toHaveLength(1))
+
+    await w.find('.p-card').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('build-list'))
+    expect(router.currentRoute.value.params).toMatchObject({ name: 'demo', pipeline: 'main' })
+  })
+
+  it('成功率/上次成功耗时按契约形态：取不到显示「—」', async () => {
     mockList([{ project: 'demo', pipeline: 'main' }])
     mockStats({ 'demo/main': statsBody({ number: 13, status: 'queued' }, { rate: null, avg: null }) })
 
@@ -284,7 +385,7 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     const card = w.findAll('.p-card')[0]!
     const stats = card.findAll('.p-stat').map((n) => n.text())
     expect(stats.some((s) => s.includes('成功率') && s.includes('—'))).toBe(true)
-    expect(stats.some((s) => s.includes('平均耗时') && s.includes('—'))).toBe(true)
+    expect(stats.some((s) => s.includes('上次耗时') && s.includes('—'))).toBe(true)
   })
 
   it('视图切换（P6）：列表 ⇄ 卡片；行内动作三态映射（运行/终止/重试）走真实端点', async () => {
