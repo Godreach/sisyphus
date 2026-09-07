@@ -47,7 +47,7 @@
 | 编辑器 | pipeline-edit | ✅ 拓扑轨道 + job 表单（NInput/NSelect/NSwitch/NInputNumber）+ 参数声明 + 保存闭环（revision 递增）。|
 | 管理四页 | admin-secrets/audit/upgrade/users | ✅ 机密只记名不记值 + 审计表（多用户/多事件）+ 升级包表 + 用户/PAT 管理。定稿设计语言同源。|
 | 认证面 | login / setup / not-found | ✅ AuthCard 居中（4 方块 logo + 应用名）+ 登录表单（校验/必填标）+ 初始化引导 NSteps + 404 NResult。浅/深双主题 + 全屏无侧栏形态。|
-| 壳/导航 | 全页 | ✅ 232px 深侧栏（可拖拽调宽）+ 60px 白顶栏 + 用户卡二级子菜单（语言/主题/管理入口）+ 窄屏 NDrawer。|
+| 壳/导航 | 全页 | ✅ 280px 深侧栏（可拖拽调宽）+ 60px 白顶栏 + 用户卡二级子菜单（语言/主题/管理入口）+ 窄屏 NDrawer。|
 
 **桌面深色**：`desktop-dark/` 16 张——`--sisy-*` 变量翻深（surface #18181b / bg #0c0c0e / 主色 #2997ff）+ Naive UI darkTheme 同源，深色变体与原型色板一致。**平板**：`tablet-light/` 16 张——768px 下表格横向滚动 + 列降级 + 侧栏收纳，G2 平板档裁定落地。
 

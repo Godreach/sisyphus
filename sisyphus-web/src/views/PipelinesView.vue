@@ -980,7 +980,7 @@ const hasAny = computed(() => rows.value.length > 0)
 .p-card {
   background: var(--sisy-color-surface);
   border-radius: var(--sisy-radius-card);
-  border: 1px solid transparent;
+  border: 1px solid var(--sisy-color-border);
   padding: 16px;
   min-height: 225px;
   display: flex;

@@ -106,27 +106,27 @@ describe('App 壳（三项导航 + 登出闭环）', () => {
     expect(resizer.exists()).toBe(true)
     const sidebar = wrapper.find('.app-sidebar')
 
-    // 拖拽：pointerdown(232) → move(+80) → up → 宽度 312 + 写入 localStorage。
-    await resizer.trigger('pointerdown', { clientX: 232 })
-    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 312 }))
+    // 拖拽：pointerdown(280) → move(+80) → up → 宽度 360 + 写入 localStorage。
+    await resizer.trigger('pointerdown', { clientX: 280 })
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 360 }))
     window.dispatchEvent(new MouseEvent('pointerup'))
     await wrapper.vm.$nextTick()
 
-    expect(sidebar.attributes('style')).toContain('312px')
-    expect(localStorage.getItem('sisyphus-sidebar-width')).toBe('312')
+    expect(sidebar.attributes('style')).toContain('360px')
+    expect(localStorage.getItem('sisyphus-sidebar-width')).toBe('360')
 
     // 钳制：拖到 600px 被上限 400 截住。
-    await resizer.trigger('pointerdown', { clientX: 312 })
+    await resizer.trigger('pointerdown', { clientX: 360 })
     window.dispatchEvent(new MouseEvent('pointermove', { clientX: 600 }))
     window.dispatchEvent(new MouseEvent('pointerup'))
     await wrapper.vm.$nextTick()
     expect(sidebar.attributes('style')).toContain('400px')
 
-    // 双击复位默认 232。
+    // 双击复位默认 280。
     await resizer.trigger('dblclick')
     await wrapper.vm.$nextTick()
-    expect(sidebar.attributes('style')).toContain('232px')
-    expect(localStorage.getItem('sisyphus-sidebar-width')).toBe('232')
+    expect(sidebar.attributes('style')).toContain('280px')
+    expect(localStorage.getItem('sisyphus-sidebar-width')).toBe('280')
   })
 
   it('用户卡显示用户名；下拉登出调 POST /auth/logout 并回登录页', async () => {

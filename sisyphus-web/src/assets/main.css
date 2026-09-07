@@ -125,7 +125,7 @@ h3 {
 }
 
 .app-sidebar {
-  flex: 0 0 232px;
+  flex: 0 0 280px;
   display: flex;
   flex-direction: column;
   background: var(--sisy-color-sidebar);
@@ -195,11 +195,11 @@ body.sidebar-resizing {
 /* 批注 2：桌面端三项主导航保持在品牌区下方，并恢复带缩进的左对齐；
    抽屉继续复用相同的阅读起点。 */
 .app-sidebar > .sidebar-nav {
-  padding: 0 20px;
+  padding: 0 28px;
 }
 
 .app-sidebar > .sidebar-nav .nav-item {
-  padding: 0 18px;
+  padding: 0 20px;
 }
 
 .nav-group-label {
