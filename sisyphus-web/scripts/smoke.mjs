@@ -388,7 +388,9 @@ async function runAuthed(browser) {
   try {
     await page.goto(`${BASE}/projects`, { waitUntil: 'domcontentloaded' })
     await page.locator('.app-topbar-title', { hasText: '项目' }).first().waitFor({ timeout: 10000 })
-    await page.locator('button[name="project-new"]').click()
+    // 项目页主 CTA 由 App.vue 统一渲染；项目页改为顶栏 CTA 后，
+    // 通过 data-testid 保持 smoke 与页面契约同步。
+    await page.locator('[data-testid="topbar-cta"]').click()
     await page.locator('input[name="project-url"]').waitFor({ timeout: 5000 })
     await page.locator('input[name="project-url"]').fill('https://example.com/demo')
     await page.locator('button[name="project-test-connection"]').click()
