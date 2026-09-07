@@ -7,7 +7,7 @@
 //   队列深度（首要原因副标）/ 在线构建机（可用率）
 // - 最近构建行：pipeline #号 + 项目副行、状态徽章、触发、耗时、相对时间；
 //   点击行 → 构建详情
-// - 右栏 Agent 健康：在线比 + 三类事实警示（异常/正常徽章）；零 Agent 行
+// - 构建机告警：异常时置顶显示三类事实 + 直达构建机页；健康卡仍给紧凑摘要；零 Agent 行
 // - 右栏 收藏的流水线（票 #104，W8）：条目 = 流水线名 + 项目 + 状态徽章；
 //   名称 → 构建列表；运行按钮 → POST trigger + 刷新概览快照与收藏（W2）；
 //   取消收藏 → DELETE；空态引导去流水线页；加载失败卡内重试
@@ -109,6 +109,7 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
       routes: [
         { path: '/', name: 'overview', component: { template: '<div />' } },
         { path: '/pipelines', name: 'pipelines', component: { template: '<div />' } },
+        { path: '/machines', name: 'machines', component: { template: '<div />' } },
         {
           path: '/projects/:name/pipelines/:pipeline/builds',
           name: 'build-list',
@@ -225,7 +226,7 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     })
   })
 
-  it('Agent 健康卡（与指标同行）：在线比 + 事实警示徽章（异常/正常）', async () => {
+  it('构建机异常置顶告警，健康卡仍给在线比与事实徽章', async () => {
     mockOverview({
       ...emptySnapshot(),
       agents_online: 1,
@@ -246,8 +247,14 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     expect(badges.map((b) => b.text())).toEqual(['离线构建机', '无匹配任务'])
     expect(badges.every((b) => b.classes().includes('failed'))).toBe(true)
     expect(badges[0]!.attributes('title')).toContain('有构建机离线')
-    // 无整页 alert（事实警示进健康卡，非 NAlert）。
-    expect(w.find('[role="alert"]').exists()).toBe(false)
+    // 告警区提升阻塞事实，并提供直达构建机页的语义链接。
+    const alert = w.find('section[aria-label="agent alerts"] [role="alert"]')
+    expect(alert.exists()).toBe(true)
+    expect(alert.text()).toContain('有构建机离线')
+    expect(alert.text()).toContain('存在无匹配构建机的任务')
+    const agentLink = w.find('section[aria-label="agent alerts"] a')
+    expect(agentLink.text()).toBe('查看构建机')
+    expect(agentLink.attributes('href')).toBe('/machines')
   })
 
   it('零 Agent：健康卡给「尚未注册构建机」行（不再用 NAlert info）', async () => {

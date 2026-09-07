@@ -264,6 +264,19 @@ onMounted(() => {
     </div>
 
     <template v-if="overview.state != null">
+      <!-- 批注 A1：构建机阻塞事实不能只藏在指标卡内。异常时置顶，让值班者
+           先看到问题，再进入构建机页处置；健康卡仍保留作紧凑摘要。 -->
+      <section v-if="healthIssues.length > 0" class="workbench-attention" aria-label="agent alerts">
+        <n-alert type="warning" :title="t('overview.attentionTitle')" :show-icon="true">
+          <ul class="attention-list">
+            <li v-for="issue in healthIssues" :key="issue.key">{{ issue.full }}</li>
+          </ul>
+          <router-link class="attention-link" :to="{ name: 'machines' }">
+            {{ t('overview.reviewAgents') }}
+          </router-link>
+        </n-alert>
+      </section>
+
       <!-- 指标卡行（原型 metrics-row）。 -->
       <section class="metric-row" aria-label="metrics">
         <div class="metric-card">
@@ -431,6 +444,28 @@ onMounted(() => {
 
 .workbench-error {
   margin-bottom: 4px;
+}
+
+.workbench-attention {
+  margin-bottom: 0;
+}
+
+.attention-list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.attention-link {
+  display: inline-flex;
+  margin-top: 10px;
+  color: var(--sisy-color-primary);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.attention-link:hover {
+  text-decoration: underline;
 }
 
 .workbench-skeleton {

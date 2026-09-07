@@ -141,6 +141,8 @@
     "alertNoMatch": "存在无匹配构建机的任务",
     "alertDrainingIncompatible": "存在排空或版本不兼容的构建机",
     "alertNoAgents": "尚未注册任何构建机",
+    "attentionTitle": "需要处理的构建机问题",
+    "reviewAgents": "查看构建机",
     "recentBuilds": "最近构建",
     "recentBuildsEmpty": "还没有构建。",
     "colProject": "项目",

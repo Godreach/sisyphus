@@ -141,6 +141,8 @@
     "alertNoMatch": "There are tasks with no matching build machine",
     "alertDrainingIncompatible": "There are draining or version-incompatible build machines",
     "alertNoAgents": "No build machines registered yet",
+    "attentionTitle": "Build machine issues need attention",
+    "reviewAgents": "Review build machines",
     "recentBuilds": "Recent builds",
     "recentBuildsEmpty": "No builds yet.",
     "colProject": "Project",

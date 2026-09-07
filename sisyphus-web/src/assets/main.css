@@ -169,12 +169,20 @@ body.sidebar-resizing {
 .sidebar-logo {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 20px 20px 24px;
+  gap: 12px;
+  padding: 26px 24px 30px;
   color: #ffffff;
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.1px;
+}
+
+/* 批注 1：品牌作为侧栏锚点，图标与字标都放大，避免在高分辨率界面里
+   被当成普通导航项略过。inline SVG 属性提供基线，CSS 负责视觉尺寸。 */
+.sidebar-logo svg {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
 }
 
 .sidebar-nav {
@@ -182,6 +190,16 @@ body.sidebar-resizing {
   flex-direction: column;
   gap: 8px;
   padding: 0 12px;
+}
+
+/* 批注 2：桌面端三项主导航保持在品牌区下方，并恢复带缩进的左对齐；
+   抽屉继续复用相同的阅读起点。 */
+.app-sidebar > .sidebar-nav {
+  padding: 0 20px;
+}
+
+.app-sidebar > .sidebar-nav .nav-item {
+  padding: 0 18px;
 }
 
 .nav-group-label {
