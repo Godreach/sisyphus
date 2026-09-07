@@ -9,7 +9,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import { NMessageProvider } from 'naive-ui'
+import { NMessageProvider, NSelect } from 'naive-ui'
 import { defineComponent, h } from 'vue'
 import { http, HttpResponse } from 'msw'
 
@@ -245,6 +245,61 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     // 请求形态：清单 1 次 + 每行统计（23 行）。
     await vi.waitFor(() => expect(requests.filter((r) => r === 'GET /api/v1/pipelines')).toHaveLength(1))
     expect(requests.filter((r) => r.endsWith('/stats'))).toHaveLength(23)
+  })
+
+  it('按项目分组、折叠与平铺切换；项目筛选和组织方式同步到 URL', async () => {
+    mockList([
+      { project: 'alpha', pipeline: 'main' },
+      { project: 'alpha', pipeline: 'release' },
+      { project: 'beta', pipeline: 'main' },
+    ])
+    mockStats({
+      'alpha/main': statsBody({ number: 13, status: 'running' }),
+      'alpha/release': statsBody({ number: 12, status: 'succeeded' }),
+      'beta/main': statsBody({ number: 11, status: 'failed' }),
+    })
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.findAll('.p-card')).toHaveLength(3))
+
+    expect(w.findAll('.project-group')).toHaveLength(2)
+    expect(w.find('[data-testid="project-toggle-alpha"]').text()).toContain('收起')
+    expect(w.find('.project-group-head').text()).toContain('2 条流水线')
+
+    await w.find('[data-testid="project-toggle-alpha"]').trigger('click')
+    expect(w.findAll('.p-card')).toHaveLength(1)
+    expect(w.find('.p-card').text()).toContain('beta')
+
+    await w.find('[data-testid="flat-view-btn"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.query.group).toBe('flat'))
+    expect(w.findAll('.p-card')).toHaveLength(3)
+    expect(w.find('.project-group-head').exists()).toBe(false)
+
+    const projectSelect = w.findComponent(NSelect)
+    await projectSelect.vm.$emit('update:value', ['beta'])
+    await vi.waitFor(() => expect(router.currentRoute.value.query.project).toEqual(['beta']))
+    expect(w.findAll('.p-card')).toHaveLength(1)
+    expect(w.find('.p-card').text()).toContain('beta')
+  })
+
+  it('从 URL 恢复项目筛选与按项目分组状态；筛选无结果显示空态', async () => {
+    await router.push('/pipelines?project=alpha&group=flat')
+    mockList([
+      { project: 'alpha', pipeline: 'main' },
+      { project: 'beta', pipeline: 'main' },
+    ])
+    mockStats({
+      'alpha/main': statsBody({ number: 13, status: 'succeeded' }),
+      'beta/main': statsBody({ number: 12, status: 'succeeded' }),
+    })
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.findAll('.p-card')).toHaveLength(1))
+    expect(w.find('[data-testid="flat-view-btn"]').classes()).toContain('active')
+    expect(w.find('.p-card').text()).toContain('alpha')
+
+    await router.push('/pipelines?project=missing')
+    await vi.waitFor(() => expect(w.find('[data-testid="pipelines-filter-empty"]').exists()).toBe(true))
   })
 
   it('chips 计数严格对账（P2）：全部 = 进行中 + 成功 + 失败 + 超时/取消；筛选生效', async () => {

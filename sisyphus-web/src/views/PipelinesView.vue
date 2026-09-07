@@ -25,7 +25,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { NAlert, NDropdown, NEmpty, NSkeleton, useMessage } from 'naive-ui'
+import { NAlert, NDropdown, NEmpty, NSelect, NSkeleton, useMessage } from 'naive-ui'
 
 import { buildsApi, favoritesApi, pipelinesApi } from '@/api/client'
 import { describeActionError, describeSubmitError } from '@/api/errors'
@@ -85,6 +85,18 @@ type SortKey = 'recent' | 'name'
 const sortKey = ref<SortKey>('recent')
 /** P6 裁定：默认卡片视图；切换偏好仅会话内保持（不落 localStorage）。 */
 const viewMode = ref<'list' | 'cards'>('cards')
+type OrganizationMode = 'grouped' | 'flat'
+
+function queryProjectValues(value: string | (string | null)[] | null | undefined): string[] {
+  const values = Array.isArray(value) ? value : value == null ? [] : value.split(',')
+  return [...new Set(values.filter((item): item is string => item != null).map((item) => item.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b))
+}
+
+const selectedProjects = computed(() => queryProjectValues(route.query.project))
+const organizationMode = computed<OrganizationMode>(() =>
+  route.query.group === 'flat' ? 'flat' : 'grouped',
+)
+const collapsedProjects = ref(new Set<string>())
 
 /** 当前用户收藏的 (project, pipeline) 集合（票 #104 W8 契约；加载失败非致命）。 */
 const favoriteKeys = ref(new Set<string>())
@@ -270,6 +282,36 @@ function changeSort(key: SortKey): void {
   rows.value = sortRows(rows.value)
 }
 
+function updateProjectFilter(projects: string[] | null): void {
+  const values = queryProjectValues(projects)
+  void router.replace({
+    query: {
+      ...route.query,
+      project: values.length > 0 ? values : undefined,
+    },
+  })
+}
+
+function updateOrganizationMode(mode: OrganizationMode): void {
+  void router.replace({
+    query: {
+      ...route.query,
+      group: mode === 'flat' ? 'flat' : undefined,
+    },
+  })
+}
+
+function toggleProject(project: string): void {
+  const next = new Set(collapsedProjects.value)
+  if (next.has(project)) next.delete(project)
+  else next.add(project)
+  collapsedProjects.value = next
+}
+
+function isProjectCollapsed(project: string): boolean {
+  return collapsedProjects.value.has(project)
+}
+
 const sortOptions = computed(() => [
   { label: t('plines.sortRecent'), key: 'recent' as const },
   { label: t('plines.sortName'), key: 'name' as const },
@@ -320,14 +362,55 @@ const chipDefs = computed<{ key: ChipKey; label: string }[]>(() => [
 
 const visibleRows = computed(() => {
   const q = searchQuery.value.toLowerCase()
+  const projects = new Set(selectedProjects.value)
   return rows.value.filter((row) => {
     if (!chipHit(row, activeChip.value)) return false
+    if (projects.size > 0 && !projects.has(row.project)) return false
     if (q === '') return true
     return (
       row.pipeline.toLowerCase().includes(q) || row.project.toLowerCase().includes(q)
     )
   })
 })
+
+interface PipelineGroup {
+  project: string
+  rows: PipelineRow[]
+  activeCount: number
+}
+
+const projectOptions = computed(() => {
+  const projects = new Set(rows.value.map((row) => row.project))
+  return [...projects]
+    .sort((a, b) => a.localeCompare(b))
+    .map((project) => ({ label: project, value: project }))
+})
+
+const projectGroups = computed<PipelineGroup[]>(() => {
+  const groups = new Map<string, PipelineRow[]>()
+  for (const row of visibleRows.value) {
+    const group = groups.get(row.project) ?? []
+    group.push(row)
+    groups.set(row.project, group)
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([project, groupRows]) => ({
+      project,
+      rows: groupRows,
+      activeCount: groupRows.filter((row) => chipHit(row, 'active')).length,
+    }))
+})
+
+const displayGroups = computed<PipelineGroup[]>(() =>
+  organizationMode.value === 'grouped'
+    ? projectGroups.value
+    : [{
+        project: '',
+        rows: visibleRows.value,
+        activeCount: visibleRows.value.filter((row) => chipHit(row, 'active')).length,
+      }],
+)
 
 // ===== 展示形态 =====
 
@@ -472,6 +555,38 @@ const hasAny = computed(() => rows.value.length > 0)
             </button>
           </div>
           <div class="toolbar-right">
+            <n-select
+              :value="selectedProjects"
+              :options="projectOptions"
+              multiple
+              clearable
+              filterable
+              size="small"
+              class="project-filter"
+              data-testid="project-filter"
+              :placeholder="t('plines.projectFilter')"
+              @update:value="updateProjectFilter"
+            />
+            <div class="view-toggle organization-toggle" role="group" :aria-label="t('plines.organizationMode')">
+              <button
+                type="button"
+                class="vt-btn"
+                :class="{ active: organizationMode === 'grouped' }"
+                data-testid="grouped-view-btn"
+                @click="updateOrganizationMode('grouped')"
+              >
+                {{ t('plines.viewGrouped') }}
+              </button>
+              <button
+                type="button"
+                class="vt-btn"
+                :class="{ active: organizationMode === 'flat' }"
+                data-testid="flat-view-btn"
+                @click="updateOrganizationMode('flat')"
+              >
+                {{ t('plines.viewFlat') }}
+              </button>
+            </div>
             <div class="view-toggle">
               <button
                 type="button"
@@ -503,6 +618,33 @@ const hasAny = computed(() => rows.value.length > 0)
           </div>
         </div>
 
+        <n-empty
+          v-if="visibleRows.length === 0"
+          class="plines-filter-empty"
+          :description="t('plines.filterEmpty')"
+          data-testid="pipelines-filter-empty"
+        />
+        <template v-else>
+        <template v-for="group in displayGroups" :key="group.project || 'all'">
+          <section class="project-group" :class="{ 'project-group-flat': organizationMode === 'flat' }">
+            <header v-if="organizationMode === 'grouped'" class="project-group-head">
+              <div>
+                <h2>{{ group.project }}</h2>
+                <span>{{ t('plines.projectSummary', { total: group.rows.length, active: group.activeCount }) }}</span>
+              </div>
+              <button
+                type="button"
+                class="project-group-toggle"
+                :aria-expanded="!isProjectCollapsed(group.project)"
+                :aria-label="isProjectCollapsed(group.project) ? t('plines.expandProject') : t('plines.collapseProject')"
+                :data-testid="`project-toggle-${group.project}`"
+                @click="toggleProject(group.project)"
+              >
+                {{ isProjectCollapsed(group.project) ? t('plines.expandProject') : t('plines.collapseProject') }}
+              </button>
+            </header>
+
+          <div v-if="organizationMode === 'flat' || !isProjectCollapsed(group.project)" class="project-group-body">
         <!-- 列表视图（原型 pipe-table）。 -->
         <section v-if="viewMode === 'list'" class="sisy-card pipe-table" aria-label="pipeline list">
           <div class="pipe-thead">
@@ -516,7 +658,7 @@ const hasAny = computed(() => rows.value.length > 0)
             <span class="pc-action" />
           </div>
           <div class="pipe-tbody">
-            <div v-for="row in visibleRows" :key="rowKeyOf(row)" class="pipe-row">
+            <div v-for="row in group.rows" :key="rowKeyOf(row)" class="pipe-row">
               <div class="pc-fav">
                 <button
                   type="button"
@@ -562,16 +704,13 @@ const hasAny = computed(() => rows.value.length > 0)
                 </button>
               </div>
             </div>
-            <div v-if="visibleRows.length === 0" class="pipe-empty">
-              <n-text depth="3">{{ t('plines.empty') }}</n-text>
-            </div>
           </div>
         </section>
 
         <!-- 卡片视图（原型 cards-view 2 列网格；P6 定稿默认视图）。 -->
         <section v-else class="cards-view" aria-label="pipeline cards">
           <article
-            v-for="row in visibleRows"
+            v-for="row in group.rows"
             :key="rowKeyOf(row)"
             class="p-card p-card-clickable"
             role="link"
@@ -667,6 +806,10 @@ const hasAny = computed(() => rows.value.length > 0)
             </div>
           </article>
         </section>
+          </div>
+          </section>
+          </template>
+        </template>
 
         <p class="form-hint plines-hint">{{ t('plines.statsHint') }}</p>
       </template>
@@ -768,6 +911,80 @@ const hasAny = computed(() => rows.value.length > 0)
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.project-filter {
+  width: 220px;
+}
+
+.organization-toggle {
+  flex-shrink: 0;
+}
+
+.project-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.project-group + .project-group {
+  margin-top: 4px;
+}
+
+.project-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 48px;
+  padding: 10px 16px;
+  border: 1px solid var(--sisy-color-border);
+  border-radius: var(--sisy-radius);
+  background: var(--sisy-color-surface);
+}
+
+.project-group-head h2 {
+  margin: 0;
+  color: var(--sisy-color-text);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.project-group-head span {
+  color: var(--sisy-color-text-secondary);
+  font-size: 12px;
+}
+
+.project-group-toggle {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  color: var(--sisy-color-primary);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.project-group-toggle:hover {
+  color: var(--sisy-color-primary-hover);
+}
+
+.project-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.project-group-flat {
+  gap: 0;
+}
+
+.plines-filter-empty {
+  padding: 36px 0;
 }
 
 .view-toggle {
@@ -1199,6 +1416,25 @@ const hasAny = computed(() => rows.value.length > 0)
 /* G2（平板档降级次要列）：≤1024px 收起「触发方式」；≤880px 再收起
    「进度/成功率」，保留 状态/上次耗时/动作。桌面档不受影响。 */
 @media (max-width: 1024px) {
+  .toolbar-row {
+    align-items: stretch;
+  }
+
+  .filter-chips,
+  .toolbar-right {
+    width: 100%;
+  }
+
+  .toolbar-right {
+    justify-content: flex-start;
+  }
+
+  .project-filter {
+    flex: 1 1 180px;
+    width: auto;
+    min-width: 180px;
+  }
+
   .pc-trigger {
     display: none;
   }
