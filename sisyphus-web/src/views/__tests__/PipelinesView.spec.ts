@@ -263,12 +263,18 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     await vi.waitFor(() => expect(w.findAll('.p-card')).toHaveLength(3))
 
     expect(w.findAll('.project-group')).toHaveLength(2)
-    expect(w.find('[data-testid="project-toggle-alpha"]').text()).toContain('收起')
+    const alphaToggle = w.find('[data-testid="project-toggle-alpha"]')
+    expect(alphaToggle.text()).toBe('')
+    expect(alphaToggle.attributes('aria-label')).toBe('收起')
+    expect(alphaToggle.find('svg').exists()).toBe(true)
     expect(w.find('.project-group-head').text()).toContain('2 条流水线')
 
-    await w.find('[data-testid="project-toggle-alpha"]').trigger('click')
+    await w.find('[data-testid="project-group-head-alpha"]').trigger('click')
     expect(w.findAll('.p-card')).toHaveLength(1)
     expect(w.find('.p-card').text()).toContain('beta')
+
+    await w.find('[data-testid="project-toggle-alpha"]').trigger('click')
+    expect(w.findAll('.p-card')).toHaveLength(3)
 
     await w.find('[data-testid="flat-view-btn"]').trigger('click')
     await vi.waitFor(() => expect(router.currentRoute.value.query.group).toBe('flat'))

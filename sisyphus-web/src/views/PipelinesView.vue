@@ -386,6 +386,13 @@ const projectOptions = computed(() => {
     .map((project) => ({ label: project, value: project }))
 })
 
+const projectFilterWidth = computed(() => {
+  const selectedTextLength = selectedProjects.value.reduce((total, project) => total + project.length, 0)
+  const separatorLength = Math.max(0, selectedProjects.value.length - 1) * 2
+  const contentWidth = 132 + (selectedTextLength + separatorLength) * 7
+  return `${Math.min(420, Math.max(220, contentWidth))}px`
+})
+
 const projectGroups = computed<PipelineGroup[]>(() => {
   const groups = new Map<string, PipelineRow[]>()
   for (const row of visibleRows.value) {
@@ -563,6 +570,7 @@ const hasAny = computed(() => rows.value.length > 0)
               filterable
               size="small"
               class="project-filter"
+              :style="{ width: projectFilterWidth }"
               data-testid="project-filter"
               :placeholder="t('plines.projectFilter')"
               @update:value="updateProjectFilter"
@@ -627,7 +635,12 @@ const hasAny = computed(() => rows.value.length > 0)
         <template v-else>
         <template v-for="group in displayGroups" :key="group.project || 'all'">
           <section class="project-group" :class="{ 'project-group-flat': organizationMode === 'flat' }">
-            <header v-if="organizationMode === 'grouped'" class="project-group-head">
+            <header
+              v-if="organizationMode === 'grouped'"
+              class="project-group-head"
+              :data-testid="`project-group-head-${group.project}`"
+              @click="toggleProject(group.project)"
+            >
               <div>
                 <h2>{{ group.project }}</h2>
                 <span>{{ t('plines.projectSummary', { total: group.rows.length, active: group.activeCount }) }}</span>
@@ -637,10 +650,25 @@ const hasAny = computed(() => rows.value.length > 0)
                 class="project-group-toggle"
                 :aria-expanded="!isProjectCollapsed(group.project)"
                 :aria-label="isProjectCollapsed(group.project) ? t('plines.expandProject') : t('plines.collapseProject')"
+                :title="isProjectCollapsed(group.project) ? t('plines.expandProject') : t('plines.collapseProject')"
                 :data-testid="`project-toggle-${group.project}`"
-                @click="toggleProject(group.project)"
+                @click.stop="toggleProject(group.project)"
               >
-                {{ isProjectCollapsed(group.project) ? t('plines.expandProject') : t('plines.collapseProject') }}
+                <svg
+                  class="project-group-toggle-icon"
+                  :class="{ collapsed: isProjectCollapsed(group.project) }"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 14 14"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.75"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="m4 5.25 3 3.5 3-3.5" />
+                </svg>
               </button>
             </header>
 
@@ -920,6 +948,20 @@ const hasAny = computed(() => rows.value.length > 0)
   width: 220px;
 }
 
+:deep(.project-filter .n-base-selection-tags) {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+:deep(.project-filter .n-base-selection-tags::-webkit-scrollbar) {
+  display: none;
+}
+
+:deep(.project-filter .n-base-selection-tag) {
+  flex-shrink: 0;
+}
+
 .organization-toggle {
   flex-shrink: 0;
 }
@@ -944,6 +986,13 @@ const hasAny = computed(() => rows.value.length > 0)
   border: 1px solid var(--sisy-color-border);
   border-radius: var(--sisy-radius);
   background: var(--sisy-color-surface);
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.project-group-head:hover {
+  border-color: var(--sisy-color-primary);
+  background: var(--sisy-color-primary-soft);
 }
 
 .project-group-head h2 {
@@ -959,18 +1008,33 @@ const hasAny = computed(() => rows.value.length > 0)
 }
 
 .project-group-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   border: none;
+  border-radius: 50%;
   background: none;
   color: var(--sisy-color-primary);
   cursor: pointer;
   font-family: inherit;
-  font-size: 12px;
-  font-weight: 600;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .project-group-toggle:hover {
+  background: var(--sisy-color-primary-soft);
   color: var(--sisy-color-primary-hover);
+}
+
+.project-group-toggle-icon {
+  transition: transform 160ms ease;
+}
+
+.project-group-toggle-icon.collapsed {
+  transform: rotate(-90deg);
 }
 
 .project-group-body {
