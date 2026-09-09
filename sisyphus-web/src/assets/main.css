@@ -170,19 +170,18 @@ body.sidebar-resizing {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 26px 24px 30px;
+  padding: 24px 16px 30px;
   color: #ffffff;
   font-size: 22px;
   font-weight: 700;
   letter-spacing: 0.1px;
 }
 
-/* 批注 1：品牌作为侧栏锚点，图标与字标都放大，避免在高分辨率界面里
-   被当成普通导航项略过。inline SVG 属性提供基线，CSS 负责视觉尺寸。 */
-.sidebar-logo svg {
-  width: 32px;
-  height: 32px;
-  flex-shrink: 0;
+.sidebar-logo-image {
+  display: block;
+  width: 248px;
+  max-width: 100%;
+  height: auto;
 }
 
 .sidebar-nav {

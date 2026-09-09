@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 160 160" fill="none" role="img" aria-labelledby="title desc">
-  <title id="title">Sisyphus — A 方案图标</title>
-  <desc id="desc">白色圆角背景，蓝色与青绿色循环箭头环绕深蓝描边机器人，右上和左下各有一个白芯圆形节点。</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1360" height="180" viewBox="0 0 1360 180" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Sisyphus — A 方案白字 LOGO</title>
+  <desc id="desc">左侧为白底 A 方案机器人图标，右侧为白色 SISYPHUS 字标，整体背景透明。</desc>
   <defs>
     <linearGradient id="blue" x1="25" y1="111" x2="91" y2="24" gradientUnits="userSpaceOnUse">
       <stop stop-color="#0061FF"/>
@@ -15,6 +15,7 @@
       <stop offset="1" stop-color="#F0F2F8"/>
     </linearGradient>
   </defs>
+  <g transform="translate(10 10)">
   <rect width="160" height="160" rx="30" fill="#FFFFFF"/>
   <!-- The two open circular arrows have square ends beneath the round nodes. -->
   <path d="M42.6 120.1 A50.5 50.5 0 0 1 82 31.1" stroke="url(#blue)" stroke-width="14"/>
@@ -37,4 +38,6 @@
   <rect x="53.1" y="71.8" width="51.6" height="29.9" rx="14.95" fill="#001A35"/>
   <circle cx="67.6" cy="86.4" r="5.35" fill="#00C9F0"/>
   <circle cx="90.3" cy="86.4" r="5.35" fill="#00C9F0"/>
+  </g>
+  <text x="218" y="155" fill="#FFFFFF" font-family="Inter, Arial, sans-serif" font-size="180" font-weight="900" letter-spacing="1" textLength="1008" lengthAdjust="spacingAndGlyphs">SISYPHUS</text>
 </svg>
