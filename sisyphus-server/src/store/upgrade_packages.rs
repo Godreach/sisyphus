@@ -431,8 +431,8 @@ mod tests {
         UpgradePackageMeta {
             package_name: name.into(),
             version: AgentVersion {
-                major: 1,
-                minor: 0,
+                major: 0,
+                minor: 1,
                 patch: 0,
             },
             target_os: TargetOs::Linux,
@@ -446,7 +446,7 @@ mod tests {
     #[tokio::test]
     async fn store_streams_to_disk_with_sha256() {
         let (dir, store, repo) = fixture().await;
-        let name = "sisyphus-agent-1.0.0-linux-x86_64.tar.gz";
+        let name = "sisyphus-agent-0.1.0-linux-x86_64.tar.gz";
         let data = b"upgrade package bytes".repeat(50);
         let bytes = store.store(name, bytes_stream(&data)).await.expect("落盘");
         assert_eq!(bytes.size, data.len() as u64);
@@ -468,7 +468,7 @@ mod tests {
     #[tokio::test]
     async fn open_roundtrips_streaming_bytes() {
         let (dir, store, _repo) = fixture().await;
-        let name = "sisyphus-agent-1.0.0-linux-aarch64.tar.gz";
+        let name = "sisyphus-agent-0.1.0-linux-aarch64.tar.gz";
         let data = vec![9u8; 200_000]; // > 64 KiB，跨块。
         store.store(name, bytes_stream(&data)).await.expect("落盘");
         let mut out = Vec::new();
@@ -483,7 +483,7 @@ mod tests {
     #[tokio::test]
     async fn reupload_same_name_overwrites_atomically() {
         let (_dir, store, repo) = fixture().await;
-        let name = "sisyphus-agent-1.0.0-windows-x86_64.zip";
+        let name = "sisyphus-agent-0.1.0-windows-x86_64.zip";
         let b1 = store
             .store(name, bytes_stream(b"v1-bytes"))
             .await
@@ -511,9 +511,9 @@ mod tests {
     async fn list_orders_by_name_and_delete_removes_both_layers() {
         let (_dir, store, repo) = fixture().await;
         for name in [
-            "sisyphus-agent-1.0.0-linux-x86_64.tar.gz",
-            "sisyphus-agent-1.0.0-macos-aarch64.tar.gz",
-            "sisyphus-agent-0.9.0-linux-x86_64.tar.gz",
+            "sisyphus-agent-0.1.0-linux-x86_64.tar.gz",
+            "sisyphus-agent-0.1.0-macos-aarch64.tar.gz",
+            "sisyphus-agent-0.0.0-linux-x86_64.tar.gz",
         ] {
             let bytes = store.store(name, bytes_stream(b"pkg")).await.expect("落盘");
             repo.record(&sample_meta(name, &bytes, 1_000))
@@ -530,15 +530,15 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "sisyphus-agent-0.9.0-linux-x86_64.tar.gz".to_string(),
-                "sisyphus-agent-1.0.0-linux-x86_64.tar.gz".to_string(),
-                "sisyphus-agent-1.0.0-macos-aarch64.tar.gz".to_string(),
+                "sisyphus-agent-0.0.0-linux-x86_64.tar.gz".to_string(),
+                "sisyphus-agent-0.1.0-linux-x86_64.tar.gz".to_string(),
+                "sisyphus-agent-0.1.0-macos-aarch64.tar.gz".to_string(),
             ],
             "按包名排序"
         );
 
         // 删一个：元数据行 + 字节文件皆无。
-        let gone = "sisyphus-agent-0.9.0-linux-x86_64.tar.gz";
+        let gone = "sisyphus-agent-0.0.0-linux-x86_64.tar.gz";
         assert!(repo.delete(gone).await.unwrap(), "删除应命中");
         store.delete(gone).await.expect("字节删");
         assert!(repo.find(gone).await.unwrap().is_none());
@@ -552,13 +552,13 @@ mod tests {
         let (_dir, store, repo) = fixture().await;
         #[allow(clippy::err_expect)] // ByteStream 未实现 Debug
         let err = store
-            .open("sisyphus-agent-1.0.0-linux-x86_64.tar.gz")
+            .open("sisyphus-agent-0.1.0-linux-x86_64.tar.gz")
             .await
             .err()
             .expect("缺失包应 NotFound");
         assert!(matches!(err, StoreError::NotFound(_)), "{err}");
         assert!(
-            repo.find("sisyphus-agent-1.0.0-linux-x86_64.tar.gz")
+            repo.find("sisyphus-agent-0.1.0-linux-x86_64.tar.gz")
                 .await
                 .unwrap()
                 .is_none()

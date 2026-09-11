@@ -762,22 +762,22 @@ mod tests {
 
     #[test]
     fn version_window_rejects_server_newer_and_accepts_rest() {
-        let local = v(1, 0, 0);
+        let local = v(0, 1, 0);
         assert_eq!(
-            version_window(&v(1, 0, 0), &local),
+            version_window(&v(0, 1, 0), &local),
             VersionVerdict::Compatible
         );
         assert_eq!(
-            version_window(&v(0, 9, 0), &local),
+            version_window(&v(0, 0, 0), &local),
             VersionVerdict::Compatible,
             "旧 Server 可连"
         );
         assert_eq!(
-            version_window(&v(1, 1, 0), &local),
+            version_window(&v(0, 2, 0), &local),
             VersionVerdict::ServerTooNew
         );
         assert_eq!(
-            version_window(&v(2, 0, 0), &local),
+            version_window(&v(1, 0, 0), &local),
             VersionVerdict::ServerTooNew
         );
     }

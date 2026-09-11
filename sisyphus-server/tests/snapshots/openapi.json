@@ -10,7 +10,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "1.0.0"
+    "version": "0.1.0"
   },
   "paths": {
     "/api/v1/agent/artifacts/{job_id}/downloads/{source_job}/{name}": {

@@ -24,8 +24,8 @@ use tonic::transport::Channel;
 /// 与 workspace 同版本（兼容窗口内）。
 fn version() -> Version {
     Version {
-        major: 1,
-        minor: 0,
+        major: 0,
+        minor: 1,
         patch: 0,
     }
 }

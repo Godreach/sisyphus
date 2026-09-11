@@ -408,12 +408,12 @@ mod tests {
     fn parses_tar_gz_zip_and_tar_extensions() {
         use crate::store::upgrade_packages::{TargetArch, TargetOs};
         let (v, os, arch) =
-            parse_package_filename("sisyphus-agent-1.0.0-linux-x86_64.tar.gz").expect("tar.gz");
+            parse_package_filename("sisyphus-agent-0.1.0-linux-x86_64.tar.gz").expect("tar.gz");
         assert_eq!(
             v,
             AgentVersion {
-                major: 1,
-                minor: 0,
+                major: 0,
+                minor: 1,
                 patch: 0
             }
         );
@@ -469,13 +469,13 @@ mod tests {
         assert!(filename_from_headers(&h).is_err(), "缺头应拒");
         h.insert(
             FILENAME_HEADER,
-            "sisyphus-agent-1.0.0-linux-x86_64.tar.gz"
+            "sisyphus-agent-0.1.0-linux-x86_64.tar.gz"
                 .parse()
                 .expect("值"),
         );
         assert_eq!(
             filename_from_headers(&h).unwrap(),
-            "sisyphus-agent-1.0.0-linux-x86_64.tar.gz"
+            "sisyphus-agent-0.1.0-linux-x86_64.tar.gz"
         );
         h.insert(FILENAME_HEADER, "  ".parse().expect("空值"));
         assert!(filename_from_headers(&h).is_err(), "空白应拒");

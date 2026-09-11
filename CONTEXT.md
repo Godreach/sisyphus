@@ -158,7 +158,7 @@ v1 的交付物：GitHub Releases 上 6 目标 × server/agent 分开压缩包 +
 
 ### 发布节奏（Release Cadence）
 
-Server 与 Agent 同版本号成对发布（semver，首发 1.0.0）；升级顺序 Server 先升（Agent 过新启动即拒连）；兼容窗口 N-1；Server 升级 = 替换二进制重启 + 启动自动前向迁移（迁移前自动备份 db），不支持降级。Agent 侧的升级分发见「Agent 自升级」。
+Server 与 Agent 同版本号成对发布（semver，当前 0.1.0）；升级顺序 Server 先升（Agent 过新启动即拒连）；兼容窗口 N-1；Server 升级 = 替换二进制重启 + 启动自动前向迁移（迁移前自动备份 db），不支持降级。Agent 侧的升级分发见「Agent 自升级」。
 
 ### Agent 自升级（Self-upgrade）
 

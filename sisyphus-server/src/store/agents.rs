@@ -1605,14 +1605,14 @@ mod tests {
             "新建 Agent 无版本"
         );
 
-        // 落 1.0.0 → 读回等价。
-        let v100 = AgentVersion {
-            major: 1,
-            minor: 0,
+        // 落 0.1.0 → 读回等价。
+        let v010 = AgentVersion {
+            major: 0,
+            minor: 1,
             patch: 0,
         };
         assert!(
-            repo.set_agent_version(agent.id, &v100)
+            repo.set_agent_version(agent.id, &v010)
                 .await
                 .expect("落版本")
         );
@@ -1623,13 +1623,13 @@ mod tests {
                 .unwrap()
                 .agent_version()
                 .unwrap(),
-            Some(v100)
+            Some(v010)
         );
 
-        // 再落 0.9.5（升级/降级回退后）覆盖。
+        // 再落 0.0.5（升级/降级回退后）覆盖。
         let v095 = AgentVersion {
             major: 0,
-            minor: 9,
+            minor: 0,
             patch: 5,
         };
         repo.set_agent_version(agent.id, &v095)
@@ -1648,7 +1648,7 @@ mod tests {
         // 不存在的 Agent：false。
         assert!(
             !repo
-                .set_agent_version(agent.id + 999, &v100)
+                .set_agent_version(agent.id + 999, &v010)
                 .await
                 .expect("不存在")
         );
@@ -1713,9 +1713,9 @@ mod tests {
             .expect("b");
 
         let cmd = PendingUpgrade {
-            package_name: "sisyphus-agent-1.0.0-linux-x86_64.tar.gz".into(),
+            package_name: "sisyphus-agent-0.1.0-linux-x86_64.tar.gz".into(),
             sha256: "abc123".into(),
-            download_url: "/api/v1/agent/upgrade-packages/sisyphus-agent-1.0.0-linux-x86_64.tar.gz"
+            download_url: "/api/v1/agent/upgrade-packages/sisyphus-agent-0.1.0-linux-x86_64.tar.gz"
                 .into(),
         };
 
@@ -1826,10 +1826,13 @@ mod tests {
         );
     }
 
-    /// 票 #76 AC：过旧 Agent 任务面拒连（无派发）+ 升级面保留——
-    /// agent_version < N-1（0.8.0 vs Server 1.0.0）的在线 Agent 不进候选；
-    /// 窗口内（0.9.0 / 1.0.0）正常派发。版本不兼容 ≠ 离线（dispatchable 据此
+    /// 票 #76 AC：版本不兼容 Agent 任务面拒连（无派发）+ 升级面保留——
+    /// agent_version 过新（0.2.0 vs Server 0.1.0）的在线 Agent 不进候选；
+    /// 窗口内（0.0.0 / 0.1.0）正常派发。版本不兼容 ≠ 离线（dispatchable 据此
     /// 区分，UI 四态派生消费）。
+    ///
+    /// 当前发行 0.1.0 的 N-1 下界是 0.0.0，无更低 semver，过旧路径不可达；
+    /// 过旧算法由 proto 窗口测试覆盖。此处用过新版本走同一 `version_incompatible` 门。
     #[tokio::test]
     async fn match_candidates_skips_version_incompatible_agent() {
         let (_dir, pool) = fixture().await;
@@ -1838,71 +1841,70 @@ mod tests {
         assert_eq!(
             server,
             AgentVersion {
-                major: 1,
-                minor: 0,
+                major: 0,
+                minor: 1,
                 patch: 0
             }
         );
 
-        let too_old = repo
-            .create(new_agent("old-1", "[]", "[]"))
+        let too_new = repo
+            .create(new_agent("new-1", "[]", "[]"))
             .await
-            .expect("old");
+            .expect("new");
         let in_window = repo
             .create(new_agent("ok-1", "[]", "[]"))
             .await
             .expect("ok");
-        for a in [&too_old, &in_window] {
+        for a in [&too_new, &in_window] {
             repo.mark_online(a.id, "[]", None, 1_000)
                 .await
                 .expect("上线");
         }
         repo.set_agent_version(
-            too_old.id,
+            too_new.id,
             &AgentVersion {
                 major: 0,
-                minor: 8,
+                minor: 2,
                 patch: 0,
             },
         )
         .await
-        .expect("落旧版本");
+        .expect("落过新版本");
         repo.set_agent_version(
             in_window.id,
             &AgentVersion {
                 major: 0,
-                minor: 9,
+                minor: 0,
                 patch: 0,
             },
         )
         .await
         .expect("落窗口内版本");
 
-        // 派生谓词：过旧 Agent 在线但 dispatchable=false（版本不兼容，非离线）；
+        // 派生谓词：过新 Agent 在线但 dispatchable=false（版本不兼容，非离线）；
         // 窗口内 Agent dispatchable=true。
-        let old_row = repo.get(too_old.id).await.unwrap().unwrap();
+        let new_row = repo.get(too_new.id).await.unwrap().unwrap();
         let ok_row = repo.get(in_window.id).await.unwrap().unwrap();
-        assert!(old_row.online, "过旧 Agent 仍在线");
+        assert!(new_row.online, "过新 Agent 仍在线");
         assert!(
-            !old_row.dispatchable(&server).unwrap(),
-            "过旧 Agent 不可派发"
+            !new_row.dispatchable(&server).unwrap(),
+            "过新 Agent 不可派发"
         );
-        assert!(old_row.version_incompatible(&server).unwrap());
+        assert!(new_row.version_incompatible(&server).unwrap());
         assert!(
             !ok_row.version_incompatible(&server).unwrap(),
-            "0.9.0 在窗口内"
+            "0.0.0 在窗口内"
         );
         assert!(ok_row.dispatchable(&server).unwrap());
 
-        // 候选只含窗口内 Agent（过旧者被版本门滤掉）。
+        // 候选只含窗口内 Agent（过新者被版本门滤掉）。
         assert_eq!(
             repo.match_candidates(None, &[]).await.unwrap(),
             vec![in_window.id],
-            "过旧 Agent 不进候选、窗口内 Agent 进"
+            "过新 Agent 不进候选、窗口内 Agent 进"
         );
 
-        // 升级面保留契约点：过旧 Agent 仍可连（compatible 只判过新）——
-        // 此处用 too_old 不被 match 命中、但行仍在线/可管理作可观察侧证。
-        assert!(repo.get(too_old.id).await.unwrap().unwrap().online);
+        // 升级面保留契约点：不兼容 Agent 行仍在线/可管理作可观察侧证。
+        assert!(repo.get(too_new.id).await.unwrap().unwrap().online);
     }
 }

@@ -926,19 +926,19 @@ mod tests {
 
     #[test]
     fn same_version_in_window() {
-        assert!(version::compatible(&v(1, 0, 0), &server_version()));
+        assert!(version::compatible(&v(0, 1, 0), &server_version()));
     }
 
     #[test]
     fn older_agent_in_window() {
         // N-1 兼容窗口（ADR-0010）：旧 Agent 可连（任务面细化归后续）。
-        assert!(version::compatible(&v(0, 9, 0), &server_version()));
+        assert!(version::compatible(&v(0, 0, 0), &server_version()));
     }
 
     #[test]
     fn newer_agent_rejected() {
-        assert!(!version::compatible(&v(2, 0, 0), &server_version()));
-        assert!(version::peer_too_new(&v(1, 1, 0), &server_version()));
+        assert!(!version::compatible(&v(1, 0, 0), &server_version()));
+        assert!(version::peer_too_new(&v(0, 2, 0), &server_version()));
     }
 
     #[test]

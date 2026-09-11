@@ -705,7 +705,7 @@ async fn b3_tracer_bullet_full_chain() {
     let spawn_seen: SpawnSeen = Arc::new(Mutex::new(Vec::new()));
     let deps = upgrade_deps(&bin, Ok(new_bytes), vec![Ok(())], &dl_seen, &spawn_seen);
 
-    let state = fake_state(token, version(1, 0, 0));
+    let state = fake_state(token, version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
     let (shutdown_tx, ws, cache, agent_task) =
         spawn_agent(dir.path(), format!("http://{addr}"), Some(token), deps);
@@ -714,7 +714,7 @@ async fn b3_tracer_bullet_full_chain() {
     wait_until(|| async { !state.handshakes().is_empty() }).await;
     let (name, v) = &state.handshakes()[0];
     assert!(!name.is_empty(), "握手携带主机名");
-    assert_eq!(v, &version(1, 0, 0), "握手携带 Agent 版本");
+    assert_eq!(v, &version(0, 1, 0), "握手携带 Agent 版本");
     assert!(
         state.token_present()[0],
         "token 随连接呈送（注册换得的 token 认证通过）"
@@ -928,7 +928,7 @@ async fn orphan_backfill_after_agent_restart() {
 
     // 「重启」：fresh 组合根、同 data dir、空在途集（内存态重启即丢）。
     let token = "sisa_orphan";
-    let state = fake_state(token, version(1, 0, 0));
+    let state = fake_state(token, version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
     let deps = UpgradeDeps::safe_stub(); // 不触发升级
     let (shutdown_tx, _ws, _cache, agent_task) =

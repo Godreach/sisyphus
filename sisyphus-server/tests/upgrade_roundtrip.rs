@@ -200,12 +200,12 @@ async fn package_upload_parses_filename_window_and_sha256() {
     let app = test_app().await;
     let cookie = setup_and_login(&app).await;
 
-    // 合法包（1.0.0 = Server 版本，窗口内）。
+    // 合法包（0.1.0 = Server 版本，窗口内）。
     let resp = upload_pkg(
         &app,
         &cookie,
-        "sisyphus-agent-1.0.0-linux-x86_64.tar.gz",
-        "fake-package-bytes-1.0.0",
+        "sisyphus-agent-0.1.0-linux-x86_64.tar.gz",
+        "fake-package-bytes-0.1.0",
     )
     .await;
     assert_eq!(
@@ -216,11 +216,11 @@ async fn package_upload_parses_filename_window_and_sha256() {
     let body = body_json(resp).await;
     assert_eq!(
         body["package_name"],
-        "sisyphus-agent-1.0.0-linux-x86_64.tar.gz"
+        "sisyphus-agent-0.1.0-linux-x86_64.tar.gz"
     );
     assert_eq!(
         body["version"],
-        serde_json::json!({ "major": 1, "minor": 0, "patch": 0 })
+        serde_json::json!({ "major": 0, "minor": 1, "patch": 0 })
     );
     assert_eq!(body["target_os"], "linux");
     assert_eq!(body["target_arch"], "x86_64");
@@ -229,29 +229,15 @@ async fn package_upload_parses_filename_window_and_sha256() {
     use sha2::{Digest, Sha256};
     assert_eq!(
         sha,
-        format!("{:x}", Sha256::digest(b"fake-package-bytes-1.0.0"))
+        format!("{:x}", Sha256::digest(b"fake-package-bytes-0.1.0"))
     );
 
-    // 窗口外：过旧（0.8.0 < N-1=0.9）→ 409。
+    // 窗口外：过新（0.2.0 > Server）→ 409。
+    // 0.1.0 的 N-1 下界是 0.0.0，无更低 semver，过旧包路径在当前发行不可达。
     let resp = upload_pkg(
         &app,
         &cookie,
-        "sisyphus-agent-0.8.0-linux-x86_64.tar.gz",
-        "old",
-    )
-    .await;
-    assert_eq!(
-        resp.status(),
-        axum::http::StatusCode::CONFLICT,
-        "过旧应 409"
-    );
-    assert!(body_text(resp).await.contains("过旧"));
-
-    // 窗口外：过新（1.1.0 > Server）→ 409。
-    let resp = upload_pkg(
-        &app,
-        &cookie,
-        "sisyphus-agent-1.1.0-linux-x86_64.tar.gz",
+        "sisyphus-agent-0.2.0-linux-x86_64.tar.gz",
         "new",
     )
     .await;
@@ -263,14 +249,14 @@ async fn package_upload_parses_filename_window_and_sha256() {
     assert!(body_text(resp).await.contains("过新"));
 
     // 文件名不可解析 → 422。
-    let resp = upload_pkg(&app, &cookie, "agent-1.0.0-linux-x86_64.tar.gz", "x").await;
+    let resp = upload_pkg(&app, &cookie, "agent-0.1.0-linux-x86_64.tar.gz", "x").await;
     assert_eq!(resp.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
 
     // 多包：第二个目标三元组也上传成功（一次多包 = 连续多次上传）。
     let resp = upload_pkg(
         &app,
         &cookie,
-        "sisyphus-agent-1.0.0-windows-x86_64.zip",
+        "sisyphus-agent-0.1.0-windows-x86_64.zip",
         "win-bytes",
     )
     .await;
@@ -286,7 +272,7 @@ async fn package_upload_parses_filename_window_and_sha256() {
 async fn package_download_requires_agent_token_and_returns_sha256_header() {
     let app = test_app().await;
     let cookie = setup_and_login(&app).await;
-    let pkg = "sisyphus-agent-1.0.0-linux-x86_64.tar.gz";
+    let pkg = "sisyphus-agent-0.1.0-linux-x86_64.tar.gz";
     upload_pkg(&app, &cookie, pkg, "download-bytes").await;
     let token = create_agent(&app, "linux-1").await;
 
@@ -373,15 +359,15 @@ async fn full_upgrade_roundtrip_upload_command_drain_download_version_update() {
     let cookie = setup_and_login(&app).await;
     let (addr, handle) = spawn_grpc(&app).await;
 
-    // 1. 上传 1.0.0 包（= Server 版本）。
-    let pkg = "sisyphus-agent-1.0.0-linux-x86_64.tar.gz";
+    // 1. 上传 0.1.0 包（= Server 版本）。
+    let pkg = "sisyphus-agent-0.1.0-linux-x86_64.tar.gz";
     let up = upload_pkg(&app, &cookie, pkg, "new-binary-bytes").await;
     assert_eq!(up.status(), axum::http::StatusCode::CREATED);
     let sha = body_json(up).await["sha256"].as_str().unwrap().to_string();
 
-    // 2. 建 Agent（0.9.0，窗口内）+ 连上。
+    // 2. 建 Agent（0.0.0，N-1 窗口内）+ 连上。
     let token = create_agent(&app, "linux-1").await;
-    let (mut stream, tx) = connect(addr, &token, v(0, 9, 0)).await;
+    let (mut stream, tx) = connect(addr, &token, v(0, 0, 0)).await;
     recv_handshake(&mut stream).await;
     wait_until(|| async {
         app.state
@@ -394,7 +380,7 @@ async fn full_upgrade_roundtrip_upload_command_drain_download_version_update() {
             .unwrap()
             == Some(AgentVersion {
                 major: 0,
-                minor: 9,
+                minor: 0,
                 patch: 0,
             })
     })
@@ -489,11 +475,11 @@ async fn full_upgrade_roundtrip_upload_command_drain_download_version_update() {
     })
     .await;
 
-    // 7. fake「重启」：断开旧连接，以新版本 1.0.0 重连 → server 清升级态 + 落新版本。
+    // 7. fake「重启」：断开旧连接，以新版本 0.1.0 重连 → server 清升级态 + 落新版本。
     drop(tx);
     drop(stream);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let (mut stream2, _tx2) = connect(addr, &token, v(1, 0, 0)).await;
+    let (mut stream2, _tx2) = connect(addr, &token, v(0, 1, 0)).await;
     recv_handshake(&mut stream2).await;
     wait_until(|| async {
         let row = app
@@ -505,8 +491,8 @@ async fn full_upgrade_roundtrip_upload_command_drain_download_version_update() {
             .unwrap();
         row.agent_version().unwrap()
             == Some(AgentVersion {
-                major: 1,
-                minor: 0,
+                major: 0,
+                minor: 1,
                 patch: 0,
             })
             && row.upgrade_phase.is_none()
@@ -522,17 +508,18 @@ async fn full_upgrade_roundtrip_upload_command_drain_download_version_update() {
 // ===========================================================================
 
 #[tokio::test]
-async fn too_old_agent_task_face_rejected_upgrade_face_preserved() {
+async fn n_minus_one_agent_dispatchable_and_receives_upgrade() {
     let app = test_app().await;
     let cookie = setup_and_login(&app).await;
     let (addr, handle) = spawn_grpc(&app).await;
 
-    let pkg = "sisyphus-agent-1.0.0-linux-x86_64.tar.gz";
+    let pkg = "sisyphus-agent-0.1.0-linux-x86_64.tar.gz";
     upload_pkg(&app, &cookie, pkg, "bytes").await;
 
-    // 过旧 Agent（0.8.0 < N-1=0.9）连上——握手不拒（只判过新），落版本 + 在线。
+    // N-1 Agent（0.0.0 = 0.1.0 的窗口下界）连上——握手不拒、可派发。
+    // 当前发行无更低 semver，过旧（< 0.0.0）路径不可达；过旧算法见 proto 窗口测试。
     let token = create_agent(&app, "old-1").await;
-    let (mut stream, _tx) = connect(addr, &token, v(0, 8, 0)).await;
+    let (mut stream, _tx) = connect(addr, &token, v(0, 0, 0)).await;
     recv_handshake(&mut stream).await;
     wait_until(|| async {
         let row = app
@@ -546,13 +533,12 @@ async fn too_old_agent_task_face_rejected_upgrade_face_preserved() {
             && row.agent_version().unwrap()
                 == Some(AgentVersion {
                     major: 0,
-                    minor: 8,
+                    minor: 0,
                     patch: 0,
                 })
     })
     .await;
 
-    // 任务面拒连：在线但 dispatchable=false（version_incompatible）→ match_candidates 排除。
     let server = app.state.agents.server_version();
     let row = app
         .state
@@ -561,22 +547,23 @@ async fn too_old_agent_task_face_rejected_upgrade_face_preserved() {
         .await
         .unwrap()
         .unwrap();
-    assert!(row.online, "过旧 Agent 仍在线");
+    assert!(row.online, "N-1 Agent 仍在线");
     assert!(
-        !row.dispatchable(&server).unwrap(),
-        "过旧 Agent 不可派发（任务面拒连）"
+        row.dispatchable(&server).unwrap(),
+        "N-1 Agent 可派发（0.0.0 在 0.1.0 窗口内）"
     );
-    assert!(
+    assert_eq!(
         app.state
             .agents
             .match_candidates(None, &[])
             .await
             .unwrap()
-            .is_empty(),
-        "过旧 Agent 不进候选"
+            .len(),
+        1,
+        "N-1 Agent 进候选"
     );
 
-    // 升级面保留：REST 升级指令仍送达 fake（握手/指令通）。
+    // 升级面：REST 升级指令仍送达 fake（握手/指令通）。
     let resp = req_with_cookie(
         &app,
         "POST",
@@ -592,7 +579,7 @@ async fn too_old_agent_task_face_rejected_upgrade_face_preserved() {
     );
     let cmd_msg = recv_cmd(&mut stream)
         .await
-        .expect("过旧 Agent 应收到升级指令");
+        .expect("N-1 Agent 应收到升级指令");
     assert!(matches!(cmd_msg.kind, Some(Kind::Upgrade(_))));
 
     handle.abort();
@@ -609,7 +596,7 @@ async fn workspace_list_roundtrip_and_clean_delivered() {
     let (addr, handle) = spawn_grpc(&app).await;
 
     let token = create_agent(&app, "linux-1").await;
-    let (mut stream, tx) = connect(addr, &token, v(1, 0, 0)).await;
+    let (mut stream, tx) = connect(addr, &token, v(0, 1, 0)).await;
     recv_handshake(&mut stream).await;
 
     // 后台：fake 收 list 请求即回放一条假列表。
@@ -689,7 +676,7 @@ async fn cache_list_roundtrip_and_delete_delivered() {
     let (addr, handle) = spawn_grpc(&app).await;
 
     let token = create_agent(&app, "linux-1").await;
-    let (mut stream, tx) = connect(addr, &token, v(1, 0, 0)).await;
+    let (mut stream, tx) = connect(addr, &token, v(0, 1, 0)).await;
     recv_handshake(&mut stream).await;
 
     let tx2 = tx.clone();
@@ -748,15 +735,15 @@ async fn upgrade_all_issues_to_non_target_skips_at_target() {
     let cookie = setup_and_login(&app).await;
     let (addr, handle) = spawn_grpc(&app).await;
 
-    let pkg = "sisyphus-agent-1.0.0-linux-x86_64.tar.gz";
+    let pkg = "sisyphus-agent-0.1.0-linux-x86_64.tar.gz";
     upload_pkg(&app, &cookie, pkg, "bytes").await;
 
-    // 两个 Agent：a 在 0.9.0（需升级）、b 在 1.0.0（已在目标，跳过）。
+    // 两个 Agent：a 在 0.0.0（需升级）、b 在 0.1.0（已在目标，跳过）。
     let token_a = create_agent(&app, "a-1").await;
-    let (mut sa, _txa) = connect(addr, &token_a, v(0, 9, 0)).await;
+    let (mut sa, _txa) = connect(addr, &token_a, v(0, 0, 0)).await;
     recv_handshake(&mut sa).await;
     let token_b = create_agent(&app, "b-1").await;
-    let (mut sb, _txb) = connect(addr, &token_b, v(1, 0, 0)).await;
+    let (mut sb, _txb) = connect(addr, &token_b, v(0, 1, 0)).await;
     recv_handshake(&mut sb).await;
     wait_until(|| async {
         let a = app.state.agents.get_by_name("a-1").await.unwrap().unwrap();
@@ -764,13 +751,13 @@ async fn upgrade_all_issues_to_non_target_skips_at_target() {
         a.agent_version().unwrap()
             == Some(AgentVersion {
                 major: 0,
-                minor: 9,
+                minor: 0,
                 patch: 0,
             })
             && b.agent_version().unwrap()
                 == Some(AgentVersion {
-                    major: 1,
-                    minor: 0,
+                    major: 0,
+                    minor: 1,
                     patch: 0,
                 })
     })
@@ -786,8 +773,8 @@ async fn upgrade_all_issues_to_non_target_skips_at_target() {
     .await;
     assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
     let body = body_json(resp).await;
-    assert_eq!(body["issued"], 1, "只 a-1（0.9.0）需升级");
-    assert_eq!(body["skipped"], 1, "b-1（1.0.0）已在目标跳过");
+    assert_eq!(body["issued"], 1, "只 a-1（0.0.0）需升级");
+    assert_eq!(body["skipped"], 1, "b-1（0.1.0）已在目标跳过");
 
     handle.abort();
 }

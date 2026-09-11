@@ -54,8 +54,8 @@ use common::{
 /// 与 workspace 同版本（兼容窗口内）。
 fn version() -> Version {
     Version {
-        major: 1,
-        minor: 0,
+        major: 0,
+        minor: 1,
         patch: 0,
     }
 }
@@ -357,7 +357,7 @@ async fn build_trigger(h: &Harness, number: i64) -> TriggerSource {
 // ---------------------------------------------------------------------------
 
 /// fake Agent 连接（握手 + 系统标签 metadata）→ 返回 (响应流, 上行发送器)。
-/// `ver` 为 Agent 上报版本（默认 workspace 版本 1.0.0；升级往返面用 0.9.0
+/// `ver` 为 Agent 上报版本（默认 workspace 版本 0.1.0；升级往返面用 0.0.0
 /// 以落在 N-1 窗口内可派发、且非目标版本使升级指令受理）。
 async fn connect_fake_agent(
     addr: std::net::SocketAddr,
@@ -399,16 +399,16 @@ async fn connect_fake_agent(
     Ok((response.into_inner(), tx))
 }
 
-/// 默认版本（workspace 同版本 1.0.0，兼容窗口内、可派发）。
+/// 默认版本（workspace 同版本 0.1.0，兼容窗口内、可派发）。
 fn v_current() -> Version {
     version()
 }
 
-/// 0.9.0：N-1 窗口下界（可派发、非目标版本，升级往返面用）。
+/// 0.0.0：N-1 窗口下界（可派发、非目标版本，升级往返面用）。
 fn v_below() -> Version {
     Version {
         major: 0,
-        minor: 9,
+        minor: 0,
         patch: 0,
     }
 }
@@ -720,7 +720,7 @@ async fn seed_and_connect(
         .as_str()
         .expect("token")
         .to_string();
-    // 连 fake Agent（workspace 版本 1.0.0：可派发，构建执行面用）。
+    // 连 fake Agent（workspace 版本 0.1.0：可派发，构建执行面用）。
     let (mut stream, tx) = connect_fake_agent(h.grpc_addr, &token, v_current())
         .await
         .expect("连接");
@@ -1059,9 +1059,9 @@ async fn b5_full_chain_trigger_to_metrics() {
     );
 
     // 14. 单台 Agent 升级往返（票 #81 AC）：上传包 → 指令 → 排空 → 下载校验 → 版本更新。
-    // 用第二台 Agent `upgrader-1`（0.9.0，N-1 窗口内、非目标版本）做升级往返——
-    // linux-1 已在目标版本 1.0.0，升级它会 409（已在目标）；另起一台不干扰构建链路。
-    let pkg = "sisyphus-agent-1.0.0-linux-x86_64.tar.gz";
+    // 用第二台 Agent `upgrader-1`（0.0.0，N-1 窗口内、非目标版本）做升级往返——
+    // linux-1 已在目标版本 0.1.0，升级它会 409（已在目标）；另起一台不干扰构建链路。
+    let pkg = "sisyphus-agent-0.1.0-linux-x86_64.tar.gz";
     let up = upload_pkg(&h.app, &admin, pkg, "new-binary-bytes").await;
     assert_eq!(
         up.status(),
@@ -1069,7 +1069,7 @@ async fn b5_full_chain_trigger_to_metrics() {
         "上传升级包 201"
     );
     let pkg_sha = body_json(up).await["sha256"].as_str().unwrap().to_string();
-    // 建 upgrader-1（0.9.0）+ 连接。
+    // 建 upgrader-1（0.0.0）+ 连接。
     let resp = req_with_cookie(
         &h.app,
         "POST",
@@ -1161,7 +1161,7 @@ async fn b5_full_chain_trigger_to_metrics() {
             == Some("restarting")
     })
     .await;
-    // fake「重启」：断开旧连接，以新版本 1.0.0 重连 → server 清升级态 + 落新版本。
+    // fake「重启」：断开旧连接，以新版本 0.1.0 重连 → server 清升级态 + 落新版本。
     drop(tx_up);
     drop(stream_up);
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1787,7 +1787,7 @@ async fn seed_and_connect_two_jobs(
         .as_str()
         .expect("token")
         .to_string();
-    // 与主链路构建 Agent 同版本（1.0.0，可派发）；本面不做升级往返，版本无关。
+    // 与主链路构建 Agent 同版本（0.1.0，可派发）；本面不做升级往返，版本无关。
     let (mut stream, tx) = connect_fake_agent(h.grpc_addr, &token, v_current())
         .await
         .expect("连接");

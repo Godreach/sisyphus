@@ -7,8 +7,8 @@ use crate::agent::Version;
 
 /// 本发行版本（Server 与 Agent 同版本成对发布，ADR-0010）。
 pub const VERSION: Version = Version {
-    major: 1,
-    minor: 0,
+    major: 0,
+    minor: 1,
     patch: 0,
 };
 
@@ -75,10 +75,10 @@ mod tests {
     fn older_peer_compatible() {
         // N-1 兼容窗口：旧 Agent 可连（握手只判过新，`compatible` 放行）。
         // 任务面「过旧拒派」是更窄的门，见 `peer_too_old` 测试——握手与派发
-        // 是两道独立门，0.9 可连且仍在 1.0 的 N-1 窗口内（可派发）。
+        // 是两道独立门，0.0 可连且仍在 0.1 的 N-1 窗口内（可派发）。
         let older = Version {
             major: 0,
-            minor: 9,
+            minor: 0,
             patch: 0,
         };
         assert!(compatible(&older, &VERSION));
@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn newer_peer_incompatible() {
         let newer = Version {
-            major: 2,
+            major: 1,
             minor: 0,
             patch: 0,
         };
@@ -96,28 +96,42 @@ mod tests {
         // minor/patch 任一更大也判过新（semver 全序）。
         assert!(peer_too_new(
             &Version {
-                major: 1,
-                minor: 1,
+                major: 0,
+                minor: 2,
                 patch: 0
             },
             &VERSION
         ));
         assert!(peer_too_new(
             &Version {
-                major: 1,
-                minor: 0,
+                major: 0,
+                minor: 1,
                 patch: 1
             },
             &VERSION
         ));
     }
 
-    /// N-1 下界：1.0 的下界是 0.9（minor==0 跨 major 回退约定），
+    /// N-1 下界：0.1 的下界是 0.0（同 major 上一 minor），
+    /// 1.0 的下界是 0.9（minor==0 跨 major 回退约定），
     /// 1.2 的下界是 1.1（同 major 上一 minor）。
     #[test]
     fn n_minus_one_floor_wraps_at_first_minor() {
         assert_eq!(
             n_minus_one_floor(&VERSION),
+            Version {
+                major: 0,
+                minor: 0,
+                patch: 0
+            },
+            "0.1.0 的 N-1 下界是 0.0.0"
+        );
+        assert_eq!(
+            n_minus_one_floor(&Version {
+                major: 1,
+                minor: 0,
+                patch: 0
+            }),
             Version {
                 major: 0,
                 minor: 9,
@@ -153,18 +167,80 @@ mod tests {
         );
     }
 
-    /// 过旧判定 + 窗口：0.9 在 1.0 窗口内（可派发），0.8 过旧（任务面拒派、
-    /// 升级面保留），1.0 自身与 1.0.1 都在窗口内。
+    /// 过旧判定 + 窗口（当前发行 0.1.0）：0.0 在窗口内（可派发），
+    /// 0.1 自身在窗口内，0.1.1 / 0.2 过新。0.1.0 的 N-1 下界是 0.0.0，
+    /// 无更低 semver，过旧路径见 `peer_too_old_and_in_window_for_server_1_0_0`。
+    #[test]
+    fn peer_too_old_and_in_window_for_current_server() {
+        // 0.0.0 = 0.1 的 N-1，在窗口内：不过旧、不过新。
+        let n_minus_1 = Version {
+            major: 0,
+            minor: 0,
+            patch: 0,
+        };
+        assert!(!peer_too_old(&n_minus_1, &VERSION));
+        assert!(peer_in_window(&n_minus_1, &VERSION));
+
+        // 0.0.5 仍在窗口内（patch 不影响下界）。
+        assert!(peer_in_window(
+            &Version {
+                major: 0,
+                minor: 0,
+                patch: 5
+            },
+            &VERSION
+        ));
+
+        // 0.1.0 自身（== Server，窗口上界）在窗口内。
+        assert!(peer_in_window(&VERSION, &VERSION));
+
+        // 0.1.1 比 Server 高一个 patch → 过新（ADR-0010：Agent 新于 Server 即
+        // 拒连），窗口外。窗口是 [下界, Server] 闭区间，上界即 Server 自身。
+        assert!(!peer_in_window(
+            &Version {
+                major: 0,
+                minor: 1,
+                patch: 1
+            },
+            &VERSION
+        ));
+        assert!(peer_too_new(
+            &Version {
+                major: 0,
+                minor: 1,
+                patch: 1
+            },
+            &VERSION
+        ));
+
+        // 0.2.0 过新（> Server）：窗口外。
+        assert!(!peer_in_window(
+            &Version {
+                major: 0,
+                minor: 2,
+                patch: 0
+            },
+            &VERSION
+        ));
+    }
+
+    /// 过旧判定 + 窗口（以 1.0.0 为 Server 的算法例）：0.9 在窗口内，
+    /// 0.8 过旧（任务面拒派、升级面保留），1.0 自身在窗口内，1.0.1 过新。
     #[test]
     fn peer_too_old_and_in_window_for_server_1_0_0() {
+        let server = Version {
+            major: 1,
+            minor: 0,
+            patch: 0,
+        };
         // 0.9.0 = 1.0 的 N-1，在窗口内：不过旧、不过新。
         let n_minus_1 = Version {
             major: 0,
             minor: 9,
             patch: 0,
         };
-        assert!(!peer_too_old(&n_minus_1, &VERSION));
-        assert!(peer_in_window(&n_minus_1, &VERSION));
+        assert!(!peer_too_old(&n_minus_1, &server));
+        assert!(peer_in_window(&n_minus_1, &server));
 
         // 0.9.5 仍在窗口内（patch 不影响下界）。
         assert!(peer_in_window(
@@ -173,7 +249,7 @@ mod tests {
                 minor: 9,
                 patch: 5
             },
-            &VERSION
+            &server
         ));
 
         // 0.8.0 过旧（< 0.9 下界）：窗口外、任务面拒派。
@@ -182,23 +258,22 @@ mod tests {
             minor: 8,
             patch: 0,
         };
-        assert!(peer_too_old(&too_old, &VERSION));
-        assert!(!peer_in_window(&too_old, &VERSION));
+        assert!(peer_too_old(&too_old, &server));
+        assert!(!peer_in_window(&too_old, &server));
         // 过旧仍可连（握手只判过新）——升级面保留语义的契约点。
-        assert!(compatible(&too_old, &VERSION));
+        assert!(compatible(&too_old, &server));
 
         // 1.0.0 自身（== Server，窗口上界）在窗口内。
-        assert!(peer_in_window(&VERSION, &VERSION));
+        assert!(peer_in_window(&server, &server));
 
-        // 1.0.1 比 Server 高一个 patch → 过新（ADR-0010：Agent 新于 Server 即
-        // 拒连），窗口外。窗口是 [下界, Server] 闭区间，上界即 Server 自身。
+        // 1.0.1 比 Server 高一个 patch → 过新。
         assert!(!peer_in_window(
             &Version {
                 major: 1,
                 minor: 0,
                 patch: 1
             },
-            &VERSION
+            &server
         ));
         assert!(peer_too_new(
             &Version {
@@ -206,7 +281,7 @@ mod tests {
                 minor: 0,
                 patch: 1
             },
-            &VERSION
+            &server
         ));
 
         // 1.1.0 过新（> Server）：窗口外。
@@ -216,7 +291,7 @@ mod tests {
                 minor: 1,
                 patch: 0
             },
-            &VERSION
+            &server
         ));
     }
 

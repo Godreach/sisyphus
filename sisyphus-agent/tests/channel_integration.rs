@@ -545,7 +545,7 @@ fn dummy_dispatch() -> sisyphus_agent::channel::Dispatch {
 #[tokio::test]
 async fn valid_token_establishes_session_with_heartbeat_labels_and_inflight() {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
     let (shutdown_tx, _receipts, _logbuf, agent_task) =
@@ -555,7 +555,7 @@ async fn valid_token_establishes_session_with_heartbeat_labels_and_inflight() {
     wait_until(|| async { !state.handshakes().is_empty() }).await;
     let (name, v) = &state.handshakes()[0];
     assert!(!name.is_empty(), "握手携带主机名");
-    assert_eq!(v, &version(1, 0, 0), "握手携带 Agent 版本");
+    assert_eq!(v, &version(0, 1, 0), "握手携带 Agent 版本");
     assert!(state.token_present()[0], "token 随连接呈送");
     let labels = &state.labels()[0];
     assert!(
@@ -601,7 +601,7 @@ async fn valid_token_establishes_session_with_heartbeat_labels_and_inflight() {
 #[tokio::test]
 async fn rejects_missing_and_wrong_token_and_retries_forever() {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
     // 缺 token：agent 不带凭据也连（被拒后走退避——不自杀），fake 侧可见
@@ -635,7 +635,7 @@ async fn rejects_missing_and_wrong_token_and_retries_forever() {
 #[tokio::test]
 async fn rejects_disabled_token_and_retries() {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     state.token_disabled.store(true, Ordering::SeqCst);
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
@@ -658,12 +658,12 @@ async fn rejects_disabled_token_and_retries() {
     server_task.abort();
 }
 
-/// 版本窗口：Server 过新（2.0.0 > 1.0.0）→ Agent 拒连并明确报错（ADR-0010/
+/// 版本窗口：Server 过新（1.0.0 > 0.1.0）→ Agent 拒连并明确报错（ADR-0010/
 /// 0017）。握手已互见（fake 记录到 Agent 握手）后，Agent 侧裁决拒绝。
 #[tokio::test]
 async fn rejects_server_too_new_version_with_clear_error() {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let state = fake_state(Some("sisa_abc"), version(2, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
     let err = connect_once(format!("http://{addr}"), Some("sisa_abc"), dir.path()).await;
@@ -684,7 +684,7 @@ async fn rejects_server_too_new_version_with_clear_error() {
 #[tokio::test]
 async fn reconnects_after_drop_with_full_rehandshake() {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     state.drop_after_handshake.store(true, Ordering::SeqCst);
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
@@ -727,7 +727,7 @@ async fn reconnects_after_drop_with_full_rehandshake() {
 #[tokio::test]
 async fn dispatches_downlink_frames_to_module_placeholders() {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
     let (shutdown_tx, receipts, _logbuf, agent_task) =
@@ -764,7 +764,7 @@ async fn dispatches_downlink_frames_to_module_placeholders() {
         },
         ChannelMessage {
             kind: Some(Kind::Upgrade(UpgradeCommand {
-                package_name: "sisyphus-agent-1.0.0-linux-amd64.tar.gz".into(),
+                package_name: "sisyphus-agent-0.1.0-linux-amd64.tar.gz".into(),
                 sha256: "abc".into(),
                 download_url: "http://example".into(),
             })),
@@ -797,7 +797,7 @@ async fn dispatches_downlink_frames_to_module_placeholders() {
 #[tokio::test]
 async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
     let logbuf_dir = dir.path().join("logbuf");
@@ -966,7 +966,7 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
 #[tokio::test]
 async fn workspace_list_command_reports_real_filesystem_entries() {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
     let (shutdown_tx, ws, _receipts, agent_task) = spawn_agent_ws(
@@ -1029,7 +1029,7 @@ async fn workspace_list_command_reports_real_filesystem_entries() {
 #[tokio::test]
 async fn workspace_clean_command_removes_real_dirs_without_touching_cache() {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
     let (shutdown_tx, ws, _receipts, agent_task) = spawn_agent_ws(
@@ -1123,7 +1123,7 @@ async fn workspace_clean_command_removes_real_dirs_without_touching_cache() {
 #[tokio::test]
 async fn workspace_usage_sample_visible_in_heartbeat() {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
     // 注入短采样间隔（50ms）避免真实 10 分钟 sleep。
@@ -1172,7 +1172,7 @@ async fn workspace_usage_sample_visible_in_heartbeat() {
 #[tokio::test]
 async fn cache_list_command_reports_real_entries() {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
     let (shutdown_tx, _ws, cache, _receipts, agent_task) = spawn_agent_cache(
@@ -1267,7 +1267,7 @@ async fn cache_list_command_reports_real_entries() {
 #[tokio::test]
 async fn cache_delete_command_single_and_clear() {
     let dir = tempfile::tempdir().expect("临时数据目录");
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
 
     let (shutdown_tx, _ws, cache, _receipts, agent_task) = spawn_agent_cache(
@@ -1488,7 +1488,7 @@ async fn upgrade_full_flow_reports_phases_and_swaps_via_channel() {
     let spawn_seen = Arc::new(Mutex::new(Vec::new()));
     let deps = upgrade_deps(&bin, Ok(new_bytes), vec![Ok(())], &dl_seen, &spawn_seen);
 
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
     let (shutdown_tx, agent_task) =
         spawn_agent_upgrade(dir.path(), format!("http://{addr}"), Some("sisa_abc"), deps);
@@ -1550,7 +1550,7 @@ async fn upgrade_drains_running_job_and_rejects_new_jobs() {
     let spawn_seen = Arc::new(Mutex::new(Vec::new()));
     let deps = upgrade_deps(&bin, Ok(new_bytes), vec![Ok(())], &dl_seen, &spawn_seen);
 
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
     let (shutdown_tx, agent_task) =
         spawn_agent_upgrade(dir.path(), format!("http://{addr}"), Some("sisa_abc"), deps);
@@ -1658,7 +1658,7 @@ async fn upgrade_download_failure_keeps_old_via_channel() {
         &spawn_seen,
     );
 
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
     let (shutdown_tx, agent_task) =
         spawn_agent_upgrade(dir.path(), format!("http://{addr}"), Some("sisa_abc"), deps);
@@ -1710,7 +1710,7 @@ async fn upgrade_sha_mismatch_keeps_old_via_channel() {
     // 下载器返回 WRONG 字节，但指令 sha 指向 NEW → 不符。
     let deps = upgrade_deps(&bin, Ok(wrong_bytes), vec![Ok(())], &dl_seen, &spawn_seen);
 
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
     let (shutdown_tx, agent_task) =
         spawn_agent_upgrade(dir.path(), format!("http://{addr}"), Some("sisa_abc"), deps);
@@ -1765,7 +1765,7 @@ async fn upgrade_three_start_failures_roll_back_via_channel() {
         &spawn_seen,
     );
 
-    let state = fake_state(Some("sisa_abc"), version(1, 0, 0));
+    let state = fake_state(Some("sisa_abc"), version(0, 1, 0));
     let (addr, server_task) = spawn_fake(state.clone()).await;
     let (shutdown_tx, agent_task) =
         spawn_agent_upgrade(dir.path(), format!("http://{addr}"), Some("sisa_abc"), deps);

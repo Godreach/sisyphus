@@ -30,7 +30,7 @@ function agent(name: string, overrides: Partial<AgentResponse> = {}): AgentRespo
     max_concurrency: 2,
     active_jobs: 1,
     last_seen_at: 1_700_000_000_000,
-    agent_version: { major: 1, minor: 0, patch: 0 },
+    agent_version: { major: 0, minor: 1, patch: 0 },
     version_compatible: true,
     draining: false,
     upgrade_phase: null,
@@ -122,8 +122,8 @@ describe('AgentDetailView 详情（标签 + 槽位 + 磁盘 + 工作区/缓存�
     expect(wrapper!.findAll('.n-statistic').length).toBeGreaterThanOrEqual(4)
     expect(wrapper!.text()).toContain('在途任务')
     expect(wrapper!.text()).toContain('并发槽位')
-    // Agent 版本（1.0.0）。
-    expect(wrapper!.text()).toContain('1.0.0')
+    // Agent 版本（0.1.0）。
+    expect(wrapper!.text()).toContain('0.1.0')
     expect(wrapper!.get('.agent-back').text()).toContain('返回构建机列表')
     expect(String(fetchMock.mock.calls[0]![0])).toBe('/api/v1/agents/demo')
   })

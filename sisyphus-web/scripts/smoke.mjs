@@ -156,8 +156,8 @@ const pipelineStats = {
 // 升级包（升级页表格区渲染用——占位态消除：mock 回非空包，断言包表出现。
 // #95 迁移 NDataTable 后包表定位类为 upgrade-packages-table）。
 const upgradePackage = {
-  package_name: 'sisyphus-agent-1.0.0-linux-x86_64.tar.gz',
-  version: { major: 1, minor: 0, patch: 0 },
+  package_name: 'sisyphus-agent-0.1.0-linux-x86_64.tar.gz',
+  version: { major: 0, minor: 1, patch: 0 },
   target_os: 'linux',
   target_arch: 'x86_64',
   size: 1234,
@@ -374,7 +374,7 @@ async function runAuthed(browser) {
     await page.goto(`${BASE}/admin/upgrade`, { waitUntil: 'domcontentloaded' })
     await page.locator('.app-topbar-title', { hasText: '构建机升级' }).first().waitFor({ timeout: 10000 })
     await page
-      .locator('[data-testid="upgrade-package-sisyphus-agent-1.0.0-linux-x86_64.tar.gz"]')
+      .locator('[data-testid="upgrade-package-sisyphus-agent-0.1.0-linux-x86_64.tar.gz"]')
       .first()
       .waitFor({ timeout: 5000 })
     ok('admin-upgrade package table renders', true)

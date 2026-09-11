@@ -95,10 +95,10 @@ async fn rest_and_grpc_serve_side_by_side() {
     let mut client = AgentChannelClient::new(channel);
     let handshake = ChannelMessage {
         kind: Some(Kind::Handshake(Handshake {
-            // Server 为 workspace 版本 1.0.0，同版本在兼容窗口内。
+            // Server 为 workspace 版本 0.1.0，同版本在兼容窗口内。
             agent_version: Some(Version {
-                major: 1,
-                minor: 0,
+                major: 0,
+                minor: 1,
                 patch: 0,
             }),
             agent_name: "smoke-agent".into(),

@@ -407,7 +407,7 @@ mod tests {
             .set_pending_upgrade(
                 offline.id,
                 &crate::store::agents::PendingUpgrade {
-                    package_name: "sisyphus-agent-1.0.0-linux-x86_64.tar.gz".into(),
+                    package_name: "sisyphus-agent-0.1.0-linux-x86_64.tar.gz".into(),
                     sha256: "abc".into(),
                     download_url: "/api/v1/agent/upgrade-packages/x".into(),
                 },

@@ -1254,9 +1254,9 @@ mod tests {
             .unwrap()
             .unwrap();
         let cmd = PendingUpgrade {
-            package_name: "sisyphus-agent-1.0.0-linux-x86_64.tar.gz".into(),
+            package_name: "sisyphus-agent-0.1.0-linux-x86_64.tar.gz".into(),
             sha256: "abc".into(),
-            download_url: "/api/v1/agent/upgrade-packages/sisyphus-agent-1.0.0-linux-x86_64.tar.gz"
+            download_url: "/api/v1/agent/upgrade-packages/sisyphus-agent-0.1.0-linux-x86_64.tar.gz"
                 .into(),
         };
         t.sched
