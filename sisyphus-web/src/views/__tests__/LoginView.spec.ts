@@ -111,7 +111,6 @@ describe('LoginView（登录/回跳/错误展示）', () => {
 
     await fillAndSubmit('alice', 'wrong')
     await vi.waitFor(() => expect(wrapper.get('[role="alert"]').text()).toContain('用户名或密码错误'))
-    expect(wrapper.text()).toContain('登录以继续')
   })
 
   it('429 限流 → 按 retry_after_ms 展示倒计时提示', async () => {

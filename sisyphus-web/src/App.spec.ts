@@ -1,5 +1,5 @@
 // 应用壳测试（spec #99 重构后的外壳行为）：
-// - 深侧栏严格三项导航（工作台/流水线/构建机）；未认证无壳。
+// - 主题自适应侧栏严格三项导航（工作台/流水线/构建机）；未认证无壳。
 // - 登出闭环：用户卡下拉 → 登出 → POST /auth/logout + 回登录页 + 清认证态。
 // - 管理四页入口收编进用户卡下拉：仅全局 admin 可见；非 admin 侧栏与
 //   下拉均无管理入口。直访 URL 由路由守卫兜底（guards.spec.ts 覆盖）。
@@ -14,6 +14,7 @@ import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import App from '@/App.vue'
 import { i18n, setLocale } from '@/i18n'
 import { useAuthStore } from '@/stores/auth'
+import { useDarkMode } from '@/composables/useDarkMode'
 
 describe('App 壳（三项导航 + 登出闭环）', () => {
   let pinia: Pinia
@@ -64,6 +65,7 @@ describe('App 壳（三项导航 + 登出闭环）', () => {
 
     const items = wrapper.findAll('.app-sidebar .nav-item')
     expect(items.map((w) => w.text())).toEqual(['工作台', '流水线', '构建机'])
+    expect(wrapper.find('.app-sidebar .sidebar-divider').exists()).toBe(true)
 
     const pushSpy = vi.spyOn(router, 'push')
     await items[1]?.trigger('click')
@@ -426,6 +428,23 @@ describe('App 壳（语言/主题收进用户卡菜单，票 #104 裁定 G3/G4�
     expect(labels.some((s) => s?.includes('语言'))).toBe(true)
     expect(labels.some((s) => s?.includes('主题'))).toBe(true)
     expect(labels.some((s) => s?.includes('登出'))).toBe(true)
+  })
+
+  it('侧栏主题跟随用户偏好切换；浅色使用深色字标 Logo', async () => {
+    const auth = useAuthStore()
+    auth.setAuthed({ username: 'alice', isAdmin: false })
+    const { setPreference } = useDarkMode()
+    setPreference('dark')
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.app-sidebar').attributes('data-theme')).toBe('dark')
+    expect(wrapper.find('.sidebar-logo-image').attributes('src')).toBe('/sisyphus-logo.svg')
+
+    setPreference('light')
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.app-sidebar').attributes('data-theme')).toBe('light')
+    expect(wrapper.find('.sidebar-logo-image').attributes('src')).toBe('/sisyphus-logo-dark.svg')
   })
 
   it('窄屏抽屉：偏好下拉同源（语言/主题不丢入口）', async () => {

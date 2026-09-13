@@ -15,7 +15,6 @@
   },
   "auth": {
     "login": "登录",
-    "loginTagline": "登录以继续",
     "loggingIn": "登录中…",
     "rememberMe": "保持登录状态",
     "logout": "登出",

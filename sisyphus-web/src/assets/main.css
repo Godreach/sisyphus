@@ -1,5 +1,5 @@
 /* 全局基础样式。按 prototype/ 设计稿重构设计 Token（ADR-0023 产品化改造
- * 的视觉基线落定）：主蓝 #0066CC、页面底 #F5F5F7、深侧栏 #1D1D1F、胶囊
+ * 的视觉基线落定）：主蓝 #0066CC、页面底 #F5F5F7、主题自适应侧栏、胶囊
  * 状态徽章、双层进度条、指标卡。组件视觉由 themeOverrides + 本文件共享
  * 组件类共同驱动；页面专属规则收在各自视图 scoped 样式。
  * --sisy-* 变量仍被 Pipeline 编辑器等手写 scoped 样式引用，勿改名。 */
@@ -25,8 +25,16 @@
   --sisy-color-warning-soft: #fff3e0;
   --sisy-color-offline: #a1a1a6;
   --sisy-color-offline-soft: #ededef;
-  --sisy-color-sidebar: #1d1d1f;
-  --sisy-color-sidebar-active: #2c2c2e;
+  --sisy-color-sidebar: #ffffff;
+  --sisy-color-sidebar-border: #e8e8ed;
+  --sisy-color-sidebar-divider: #e8e8ed;
+  --sisy-color-sidebar-active: #e8f1ff;
+  --sisy-color-sidebar-hover: #f0f1f4;
+  --sisy-color-sidebar-text: #86868b;
+  --sisy-color-sidebar-text-active: #1d1d1f;
+  --sisy-color-sidebar-icon-active: #0066cc;
+  --sisy-color-sidebar-user: #1d1d1f;
+  --sisy-color-sidebar-resizer: rgba(0, 0, 0, 0.12);
   --sisy-color-accent: #5e5ce6;
   --sisy-radius: 8px;
   --sisy-radius-card: 12px;
@@ -60,6 +68,16 @@
     --sisy-color-warning-soft: rgba(255, 159, 10, 0.16);
     --sisy-color-offline: #8e8e93;
     --sisy-color-offline-soft: rgba(142, 142, 147, 0.18);
+    --sisy-color-sidebar: #1d1d1f;
+    --sisy-color-sidebar-border: transparent;
+    --sisy-color-sidebar-divider: rgba(255, 255, 255, 0.12);
+    --sisy-color-sidebar-active: #2c2c2e;
+    --sisy-color-sidebar-hover: rgba(255, 255, 255, 0.06);
+    --sisy-color-sidebar-text: #a1a1a6;
+    --sisy-color-sidebar-text-active: #ffffff;
+    --sisy-color-sidebar-icon-active: #2997ff;
+    --sisy-color-sidebar-user: #ffffff;
+    --sisy-color-sidebar-resizer: rgba(255, 255, 255, 0.3);
   }
 }
 
@@ -89,6 +107,16 @@
   --sisy-color-warning-soft: rgba(255, 159, 10, 0.16);
   --sisy-color-offline: #8e8e93;
   --sisy-color-offline-soft: rgba(142, 142, 147, 0.18);
+  --sisy-color-sidebar: #1d1d1f;
+  --sisy-color-sidebar-border: transparent;
+  --sisy-color-sidebar-divider: rgba(255, 255, 255, 0.12);
+  --sisy-color-sidebar-active: #2c2c2e;
+  --sisy-color-sidebar-hover: rgba(255, 255, 255, 0.06);
+  --sisy-color-sidebar-text: #a1a1a6;
+  --sisy-color-sidebar-text-active: #ffffff;
+  --sisy-color-sidebar-icon-active: #2997ff;
+  --sisy-color-sidebar-user: #ffffff;
+  --sisy-color-sidebar-resizer: rgba(255, 255, 255, 0.3);
 }
 
 * {
@@ -117,7 +145,7 @@ h3 {
   font-weight: 600;
 }
 
-/* ===== 应用壳：深侧栏 + 顶栏 + 内容区（prototype 外壳） ===== */
+/* ===== 应用壳：主题自适应侧栏 + 顶栏 + 内容区（prototype 外壳） ===== */
 
 .app-shell {
   display: flex;
@@ -129,6 +157,7 @@ h3 {
   display: flex;
   flex-direction: column;
   background: var(--sisy-color-sidebar);
+  border-right: 1px solid var(--sisy-color-sidebar-border);
   height: 100%;
   position: relative;
 }
@@ -158,7 +187,7 @@ h3 {
 .sidebar-resizer:hover::after,
 .sidebar-resizer:focus-visible::after,
 .app-sidebar.dragging .sidebar-resizer::after {
-  background: rgba(255, 255, 255, 0.3);
+  background: var(--sisy-color-sidebar-resizer);
 }
 
 body.sidebar-resizing {
@@ -169,9 +198,10 @@ body.sidebar-resizing {
 .sidebar-logo {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 12px;
-  padding: 24px 16px 30px;
-  color: #ffffff;
+  padding: 24px 8px 30px;
+  color: var(--sisy-color-sidebar-user);
   font-size: 22px;
   font-weight: 700;
   letter-spacing: 0.1px;
@@ -179,9 +209,19 @@ body.sidebar-resizing {
 
 .sidebar-logo-image {
   display: block;
-  width: 248px;
-  max-width: 100%;
+  width: 100%;
+  max-width: none;
   height: auto;
+  /* SVG viewBox 右侧有较多透明留白，补偿后视觉内容才真正居中。 */
+  transform: translateX(4.6%);
+  transform-origin: center;
+}
+
+.sidebar-divider {
+  flex: 0 0 1px;
+  height: 1px;
+  margin: 0 20px 20px;
+  background: var(--sisy-color-sidebar-divider);
 }
 
 .sidebar-nav {
@@ -205,7 +245,7 @@ body.sidebar-resizing {
   padding: 12px 12px 4px;
   font-size: 11px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--sisy-color-sidebar-text);
   letter-spacing: 0.5px;
 }
 
@@ -219,7 +259,7 @@ body.sidebar-resizing {
   border-radius: 12px;
   background: none;
   cursor: pointer;
-  color: var(--sisy-color-text-tertiary);
+  color: var(--sisy-color-sidebar-text);
   font-family: inherit;
   font-size: 15px;
   font-weight: 600;
@@ -231,22 +271,22 @@ body.sidebar-resizing {
 
 .nav-item svg {
   flex-shrink: 0;
-  color: var(--sisy-color-text-tertiary);
+  color: var(--sisy-color-sidebar-text);
   transition: color 0.15s;
 }
 
 .nav-item:hover {
-  background: rgba(255, 255, 255, 0.06);
-  color: #d1d1d6;
+  background: var(--sisy-color-sidebar-hover);
+  color: var(--sisy-color-sidebar-text-active);
 }
 
 .nav-item.active {
   background: var(--sisy-color-sidebar-active);
-  color: #ffffff;
+  color: var(--sisy-color-sidebar-text-active);
 }
 
 .nav-item.active svg {
-  color: #2997ff;
+  color: var(--sisy-color-sidebar-icon-active);
 }
 
 .sidebar-spacer {
@@ -259,7 +299,7 @@ body.sidebar-resizing {
   gap: 10px;
   padding: 16px 20px;
   border: none;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--sisy-color-sidebar-border);
   background: none;
   width: 100%;
   font-family: inherit;
@@ -271,7 +311,7 @@ body.sidebar-resizing {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #2997ff, #5e5ce6);
+  background: linear-gradient(135deg, var(--sisy-color-primary), var(--sisy-color-accent));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -292,7 +332,7 @@ body.sidebar-resizing {
 .user-name {
   font-size: 13px;
   font-weight: 600;
-  color: #ffffff;
+  color: var(--sisy-color-sidebar-user);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -300,7 +340,7 @@ body.sidebar-resizing {
 
 .user-role {
   font-size: 11px;
-  color: var(--sisy-color-text-tertiary);
+  color: var(--sisy-color-sidebar-text);
 }
 
 .user-logout {
@@ -308,7 +348,7 @@ body.sidebar-resizing {
   background: none;
   padding: 4px;
   border-radius: var(--sisy-radius-small);
-  color: var(--sisy-color-text-tertiary);
+  color: var(--sisy-color-sidebar-text);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -316,8 +356,8 @@ body.sidebar-resizing {
 }
 
 .user-logout:hover {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.08);
+  color: var(--sisy-color-sidebar-text-active);
+  background: var(--sisy-color-sidebar-hover);
 }
 
 /* 主区：顶栏固定，内容区独立滚动（原型的固定壳形态）。 */
@@ -377,6 +417,7 @@ body.sidebar-resizing {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 100vh;
 }
 
 .app-bare .app-main {

@@ -15,7 +15,6 @@
   },
   "auth": {
     "login": "Sign in",
-    "loginTagline": "Sign in to continue",
     "loggingIn": "Signing in…",
     "rememberMe": "Keep me signed in",
     "logout": "Sign out",

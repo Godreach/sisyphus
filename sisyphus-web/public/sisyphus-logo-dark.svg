@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1360" height="180" viewBox="0 0 1360 180" fill="none" role="img" aria-labelledby="title desc">
-  <title id="title">Sisyphus — A 方案白字 LOGO</title>
-  <desc id="desc">左侧为白底 A 方案机器人图标，右侧为白色 SISYPHUS 字标，整体背景透明。</desc>
+  <title id="title">Sisyphus — A 方案深色字 LOGO</title>
+  <desc id="desc">左侧为白底 A 方案机器人图标，右侧为深色 SISYPHUS 字标，整体背景透明。</desc>
   <defs>
     <linearGradient id="blue" x1="25" y1="111" x2="91" y2="24" gradientUnits="userSpaceOnUse">
       <stop stop-color="#0061FF"/>
@@ -39,5 +39,5 @@
   <circle cx="67.6" cy="86.4" r="5.35" fill="#00C9F0"/>
   <circle cx="90.3" cy="86.4" r="5.35" fill="#00C9F0"/>
   </g>
-  <text x="218" y="155" fill="#FFFFFF" font-family="Inter, Arial, sans-serif" font-size="180" font-weight="900" letter-spacing="1" textLength="1008" lengthAdjust="spacingAndGlyphs">SISYPHUS</text>
+  <text x="218" y="155" fill="#111827" font-family="Inter, Arial, sans-serif" font-size="180" font-weight="900" letter-spacing="1" textLength="1008" lengthAdjust="spacingAndGlyphs">SISYPHUS</text>
 </svg>

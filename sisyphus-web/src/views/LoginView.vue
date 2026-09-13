@@ -70,8 +70,6 @@ async function submit(): Promise<void> {
 <template>
   <div class="login-page">
     <AuthCard class="login-card">
-      <p class="login-tagline">{{ t('auth.loginTagline') }}</p>
-
       <n-form
         ref="formRef"
         :model="{ username, password }"
@@ -134,16 +132,53 @@ async function submit(): Promise<void> {
    margin:auto 居中且高于视口时不裁剪顶部——可上滚）。卡片外壳与品牌标识
    由 AuthCard base 组件提供（票 #112，ADR-0023）；本 scoped 仅留登录页专属。 */
 .login-page {
+  position: relative;
+  isolation: isolate;
   margin: auto;
   width: 100%;
   max-width: 420px;
   padding: 24px 16px;
 }
 
-.login-tagline {
-  margin: 0 0 20px;
-  color: var(--sisy-color-text-secondary);
-  font-size: 13px;
+/* 登录背景：极浅品牌光晕 + 流程节点纹理，丰富大面积留白但不抢表单焦点。 */
+.login-page::before,
+.login-page::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+.login-page::before {
+  z-index: -2;
+  background:
+    radial-gradient(circle at 14% 18%, rgba(0, 102, 204, 0.1), transparent 28%),
+    radial-gradient(circle at 86% 78%, rgba(94, 92, 230, 0.08), transparent 30%),
+    var(--sisy-color-bg);
+}
+
+.login-page::after {
+  z-index: -1;
+  opacity: 0.42;
+  background-image: url("data:image/svg+xml,%3Csvg width='760' height='520' viewBox='0 0 760 520' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M-40 130C90 130 92 48 220 48H310C388 48 398 128 474 128H820' stroke='%230066CC' stroke-opacity='.13' stroke-width='2'/%3E%3Cpath d='M-30 382H110C178 382 188 300 258 300H376C442 300 456 218 530 218H800' stroke='%235E5CE6' stroke-opacity='.11' stroke-width='2'/%3E%3Cpath d='M516 -30V72C516 126 584 140 584 198V550' stroke='%2300A6A6' stroke-opacity='.09' stroke-width='2'/%3E%3Ccircle cx='220' cy='48' r='7' fill='%23fff' stroke='%230066CC' stroke-opacity='.18' stroke-width='2'/%3E%3Ccircle cx='474' cy='128' r='7' fill='%23fff' stroke='%230066CC' stroke-opacity='.18' stroke-width='2'/%3E%3Ccircle cx='258' cy='300' r='7' fill='%23fff' stroke='%235E5CE6' stroke-opacity='.16' stroke-width='2'/%3E%3Ccircle cx='530' cy='218' r='7' fill='%23fff' stroke='%235E5CE6' stroke-opacity='.16' stroke-width='2'/%3E%3Ccircle cx='516' cy='72' r='7' fill='%23fff' stroke='%2300A6A6' stroke-opacity='.14' stroke-width='2'/%3E%3C/svg%3E");
+  background-position: center;
+  background-size: 760px 520px;
+}
+
+:global(:root[data-theme='dark']) .login-page::before {
+  background:
+    radial-gradient(circle at 14% 18%, rgba(41, 151, 255, 0.14), transparent 28%),
+    radial-gradient(circle at 86% 78%, rgba(94, 92, 230, 0.12), transparent 30%),
+    var(--sisy-color-bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :global(:root:not([data-theme='light'])) .login-page::before {
+    background:
+      radial-gradient(circle at 14% 18%, rgba(41, 151, 255, 0.14), transparent 28%),
+      radial-gradient(circle at 86% 78%, rgba(94, 92, 230, 0.12), transparent 30%),
+      var(--sisy-color-bg);
+  }
 }
 
 /* 保持登录复选框（契约先行字段 remember_me，票 #114）。 */

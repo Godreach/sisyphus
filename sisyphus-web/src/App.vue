@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 应用壳（spec #99：prototype/ 设计稿 1:1 落地）：232px 深侧栏（Logo +
+// 应用壳（spec #99：prototype/ 设计稿 1:1 落地）：280px 主题自适应侧栏（Logo +
 // 工作台/流水线/构建机 三项导航 + 底部用户卡）+ 60px 白顶栏（页面标题 +
 // 搜索框/主按钮）+ #F5F5F7 内容区。
 //
@@ -16,7 +16,7 @@
 //   第一步建管理员后即登录，但向导仍未走完，中途不冒侧栏（票 #112「全屏无侧栏
 //   形态」首装体验）；404 对未登录走无壳，已登录则在壳内就地展示。
 
-import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, defineComponent, h, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { NButton, NDropdown, NIcon, zhCN, enUS, dateZhCN, dateEnUS } from 'naive-ui'
@@ -33,6 +33,8 @@ import {
   MoonOutline,
   CheckmarkOutline,
   SettingsOutline,
+  SpeedometerOutline,
+  HardwareChipOutline,
 } from '@vicons/ionicons5'
 
 import { currentLocale, setLocale } from '@/i18n'
@@ -45,7 +47,13 @@ const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
-const { theme, themeOverrides, preference: themePref, setPreference: setThemePreference } = useDarkMode()
+const {
+  isDark,
+  theme,
+  themeOverrides,
+  preference: themePref,
+  setPreference: setThemePreference,
+} = useDarkMode()
 const { isNarrow } = useBreakpoint()
 
 const locale = computed(() => currentLocale())
@@ -157,13 +165,33 @@ onBeforeUnmount(() => {
 
 type NavKey = 'workbench' | 'pipelines' | 'machines'
 
-const NAV_ICONS: Record<NavKey, string> = {
-  workbench:
-    '<svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5"/><rect x="1" y="9" width="6" height="6" rx="1.5"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>',
-  pipelines:
-    '<svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><rect x="11.5" y="6" width="3.5" height="4" rx="1"/><rect x="6.25" y="6" width="3.5" height="4" rx="1"/><rect x="1" y="6" width="3.5" height="4" rx="1"/></svg>',
-  machines:
-    '<svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="5" width="10" height="8" rx="2"/><rect fill="#1D1D1F" x="6.5" y="8" width="3" height="3" rx="1"/><rect x="7.2" y="2" width="1.6" height="3" rx="0.8"/><circle cx="8" cy="2" r="1.2"/><rect x="1" y="8" width="2" height="3" rx="1"/><rect x="13" y="8" width="2" height="3" rx="1"/></svg>',
+/** n8n 风格网络图标：左侧入口节点经中间节点分叉到上下节点。 */
+const PipelineGraphIcon = defineComponent({
+  name: 'PipelineGraphIcon',
+  render: () =>
+    h('svg', {
+      width: 20,
+      height: 20,
+      viewBox: '0 0 20 20',
+      fill: 'none',
+      stroke: 'currentColor',
+      'stroke-width': 1.7,
+      'stroke-linecap': 'round',
+      'stroke-linejoin': 'round',
+      'aria-hidden': 'true',
+    }, [
+      h('path', { d: 'M5.7 10h1.1M10.8 10c2.1 0 1.4-5.5 4.1-5.5M10.8 10c2.1 0 1.2 5.5 3.5 5.5' }),
+      h('circle', { cx: 3.5, cy: 10, r: 2.2 }),
+      h('circle', { cx: 8.8, cy: 10, r: 2.2 }),
+      h('circle', { cx: 16.2, cy: 4.5, r: 2.2 }),
+      h('circle', { cx: 15.5, cy: 15.5, r: 2.2 }),
+    ]),
+})
+
+const NAV_ICONS: Record<NavKey, ReturnType<typeof import('vue').defineComponent>> = {
+  workbench: SpeedometerOutline,
+  pipelines: PipelineGraphIcon,
+  machines: HardwareChipOutline,
 }
 
 const navItems: { key: NavKey; routeName: string; labelKey: string }[] = [
@@ -340,16 +368,24 @@ function onCta(): void {
 
       <template v-else>
         <div class="app-shell">
-          <!-- 桌面端深侧栏（prototype 外壳；宽度可拖拽调整）。 -->
+          <!-- 桌面端主题自适应侧栏（prototype 外壳；宽度可拖拽调整）。 -->
           <aside
             v-if="!isNarrow"
             class="app-sidebar"
             :class="{ dragging: sidebarDragging }"
+            :data-theme="isDark ? 'dark' : 'light'"
             :style="{ flex: `0 0 ${sidebarWidth}px`, width: `${sidebarWidth}px` }"
           >
             <div class="sidebar-logo">
-              <img class="sidebar-logo-image" src="/sisyphus-logo.svg" :alt="t('app.name')" width="1360" height="180" />
+              <img
+                class="sidebar-logo-image"
+                :src="isDark ? '/sisyphus-logo.svg' : '/sisyphus-logo-dark.svg'"
+                :alt="t('app.name')"
+                width="1360"
+                height="180"
+              />
             </div>
+            <div class="sidebar-divider" aria-hidden="true" />
             <nav class="sidebar-nav">
               <button
                 v-for="item in navItems"
@@ -360,7 +396,7 @@ function onCta(): void {
                 :data-testid="`nav-${item.key}`"
                 @click="goNav(item.routeName)"
               >
-                <span v-html="NAV_ICONS[item.key]" />
+                <n-icon :component="NAV_ICONS[item.key]" :size="20" />
                 <span>{{ t(item.labelKey) }}</span>
               </button>
             </nav>
@@ -430,7 +466,7 @@ function onCta(): void {
               </div>
             </header>
 
-            <!-- 窄屏 NDrawer 抽屉导航（深侧栏同款 + 登出）。 -->
+            <!-- 窄屏 NDrawer 抽屉导航（主题自适应侧栏同款 + 登出）。 -->
             <n-drawer v-model:show="drawerOpen" :width="240" placement="left">
               <n-drawer-content :title="t('app.name')" closable>
                 <nav class="sidebar-nav drawer-nav">
@@ -442,7 +478,7 @@ function onCta(): void {
                     :class="{ active: activeNav === item.key }"
                     @click="goNav(item.routeName)"
                   >
-                    <span v-html="NAV_ICONS[item.key]" />
+                    <n-icon :component="NAV_ICONS[item.key]" :size="20" />
                     <span>{{ t(item.labelKey) }}</span>
                   </button>
                 </nav>
