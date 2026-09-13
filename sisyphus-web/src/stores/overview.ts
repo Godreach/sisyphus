@@ -29,8 +29,10 @@ export interface OverviewState {
   /** 槽位占用/总量。 */
   slotsUsed: number
   slotsTotal: number
-  /** 构建终态计数（四态）。 */
+  /** 构建终态计数（四态，全量历史）。 */
   buildsTerminal: { succeeded: number; failed: number; cancelled: number; timeout: number }
+  /** 当天完成的构建终态计数（四态）。 */
+  buildsTodayTerminal: { succeeded: number; failed: number; cancelled: number; timeout: number }
   /** 产物 + 日志字节占用。 */
   artifactBytes: number
   logBytes: number
@@ -103,6 +105,7 @@ function fromSnapshot(snap: OverviewSnapshotResponse): OverviewState {
     slotsUsed: snap.slots_used,
     slotsTotal: snap.slots_total,
     buildsTerminal: snap.builds_terminal,
+    buildsTodayTerminal: snap.builds_today,
     artifactBytes: snap.artifact_bytes,
     logBytes: snap.log_bytes,
     alerts: {

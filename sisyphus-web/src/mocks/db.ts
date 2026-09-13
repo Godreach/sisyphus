@@ -1289,11 +1289,22 @@ export function overviewSnapshot(
   const merged = [...byRef.values()]
 
   const terminal = { succeeded: 0, failed: 0, cancelled: 0, timeout: 0 }
+  const today = { succeeded: 0, failed: 0, cancelled: 0, timeout: 0 }
+  const todayStart = new Date(NOW)
+  todayStart.setHours(0, 0, 0, 0)
+  const todayStartMs = todayStart.getTime()
+  const tomorrowStart = new Date(todayStart)
+  tomorrowStart.setDate(tomorrowStart.getDate() + 1)
+  const tomorrowStartMs = tomorrowStart.getTime()
   let queueDepth = 0
   for (const r of merged) {
     const s = r.summary.status
     if (s === 'succeeded' || s === 'failed' || s === 'cancelled' || s === 'timeout') {
       terminal[s] += 1
+      const finishedAt = r.summary.finished_at
+      if (finishedAt != null && finishedAt >= todayStartMs && finishedAt < tomorrowStartMs) {
+        today[s] += 1
+      }
     }
     if (s === 'queued') queueDepth += 1
   }
@@ -1330,6 +1341,7 @@ export function overviewSnapshot(
     slots_used: slotsUsed,
     slots_total: slotsTotal,
     builds_terminal: terminal,
+    builds_today: today,
     artifact_bytes: 3_214_890_000,
     log_bytes: 1_872_300_000,
     alerts: {

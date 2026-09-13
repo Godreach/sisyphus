@@ -388,8 +388,10 @@ export interface OverviewSnapshotResponse {
   slots_used: number
   /** 槽位总量（在线 Agent max_concurrency 之和）。 */
   slots_total: number
-  /** 构建终态计数。 */
+  /** 构建终态计数（全量历史）。 */
   builds_terminal: BuildsTerminalCountsDto
+  /** 当天完成的构建终态计数（按服务端本地日历日）。 */
+  builds_today: BuildsTerminalCountsDto
   /** 产物字节占用。 */
   artifact_bytes: number
   /** 日志字节占用。 */

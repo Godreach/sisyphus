@@ -7,7 +7,7 @@
 //   队列深度（首要原因副标）/ 在线构建机（可用率）
 // - 最近构建行：pipeline #号 + 项目副行、状态徽章、触发、耗时、相对时间；
 //   点击行 → 构建详情
-// - 构建机告警：异常时置顶显示三类事实 + 直达构建机页；健康卡仍给紧凑摘要；零 Agent 行
+// - 事项提示：构建机异常 + 最近一次构建失败的流水线置顶；分别直达构建机/构建详情；零 Agent 行
 // - 右栏 收藏的流水线（票 #104，W8）：条目 = 流水线名 + 项目 + 状态徽章；
 //   名称 → 构建列表；运行按钮 → POST trigger + 刷新概览快照与收藏（W2）；
 //   取消收藏 → DELETE；空态引导去流水线页；加载失败卡内重试
@@ -35,6 +35,7 @@ function emptySnapshot(): Record<string, unknown> {
     slots_used: 0,
     slots_total: 0,
     builds_terminal: { succeeded: 0, failed: 0, cancelled: 0, timeout: 0 },
+    builds_today: { succeeded: 0, failed: 0, cancelled: 0, timeout: 0 },
     artifact_bytes: 0,
     log_bytes: 0,
     alerts: { has_no_match: false, has_offline_agent: false, has_draining_incompatible: false },
@@ -142,7 +143,7 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     server.close()
   })
 
-  it('指标卡四张同排：在途任务/构建/队列深度/Agent 健康（GET /overview 单一来源）', async () => {
+  it('指标卡四张同排：今日构建/在途任务/队列深度/Agent 健康（GET /overview 单一来源）', async () => {
     mockOverview({
       ...emptySnapshot(),
       agents_online: 1,
@@ -150,7 +151,8 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
       slots_used: 1,
       slots_total: 2,
       queue_depth: 0,
-      builds_terminal: { succeeded: 5, failed: 1, cancelled: 2, timeout: 0 },
+      builds_terminal: { succeeded: 50, failed: 10, cancelled: 2, timeout: 0 },
+      builds_today: { succeeded: 5, failed: 1, cancelled: 2, timeout: 0 },
     })
 
     const w = mountView()
@@ -159,12 +161,14 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     expect(w.text()).toContain('1')
     expect(w.text()).toContain('/ 2')
     expect(w.text()).toContain('使用率 50%')
-    // 构建 = 终态合计 8，副标 成功 5 · 失败 1。
+    // 今日构建 = 当天终态合计 8，副标 成功 5 · 失败 1；历史总量不参与此卡片。
     expect(w.text()).toContain('成功 5 · 失败 1')
     // 队列 0 → 空闲副标。
     expect(w.text()).toContain('空闲，无排队')
-    // 顶部指标卡行 4 张：在途任务/构建/队列深度/Agent 健康（同排一行）。
-    expect(w.find('section[aria-label="metrics"]').findAll('.metric-card')).toHaveLength(4)
+    // 顶部指标卡行 4 张，今日构建调整为第一张。
+    const metricCards = w.find('section[aria-label="metrics"]').findAll('.metric-card')
+    expect(metricCards).toHaveLength(4)
+    expect(metricCards[0]!.find('.metric-label').text()).toBe('今日构建')
     // Agent 健康卡：在线 1/2 台 + 无异常 → 单枚「全部正常」。
     expect(w.text()).toContain('/ 2台')
     expect(w.findAll('.health-badges .badge').map((b) => b.text())).toEqual(['全部正常'])
@@ -176,7 +180,7 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     )
   })
 
-  it('队列深度副标：有排队给首要原因（queue_reasons[0]）', async () => {
+  it('排队任务副标：有排队给首要原因（queue_reasons[0]）', async () => {
     mockOverview({
       ...emptySnapshot(),
       queue_depth: 2,
@@ -187,7 +191,7 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     })
 
     const w = mountView()
-    await vi.waitFor(() => expect(w.text()).toContain('队列深度'))
+    await vi.waitFor(() => expect(w.text()).toContain('排队任务'))
     expect(w.text()).toContain('首要原因：等待匹配构建机：无在线构建机')
   })
 
@@ -226,7 +230,26 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     })
   })
 
-  it('构建机异常置顶告警，健康卡仍给在线比与事实徽章', async () => {
+  it('最近构建最多展示 5 条，更多记录不在工作台列表呈现', async () => {
+    mockOverview({
+      ...emptySnapshot(),
+      recent_builds: Array.from({ length: 6 }, (_, i) => ({
+        project: 'demo',
+        pipeline: `pipeline-${i + 1}`,
+        number: i + 1,
+        status: 'succeeded',
+        trigger: 'manual',
+        started_at: 1_700_000_000_000 + i * 60_000,
+        finished_at: 1_700_000_060_000 + i * 60_000,
+      })),
+    })
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.findAll('.run-row')).toHaveLength(5))
+    expect(w.findAll('.run-row').map((row) => row.text())).not.toContain('pipeline-6')
+  })
+
+  it('构建机异常置顶事项提示，健康卡仍给在线比与事实徽章', async () => {
     mockOverview({
       ...emptySnapshot(),
       agents_online: 1,
@@ -252,9 +275,94 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     expect(alert.exists()).toBe(true)
     expect(alert.text()).toContain('有构建机离线')
     expect(alert.text()).toContain('存在无匹配构建机的任务')
-    const agentLink = w.find('section[aria-label="agent alerts"] a')
+    const agentLink = w.find('section[aria-label="agent alerts"] a.attention-link')
     expect(agentLink.text()).toBe('查看构建机')
     expect(agentLink.attributes('href')).toBe('/machines')
+  })
+
+  it('最近一次构建失败的流水线置顶提示，并直达失败构建详情', async () => {
+    mockOverview({
+      ...emptySnapshot(),
+      recent_builds: [
+        {
+          project: 'demo',
+          pipeline: 'release',
+          number: 12,
+          status: 'failed',
+          trigger: 'manual',
+          started_at: 1_700_000_000_000,
+          finished_at: 1_700_000_060_000,
+        },
+      ],
+    })
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.find('section[aria-label="pipeline alerts"]').exists()).toBe(true))
+
+    const alert = w.find('section[aria-label="pipeline alerts"] [role="alert"]')
+    expect(alert.text()).toContain('构建失败：')
+    const failedLink = alert.find('a.attention-build-link')
+    expect(failedLink.exists()).toBe(true)
+    expect(failedLink.text()).toBe('demo / release #12')
+    expect(failedLink.attributes('href')).toBe('/projects/demo/pipelines/release/builds/12')
+  })
+
+  it('构建机事项与流水线事项分别展示在独立告警区', async () => {
+    mockOverview({
+      ...emptySnapshot(),
+      alerts: {
+        has_no_match: false,
+        has_offline_agent: true,
+        has_draining_incompatible: false,
+      },
+      recent_builds: [
+        {
+          project: 'demo',
+          pipeline: 'release',
+          number: 12,
+          status: 'failed',
+          trigger: 'manual',
+          started_at: 1_700_000_000_000,
+          finished_at: 1_700_000_060_000,
+        },
+      ],
+    })
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.findAll('.workbench-attention')).toHaveLength(2))
+    expect(w.find('section[aria-label="agent alerts"] .n-alert').text()).toContain('有构建机离线')
+    expect(w.find('section[aria-label="pipeline alerts"] .n-alert').text()).toContain('构建失败：')
+    expect(w.find('section[aria-label="pipeline alerts"] a.attention-build-link').text()).toBe('demo / release #12')
+  })
+
+  it('最近一次构建已成功时，不因更早的失败构建显示事项提示', async () => {
+    mockOverview({
+      ...emptySnapshot(),
+      recent_builds: [
+        {
+          project: 'demo',
+          pipeline: 'release',
+          number: 13,
+          status: 'succeeded',
+          trigger: 'manual',
+          started_at: 1_700_000_120_000,
+          finished_at: 1_700_000_180_000,
+        },
+        {
+          project: 'demo',
+          pipeline: 'release',
+          number: 12,
+          status: 'failed',
+          trigger: 'manual',
+          started_at: 1_700_000_000_000,
+          finished_at: 1_700_000_060_000,
+        },
+      ],
+    })
+
+    const w = mountView()
+    await vi.waitFor(() => expect(w.find('.run-row').exists()).toBe(true))
+    expect(w.find('.workbench-attention').exists()).toBe(false)
   })
 
   it('零 Agent：健康卡给「尚未注册构建机」行（不再用 NAlert info）', async () => {
@@ -279,6 +387,7 @@ describe('OverviewView 工作台（指标卡 + 最近构建 + 右栏）', () => 
     // 条目可区分：流水线名 + 项目副行（W1：无项目名无法区分多项目的 release）。
     expect(rows[0]!.text()).toContain('release')
     expect(rows[0]!.text()).toContain('demo')
+    expect(rows[0]!.text()).toContain('最近构建 #12')
     expect(rows[0]!.find('.badge').text()).toBe('成功')
     expect(rows[1]!.find('.badge').text()).toBe('运行中')
     // 从未运行的收藏 → 「未运行」徽章（不造假）。

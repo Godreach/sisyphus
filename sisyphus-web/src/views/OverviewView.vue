@@ -12,6 +12,7 @@
 // 快照与收藏列表（W2：新构建即时可见，在途/队列计数真实变化）。
 //
 // - 快照失败 → loadError 报错（NAlert + 重试）；首载 NSkeleton 骨架屏。
+// - 事项提示：构建机异常 + 最近一次构建失败的流水线，均可从置顶告警直达处置页。
 // - 原型无对应数据的字段（分支/触发人）不造假：契约无分支字段，收藏条目
 //   以「项目 / 流水线名」区分（fixture 的 main/release 名即分支口径）。
 
@@ -22,10 +23,11 @@ import { NAlert, NButton, NIcon, NSkeleton, NText, useMessage } from 'naive-ui'
 import { RefreshOutline, Star } from '@vicons/ionicons5'
 
 import { useOverviewStore } from '@/stores/overview'
-import { buildsApi, favoritesApi } from '@/api/client'
+import { favoritesApi } from '@/api/client'
 import { describeActionError } from '@/api/errors'
 import type { PipelineFavoriteResponse } from '@/api/types'
 import { formatDuration, relativeAge, relativeAgeKey } from '@/utils/format'
+import { pipelineRowActionFor, runPipelineRowAction } from '@/utils/pipelineAction'
 
 /** 最近构建行（overview store 已把 API 蛇形字段映射为驼峰）。 */
 interface RecentBuildRow {
@@ -42,6 +44,9 @@ const { t } = useI18n()
 const router = useRouter()
 const message = useMessage()
 const overview = useOverviewStore()
+
+/** 工作台最近构建区只展示前 5 条，更多记录进入流水线页查看。 */
+const RECENT_BUILDS_DISPLAY_LIMIT = 5
 
 /** 队列原因 → 人读标签键（与后端 snapshot::classify 固定标签全集对应）。 */
 function queueReasonKey(reason: string): string {
@@ -60,10 +65,10 @@ const buildsTotal = computed(() => {
   const s = overview.state
   if (!s) return 0
   return (
-    s.buildsTerminal.succeeded +
-    s.buildsTerminal.failed +
-    s.buildsTerminal.cancelled +
-    s.buildsTerminal.timeout
+    s.buildsTodayTerminal.succeeded +
+    s.buildsTodayTerminal.failed +
+    s.buildsTodayTerminal.cancelled +
+    s.buildsTodayTerminal.timeout
   )
 })
 
@@ -167,6 +172,32 @@ const healthRows = computed<HealthRow[]>(() => {
 /** 异常事实（健康卡只亮这些；无异常时显示「全部正常」一枚）。 */
 const healthIssues = computed(() => healthRows.value.filter((r) => r.issue))
 
+/**
+ * 最近一次构建失败的流水线。
+ *
+ * 概览快照按最近活动倒序返回，因此同一流水线只保留首条，避免历史失败
+ * 在最新构建已成功后仍继续占用事项提示。
+ */
+const failedPipelineIssues = computed<RecentBuildRow[]>(() => {
+  const latestByPipeline = new Map<string, RecentBuildRow>()
+  for (const row of overview.state?.recentBuilds ?? []) {
+    const key = `${row.project}/${row.pipeline}`
+    if (!latestByPipeline.has(key)) latestByPipeline.set(key, row)
+  }
+  return [...latestByPipeline.values()].filter((row) => row.status === 'failed')
+})
+
+const recentBuilds = computed(() =>
+  (overview.state?.recentBuilds ?? []).slice(0, RECENT_BUILDS_DISPLAY_LIMIT),
+)
+
+function buildDetailRoute(row: RecentBuildRow) {
+  return {
+    name: 'build-detail' as const,
+    params: { name: row.project, pipeline: row.pipeline, number: String(row.number) },
+  }
+}
+
 // ===== 右栏：收藏的流水线（W8 裁定；契约票 #104 收藏端点） =====
 
 const favorites = ref<PipelineFavoriteResponse[]>([])
@@ -195,14 +226,29 @@ function openPipelineBuilds(project: string, pipeline: string): void {
 /** 直触手动触发（缺省参数；runner 档之外 403 就地 toast）。 */
 const triggering = ref(false)
 
-async function triggerPipeline(project: string, pipeline: string): Promise<void> {
+function favoriteAction(favorite: PipelineFavoriteResponse) {
+  return pipelineRowActionFor(favorite.latest_build?.status)
+}
+
+function favoriteLatestTimeText(favorite: PipelineFavoriteResponse): string {
+  const build = favorite.latest_build
+  return relativeTimeText(build?.finished_at ?? build?.started_at ?? null)
+}
+
+/** 收藏卡片上的运行/终止/失败重试动作，与流水线页保持同一语义。 */
+async function runFavoritePipeline(favorite: PipelineFavoriteResponse): Promise<void> {
   if (triggering.value) return
   triggering.value = true
   try {
-    const accepted = await buildsApi.trigger(project, pipeline, {})
-    message.success(t('plines.triggered', { n: accepted.number }))
-    // W2：触发成功后刷新概览快照与收藏列表——新构建（排队/运行中动态态）
-    // 即时可见，在途/队列计数真实变化，不再等手动刷新。
+    const action = favoriteAction(favorite)
+    const accepted = await runPipelineRowAction(action.kind, {
+      project: favorite.project,
+      pipeline: favorite.pipeline,
+      latest: favorite.latest_build,
+    })
+    message.success(
+      accepted.key === 'plines.triggered' ? t(accepted.key, accepted.params) : t(accepted.key),
+    )
     void overview.load()
     void loadFavorites()
   } catch (err) {
@@ -264,10 +310,9 @@ onMounted(() => {
     </div>
 
     <template v-if="overview.state != null">
-      <!-- 批注 A1：构建机阻塞事实不能只藏在指标卡内。异常时置顶，让值班者
-           先看到问题，再进入构建机页处置；健康卡仍保留作紧凑摘要。 -->
+      <!-- 构建机事项与流水线事项分开呈现，分别提供对应的处理入口。 -->
       <section v-if="healthIssues.length > 0" class="workbench-attention" aria-label="agent alerts">
-        <n-alert type="warning" :title="t('overview.attentionTitle')" :show-icon="true">
+        <n-alert type="warning" :title="t('overview.agentAttentionTitle')" :show-icon="true">
           <ul class="attention-list">
             <li v-for="issue in healthIssues" :key="issue.key">{{ issue.full }}</li>
           </ul>
@@ -277,23 +322,36 @@ onMounted(() => {
         </n-alert>
       </section>
 
+      <section v-if="failedPipelineIssues.length > 0" class="workbench-attention" aria-label="pipeline alerts">
+        <n-alert type="warning" :title="t('overview.pipelineAttentionTitle')" :show-icon="true">
+          <ul class="attention-list">
+            <li v-for="build in failedPipelineIssues" :key="`${build.project}-${build.pipeline}-${build.number}`">
+              <span>{{ t('overview.failedPipelinePrefix') }}</span>
+              <router-link class="attention-build-link" :to="buildDetailRoute(build)">
+                {{ build.project }} / {{ build.pipeline }} #{{ build.number }}
+              </router-link>
+            </li>
+          </ul>
+        </n-alert>
+      </section>
+
       <!-- 指标卡行（原型 metrics-row）。 -->
       <section class="metric-row" aria-label="metrics">
-        <div class="metric-card">
-          <span class="metric-label">{{ t('overview.metricInflight') }}</span>
-          <span class="metric-value">
-            {{ overview.state.slotsUsed }}<span class="unit">/ {{ overview.state.slotsTotal }}</span>
-          </span>
-          <span class="metric-sub">{{ t('overview.subUsageRate', { pct: inflightPct }) }}</span>
-        </div>
         <div class="metric-card">
           <span class="metric-label">{{ t('overview.metricBuilds') }}</span>
           <span class="metric-value">
             {{ buildsTotal }}<span class="unit">{{ t('overview.unitTimes') }}</span>
           </span>
           <span class="metric-sub green">
-            {{ t('overview.subSuccessFail', { ok: overview.state.buildsTerminal.succeeded, ng: overview.state.buildsTerminal.failed }) }}
+            {{ t('overview.subSuccessFail', { ok: overview.state.buildsTodayTerminal.succeeded, ng: overview.state.buildsTodayTerminal.failed }) }}
           </span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">{{ t('overview.metricInflight') }}</span>
+          <span class="metric-value">
+            {{ overview.state.slotsUsed }}<span class="unit">/ {{ overview.state.slotsTotal }}</span>
+          </span>
+          <span class="metric-sub">{{ t('overview.subUsageRate', { pct: inflightPct }) }}</span>
         </div>
         <div class="metric-card">
           <span class="metric-label">{{ t('overview.metricQueue') }}</span>
@@ -343,9 +401,9 @@ onMounted(() => {
             <span class="col-duration">{{ t('overview.colDuration') }}</span>
             <span class="col-time">{{ t('overview.colTime') }}</span>
           </div>
-          <div v-if="overview.state.recentBuilds.length > 0" class="runs-body">
+          <div v-if="recentBuilds.length > 0" class="runs-body">
             <button
-              v-for="row in overview.state.recentBuilds"
+              v-for="row in recentBuilds"
               :key="`${row.project}-${row.pipeline}-${row.number}`"
               type="button"
               class="run-row"
@@ -390,36 +448,50 @@ onMounted(() => {
               </div>
             </template>
             <div v-else-if="favorites.length > 0" class="fav-list">
-              <div v-for="p in favorites" :key="`${p.project}-${p.pipeline}`" class="fav-row">
+              <article
+                v-for="p in favorites"
+                :key="`${p.project}-${p.pipeline}`"
+                class="fav-row"
+              >
                 <button type="button" class="fav-name" @click="openPipelineBuilds(p.project, p.pipeline)">
                   <span class="fav-title">
-                    {{ p.pipeline }}
-                    <span v-if="p.latest_build" class="badge" :class="statusBadgeClass(p.latest_build.status)">
+                    <span class="fav-project">{{ p.project }}</span>
+                    <span class="fav-separator" aria-hidden="true">/</span>
+                    <span class="fav-pipeline">{{ p.pipeline }}</span>
+                  </span>
+                  <span v-if="p.latest_build" class="fav-meta">
+                    <span class="fav-build-number">{{ t('overview.latestBuild', { n: p.latest_build.number }) }}</span>
+                    <span class="badge" :class="statusBadgeClass(p.latest_build.status)">
                       {{ t(buildStatusKey(p.latest_build.status)) }}
                     </span>
-                    <span v-else class="badge neutral">{{ t('plines.noRun') }}</span>
+                    <span class="fav-time">{{ favoriteLatestTimeText(p) }}</span>
                   </span>
-                  <span class="sub">{{ p.project }}</span>
+                  <span v-else class="fav-meta">
+                    <span class="badge neutral">{{ t('plines.noRun') }}</span>
+                  </span>
                 </button>
-                <button
-                  type="button"
-                  class="btn-outline blue"
-                  :disabled="triggering"
-                  @click="triggerPipeline(p.project, p.pipeline)"
-                >
-                  {{ t('overview.run') }}
-                </button>
-                <button
-                  type="button"
-                  class="fav-remove"
-                  :title="t('overview.unfavorite')"
-                  :aria-label="t('overview.unfavorite')"
-                  :disabled="unfavoriting === `${p.project}/${p.pipeline}`"
-                  @click="unfavorite(p.project, p.pipeline)"
-                >
-                  <n-icon :component="Star" />
-                </button>
-              </div>
+                <div class="fav-actions">
+                  <button
+                    type="button"
+                    class="btn-outline fav-action"
+                    :class="favoriteAction(p).cls"
+                    :disabled="triggering"
+                    @click="runFavoritePipeline(p)"
+                  >
+                    {{ t(favoriteAction(p).labelKey) }}
+                  </button>
+                  <button
+                    type="button"
+                    class="fav-remove"
+                    :title="t('overview.unfavorite')"
+                    :aria-label="t('overview.unfavorite')"
+                    :disabled="unfavoriting === `${p.project}/${p.pipeline}`"
+                    @click="unfavorite(p.project, p.pipeline)"
+                  >
+                    <n-icon :component="Star" />
+                  </button>
+                </div>
+              </article>
             </div>
             <div v-else class="runs-empty fav-empty">
               <n-text depth="3">{{ t('overview.favEmpty') }}</n-text>
@@ -468,6 +540,24 @@ onMounted(() => {
   text-decoration: underline;
 }
 
+.attention-build-link {
+  margin: 0 4px;
+  color: var(--sisy-color-primary);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color 0.15s;
+}
+
+.attention-build-link:hover {
+  color: var(--sisy-color-primary-hover);
+}
+
+.attention-build-link:focus-visible {
+  outline: 2px solid var(--sisy-color-primary);
+  outline-offset: 2px;
+}
+
 .workbench-skeleton {
   display: flex;
   flex-direction: column;
@@ -478,15 +568,16 @@ onMounted(() => {
   width: 100%;
 }
 
-/* 主区：左表 + 右栏（原型 dash-main）。 */
+/* 主区：最近构建与收藏流水线上下竖列展示。 */
 .dash-main {
   display: flex;
+  flex-direction: column;
   gap: 20px;
-  align-items: flex-start;
+  align-items: stretch;
 }
 
 .runs-card {
-  flex: 1;
+  width: 100%;
   min-width: 0;
 }
 
@@ -592,10 +683,9 @@ onMounted(() => {
   padding: 24px 20px;
 }
 
-/* 右栏（原型 dash-right：320px 双卡）。 */
+/* 收藏流水线卡片列表。 */
 .dash-right {
-  width: 320px;
-  flex-shrink: 0;
+  width: 100%;
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -609,20 +699,29 @@ onMounted(() => {
 }
 
 .fav-list {
-  padding: 4px 20px 16px;
+  padding: 0 20px 8px;
 }
 
 .fav-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
-  min-height: 56px;
+  min-height: 68px;
+  padding: 10px 0;
   border-bottom: 1px solid var(--sisy-color-border-light);
+  transition: background 0.15s;
 }
 
 .fav-row:last-child {
   border-bottom: none;
+}
+
+.fav-row:hover {
+  background: var(--sisy-color-bg);
+}
+
+.fav-row:focus-within {
+  background: var(--sisy-color-bg);
 }
 
 .fav-name {
@@ -634,37 +733,76 @@ onMounted(() => {
   cursor: pointer;
   text-align: left;
   font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
   color: var(--sisy-color-text);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 5px;
 }
 
 .fav-name:hover {
   color: var(--sisy-color-primary);
 }
 
-/* 标题行：流水线名 + 最近构建状态徽章（W1/W8：条目可区分、状态可见）。 */
+/* 标题行：项目 / 流水线，项目作为上下文、流水线作为视觉主体。 */
 .fav-title {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: baseline;
+  gap: 7px;
   min-width: 0;
 }
 
-.fav-title .badge {
+.fav-project {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--sisy-color-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fav-separator {
+  color: var(--sisy-color-text-secondary);
+  font-size: 14px;
+}
+
+.fav-pipeline {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--sisy-color-text);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fav-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  color: var(--sisy-color-text-secondary);
+  font-size: 11px;
+}
+
+.fav-build-number {
+  font-weight: 600;
+  color: var(--sisy-color-text-secondary);
+}
+
+.fav-time {
+  color: var(--sisy-color-text-tertiary);
+}
+
+.fav-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex-shrink: 0;
 }
 
-.fav-name .sub {
-  font-size: 11px;
-  font-weight: 400;
-  color: var(--sisy-color-text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.fav-action {
+  min-width: 56px;
 }
 
 /* 取消收藏（行内图标按钮；默认弱化，hover 点亮）。 */
@@ -723,14 +861,19 @@ onMounted(() => {
   margin-bottom: 8px;
 }
 
-/* 窄屏：右栏换行到主表下方。 */
-@media (max-width: 1024px) {
-  .dash-main {
+@media (max-width: 560px) {
+  .fav-row {
+    align-items: flex-start;
     flex-direction: column;
   }
 
-  .dash-right {
+  .fav-name {
     width: 100%;
+  }
+
+  .fav-actions {
+    width: 100%;
+    justify-content: flex-end;
   }
 }
 

@@ -34,8 +34,10 @@ pub struct OverviewResponse {
     pub slots_used: u64,
     /// 槽位总量（在线 Agent max_concurrency 之和）。
     pub slots_total: u64,
-    /// 构建终态计数。
+    /// 构建终态计数（全量历史）。
     pub builds_terminal: BuildsTerminalCounts,
+    /// 当天完成的构建终态计数（按服务端本地日历日）。
+    pub builds_today: BuildsTerminalCounts,
     /// 产物字节占用。
     pub artifact_bytes: u64,
     /// 日志字节占用（压缩体）。
@@ -144,6 +146,12 @@ pub async fn get(
             failed: snap.builds_terminal.get("failed").copied().unwrap_or(0),
             cancelled: snap.builds_terminal.get("cancelled").copied().unwrap_or(0),
             timeout: snap.builds_terminal.get("timeout").copied().unwrap_or(0),
+        },
+        builds_today: BuildsTerminalCounts {
+            succeeded: snap.builds_today.get("succeeded").copied().unwrap_or(0),
+            failed: snap.builds_today.get("failed").copied().unwrap_or(0),
+            cancelled: snap.builds_today.get("cancelled").copied().unwrap_or(0),
+            timeout: snap.builds_today.get("timeout").copied().unwrap_or(0),
         },
         artifact_bytes: snap.artifact_bytes,
         log_bytes: snap.log_bytes,

@@ -17,6 +17,8 @@
 
 use std::collections::BTreeMap;
 
+use chrono::{Local, TimeZone};
+
 use sqlx::SqlitePool;
 
 use crate::store::StoreError;
@@ -49,6 +51,8 @@ pub struct Snapshot {
     pub slots_total: u64,
     /// 构建终态计数（success/failed/cancelled/timeout）。
     pub builds_terminal: BTreeMap<String, u64>,
+    /// 当天完成的构建终态计数（按服务端本地日历日）。
+    pub builds_today: BTreeMap<String, u64>,
     /// 产物字节占用（`artifacts.size` 求和）。
     pub artifact_bytes: u64,
     /// 日志字节占用（`logs.data` 压缩体求和）。
@@ -111,6 +115,7 @@ pub async fn compute(pool: &SqlitePool) -> Result<Snapshot, StoreError> {
     let agents = agent_stats(pool).await?;
     let slots = slot_stats(pool).await?;
     let builds_terminal = terminal_counts(pool).await?;
+    let builds_today = terminal_counts_today(pool).await?;
     let artifact_bytes = scalar_sum(pool, "SELECT COALESCE(SUM(size), 0) FROM artifacts").await?;
     let log_bytes = scalar_sum(pool, "SELECT COALESCE(SUM(LENGTH(data)), 0) FROM logs").await?;
 
@@ -128,6 +133,7 @@ pub async fn compute(pool: &SqlitePool) -> Result<Snapshot, StoreError> {
         slots_used: slots.0,
         slots_total: slots.1,
         builds_terminal,
+        builds_today,
         artifact_bytes,
         log_bytes,
         has_no_match,
@@ -205,6 +211,39 @@ async fn terminal_counts(pool: &SqlitePool) -> Result<BTreeMap<String, u64>, Sto
         sqlx::query_as("SELECT status, COUNT(*) FROM builds WHERE status IN ('succeeded', 'failed', 'cancelled', 'timeout') GROUP BY status")
             .fetch_all(pool)
             .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(status, count)| (status, count as u64))
+        .collect())
+}
+
+/// 当天构建终态计数。构建在进入终态时写入 `finished_at`，因此当天口径
+/// 以完成时间为准；边界使用服务端本地时区的自然日，避免跨午夜时卡片
+/// 继续展示前一天的数据。
+async fn terminal_counts_today(pool: &SqlitePool) -> Result<BTreeMap<String, u64>, StoreError> {
+    let now = Local::now();
+    let today = now.date_naive();
+    let tomorrow = today.succ_opt().unwrap_or(today);
+    let start = Local
+        .from_local_datetime(&today.and_hms_opt(0, 0, 0).expect("有效的日历日"))
+        .single()
+        .unwrap_or(now)
+        .timestamp_millis();
+    let end = Local
+        .from_local_datetime(&tomorrow.and_hms_opt(0, 0, 0).expect("有效的日历日"))
+        .single()
+        .unwrap_or(now)
+        .timestamp_millis();
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT status, COUNT(*) FROM builds
+         WHERE status IN ('succeeded', 'failed', 'cancelled', 'timeout')
+           AND finished_at >= ? AND finished_at < ?
+         GROUP BY status",
+    )
+    .bind(start)
+    .bind(end)
+    .fetch_all(pool)
+    .await?;
     Ok(rows
         .into_iter()
         .map(|(status, count)| (status, count as u64))
@@ -419,14 +458,17 @@ mod tests {
         assert_eq!(snap.agents_online, 1);
     }
 
-    /// 构建终态计数 + 产物/日志字节占用。
+    /// 构建终态计数（全量 + 当天）+ 产物/日志字节占用。
     #[tokio::test]
     async fn compute_counts_terminals_and_storage_bytes() {
         let (_dir, pool) = fixture().await;
         let b1 = insert_build(&pool, 1, "release", 1).await;
         let b2 = insert_build(&pool, 1, "release", 2).await;
-        set_build_status(&pool, b1, "succeeded").await;
-        set_build_status(&pool, b2, "failed").await;
+        let b3 = insert_build(&pool, 1, "release", 3).await;
+        let now = chrono::Local::now().timestamp_millis();
+        set_build_status_at(&pool, b1, "succeeded", now).await;
+        set_build_status_at(&pool, b2, "failed", now).await;
+        set_build_status(&pool, b3, "succeeded").await;
 
         // 产物元数据（size 求和）+ 日志 chunk（压缩体 LENGTH 求和）。
         sqlx::query(
@@ -457,8 +499,10 @@ mod tests {
         .expect("日志");
 
         let snap = compute(&pool).await.expect("快照");
-        assert_eq!(snap.builds_terminal.get("succeeded"), Some(&1));
+        assert_eq!(snap.builds_terminal.get("succeeded"), Some(&2));
         assert_eq!(snap.builds_terminal.get("failed"), Some(&1));
+        assert_eq!(snap.builds_today.get("succeeded"), Some(&1));
+        assert_eq!(snap.builds_today.get("failed"), Some(&1));
         assert_eq!(snap.artifact_bytes, 350, "产物 size 求和");
         assert_eq!(snap.log_bytes, 2, "gzip 魔数 X'1f8b' = 2 字节");
     }

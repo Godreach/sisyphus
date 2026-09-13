@@ -150,6 +150,7 @@ mod tests {
             slots_used: 0,
             slots_total: 0,
             builds_terminal: std::collections::BTreeMap::new(),
+            builds_today: std::collections::BTreeMap::new(),
             artifact_bytes: 0,
             log_bytes: 0,
             has_no_match: false,
