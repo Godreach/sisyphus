@@ -99,6 +99,9 @@ function readSidebarWidth(): number {
 
 const sidebarWidth = ref(readSidebarWidth())
 const sidebarDragging = ref(false)
+const shellStyle = computed<Record<string, string>>(() => ({
+  '--sisy-sidebar-width': isNarrow.value ? '0px' : `${sidebarWidth.value}px`,
+}))
 
 function persistSidebarWidth(): void {
   try {
@@ -367,7 +370,7 @@ function onCta(): void {
       </template>
 
       <template v-else>
-        <div class="app-shell">
+        <div class="app-shell" :style="shellStyle">
           <!-- 桌面端主题自适应侧栏（prototype 外壳；宽度可拖拽调整）。 -->
           <aside
             v-if="!isNarrow"

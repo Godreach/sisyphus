@@ -144,6 +144,7 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
     // 弹层（NModal/NSelect 下拉）teleport 到 body——卸载后清出，防泄漏到下个用例。
     document.body.innerHTML = ''
     server.resetHandlers()
+    vi.restoreAllMocks()
   })
 
   afterAll(() => {
@@ -345,6 +346,36 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
     // 导航为异步 push（BuildDetailView.spec 先例：waitFor 路由切换落定）。
     await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('build-detail'))
     expect(router.currentRoute.value.params.name).toBe('web-app')
+  })
+
+  it('最近构建刷新时保留现有列表，避免骨架屏闪烁', async () => {
+    // 通过页面动作触发与轮询相同的最近构建刷新链路，并把请求挂起，
+    // 从而把测试收敛到 runsLoading 的展示切换。
+    mockStats('main', 'succeeded')
+    mockStats('release', 'succeeded')
+    mockStats('nightly', 'succeeded')
+
+    wrapper = await mountAt('/projects/web-app')
+    await vi.waitFor(() =>
+      expect(wrapper.findAll('[data-testid^="run-row-"]').length).toBeGreaterThan(0),
+    )
+
+    let refreshStarted = false
+    server.use(
+      http.get(`${BASE}/pipelines/:pipeline/builds`, ({ request }) => {
+        const status = new URL(request.url).searchParams.get('status')
+        if (status === 'succeeded') {
+          return HttpResponse.json({ items: [], total: 0, page: 1, limit: 8 })
+        }
+        refreshStarted = true
+        return new Promise<Response>(() => {})
+      }),
+    )
+    await wrapper.get('[data-testid="pipeline-action-main"]').trigger('click')
+    await vi.waitFor(() => expect(refreshStarted).toBe(true))
+
+    // 刷新尚未完成时，旧列表应继续显示，而不是被骨架屏替换。
+    expect(wrapper.findAll('[data-testid^="run-row-"]').length).toBeGreaterThan(0)
   })
 
   it('最近构建空态（fresh-project）：「还没有构建」', async () => {

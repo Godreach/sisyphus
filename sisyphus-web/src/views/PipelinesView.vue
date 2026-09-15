@@ -513,6 +513,24 @@ function openPipeline(row: PipelineRow): void {
 }
 
 const hasAny = computed(() => rows.value.length > 0)
+
+const pipelineScrollbar = ref<HTMLElement | null>(null)
+const pipelineGroupsScroll = ref<HTMLElement | null>(null)
+let syncingHorizontalScroll = false
+
+function syncGroupsScroll(event: Event): void {
+  if (syncingHorizontalScroll || pipelineGroupsScroll.value == null) return
+  syncingHorizontalScroll = true
+  pipelineGroupsScroll.value.scrollLeft = (event.currentTarget as HTMLElement).scrollLeft
+  syncingHorizontalScroll = false
+}
+
+function syncPipelineScrollbar(event: Event): void {
+  if (syncingHorizontalScroll || pipelineScrollbar.value == null) return
+  syncingHorizontalScroll = true
+  pipelineScrollbar.value.scrollLeft = (event.currentTarget as HTMLElement).scrollLeft
+  syncingHorizontalScroll = false
+}
 </script>
 
 <template>
@@ -633,6 +651,21 @@ const hasAny = computed(() => rows.value.length > 0)
           data-testid="pipelines-filter-empty"
         />
         <template v-else>
+        <div
+          v-if="viewMode === 'cards'"
+          ref="pipelineScrollbar"
+          class="pipeline-scrollbar"
+          aria-label="pipeline cards horizontal scrollbar"
+          @scroll="syncGroupsScroll"
+        >
+          <div class="pipeline-scrollbar-content" aria-hidden="true" />
+        </div>
+        <div
+          ref="pipelineGroupsScroll"
+          class="pipeline-groups-scroll"
+          :class="{ 'pipeline-groups-scroll-cards': viewMode === 'cards' }"
+          @scroll="syncPipelineScrollbar"
+        >
         <template v-for="group in displayGroups" :key="group.project || 'all'">
           <section class="project-group" :class="{ 'project-group-flat': organizationMode === 'flat' }">
             <header
@@ -735,7 +768,7 @@ const hasAny = computed(() => rows.value.length > 0)
           </div>
         </section>
 
-        <!-- 卡片视图（原型 cards-view 2 列网格；P6 定稿默认视图）。 -->
+        <!-- 卡片视图（固定卡片尺寸，至少 3 列；窄屏通过横向滚动查看）。 -->
         <section v-else class="cards-view" aria-label="pipeline cards">
           <article
             v-for="row in group.rows"
@@ -837,6 +870,7 @@ const hasAny = computed(() => rows.value.length > 0)
           </div>
           </section>
           </template>
+        </div>
         </template>
 
         <p class="form-hint plines-hint">{{ t('plines.statsHint') }}</p>
@@ -1250,15 +1284,85 @@ const hasAny = computed(() => rows.value.length > 0)
   padding: 24px 20px;
 }
 
-/* 卡片视图（原型 cards-view：1440 桌面 2 列；窄屏回落自适应）。 */
+/* 页面底部提供一条共享横向滚动条，避免用户滚到整页底部才能操作。 */
+.pipeline-scrollbar {
+  position: fixed;
+  left: calc(var(--sisy-sidebar-width, 0px) + 32px);
+  right: 32px;
+  bottom: 0;
+  z-index: 10;
+  height: 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: transparent;
+  scrollbar-color: var(--sisy-scrollbar-thumb) var(--sisy-scrollbar-track);
+  scrollbar-width: auto;
+}
+
+.pipeline-scrollbar::-webkit-scrollbar {
+  height: 10px;
+}
+
+.pipeline-scrollbar::-webkit-scrollbar-track {
+  border: 2px solid transparent;
+  border-radius: var(--sisy-radius-pill);
+  background: var(--sisy-scrollbar-track);
+}
+
+.pipeline-scrollbar::-webkit-scrollbar-thumb {
+  min-width: 72px;
+  border: 2px solid var(--sisy-scrollbar-track);
+  border-radius: var(--sisy-radius-pill);
+  background: var(--sisy-scrollbar-thumb);
+}
+
+.pipeline-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--sisy-scrollbar-thumb-hover);
+}
+
+.pipeline-scrollbar::-webkit-scrollbar-thumb:active {
+  background: var(--sisy-scrollbar-thumb-active);
+}
+
+.pipeline-scrollbar-content {
+  width: max(1292px, 100%);
+  height: 1px;
+}
+
+/* 项目分组共用同一个实际滚动位置；隐藏其原生滚动条，避免出现第二条。 */
+.pipeline-groups-scroll {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.pipeline-groups-scroll-cards {
+  scrollbar-width: none;
+}
+
+.pipeline-groups-scroll-cards::-webkit-scrollbar {
+  display: none;
+}
+
+@media (max-width: 767px) {
+  .pipeline-scrollbar {
+    left: 16px;
+    right: 16px;
+  }
+}
+
+/* 卡片视图：固定卡片尺寸，至少保持 3 列；宽屏有空间时继续增加列数。 */
 .cards-view {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  grid-template-columns: repeat(auto-fill, 420px);
+  width: max(100%, 1292px);
+  min-width: 1292px;
   gap: 16px;
   align-content: start;
 }
 
 .p-card {
+  width: 420px;
+  box-sizing: border-box;
   background: var(--sisy-color-surface);
   border-radius: var(--sisy-radius-card);
   border: 1px solid var(--sisy-color-border);

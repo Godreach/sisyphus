@@ -263,6 +263,9 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     await vi.waitFor(() => expect(w.findAll('.p-card')).toHaveLength(3))
 
     expect(w.findAll('.project-group')).toHaveLength(2)
+    // 多项目分组共用一个横向滚动容器，避免每个分组各自出现滑动条。
+    expect(w.findAll('.pipeline-groups-scroll')).toHaveLength(1)
+    expect(w.findAll('.pipeline-scrollbar')).toHaveLength(1)
     const alphaToggle = w.find('[data-testid="project-toggle-alpha"]')
     expect(alphaToggle.text()).toBe('')
     expect(alphaToggle.attributes('aria-label')).toBe('收起')

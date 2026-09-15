@@ -242,7 +242,7 @@ async function loadRecent(): Promise<void> {
       .sort((a, b) => (b.finished_at ?? b.started_at ?? 0) - (a.finished_at ?? a.started_at ?? 0))
       .slice(0, RECENT_PER_PIPELINE)
   } catch (err) {
-    runs.value = []
+    // 刷新失败时继续保留上一份列表，避免短暂网络错误把内容替换成空态。
     runsError.value = describeSubmitError(err)
   } finally {
     runsLoading.value = false
@@ -671,13 +671,19 @@ function createPipeline(): void {
         <h2 class="card-title">{{ t('projects.recentBuildsTitle') }}</h2>
       </div>
 
-      <n-alert v-if="runsError" type="error" :title="runsError" role="alert" class="card-alert">
+      <n-alert
+        v-if="runsError && runs.length === 0"
+        type="error"
+        :title="runsError"
+        role="alert"
+        class="card-alert"
+      >
         <button type="button" class="btn-outline" data-testid="runs-retry" @click="loadRecent">
           {{ t('plines.retry') }}
         </button>
       </n-alert>
 
-      <div v-else-if="runsLoading" class="card-skeleton">
+      <div v-else-if="runsLoading && runs.length === 0" class="card-skeleton">
         <n-skeleton text :repeat="4" height="40px" />
       </div>
 

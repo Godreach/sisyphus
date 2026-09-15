@@ -35,6 +35,10 @@
   --sisy-color-sidebar-icon-active: #0066cc;
   --sisy-color-sidebar-user: #1d1d1f;
   --sisy-color-sidebar-resizer: rgba(0, 0, 0, 0.12);
+  --sisy-scrollbar-track: #e9ebf0;
+  --sisy-scrollbar-thumb: #b7bfcc;
+  --sisy-scrollbar-thumb-hover: #8f9baa;
+  --sisy-scrollbar-thumb-active: #0066cc;
   --sisy-color-accent: #5e5ce6;
   --sisy-radius: 8px;
   --sisy-radius-card: 12px;
@@ -78,6 +82,10 @@
     --sisy-color-sidebar-icon-active: #2997ff;
     --sisy-color-sidebar-user: #ffffff;
     --sisy-color-sidebar-resizer: rgba(255, 255, 255, 0.3);
+    --sisy-scrollbar-track: #25262b;
+    --sisy-scrollbar-thumb: #5c6370;
+    --sisy-scrollbar-thumb-hover: #7d8796;
+    --sisy-scrollbar-thumb-active: #2997ff;
   }
 }
 
@@ -117,6 +125,10 @@
   --sisy-color-sidebar-icon-active: #2997ff;
   --sisy-color-sidebar-user: #ffffff;
   --sisy-color-sidebar-resizer: rgba(255, 255, 255, 0.3);
+  --sisy-scrollbar-track: #25262b;
+  --sisy-scrollbar-thumb: #5c6370;
+  --sisy-scrollbar-thumb-hover: #7d8796;
+  --sisy-scrollbar-thumb-active: #2997ff;
 }
 
 * {
@@ -407,6 +419,34 @@ body.sidebar-resizing {
   padding: 24px 32px;
   width: 100%;
   overflow-y: auto;
+  scrollbar-color: var(--sisy-scrollbar-thumb) var(--sisy-scrollbar-track);
+  scrollbar-width: auto;
+}
+
+.app-main::-webkit-scrollbar {
+  width: 14px;
+  height: 14px;
+}
+
+.app-main::-webkit-scrollbar-track {
+  border: 3px solid var(--sisy-color-bg);
+  border-radius: var(--sisy-radius-pill);
+  background: var(--sisy-scrollbar-track);
+}
+
+.app-main::-webkit-scrollbar-thumb {
+  min-height: 48px;
+  border: 3px solid var(--sisy-color-bg);
+  border-radius: var(--sisy-radius-pill);
+  background: var(--sisy-scrollbar-thumb);
+}
+
+.app-main::-webkit-scrollbar-thumb:hover {
+  background: var(--sisy-scrollbar-thumb-hover);
+}
+
+.app-main::-webkit-scrollbar-thumb:active {
+  background: var(--sisy-scrollbar-thumb-active);
 }
 
 /* 未登录（登录/初始化引导/404）：无壳居中布局。app-main 退化为纵向 flex

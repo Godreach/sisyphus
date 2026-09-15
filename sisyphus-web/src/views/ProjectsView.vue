@@ -383,7 +383,7 @@ function onScmTypeChange(v: ScmTypeDto): void {
           v-for="p in filteredProjects"
           :key="p.name"
           class="project-card"
-          size="small"
+          size="medium"
           :bordered="true"
           :hoverable="true"
           role="button"
@@ -457,23 +457,24 @@ function onScmTypeChange(v: ScmTypeDto): void {
 
 .project-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 12px;
-  margin: 16px 0;
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
+  gap: 16px;
+  margin: 20px 0;
 }
 
 .project-card {
   cursor: pointer;
+  min-height: 144px;
 }
 
 .project-card-name {
   font-weight: 600;
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .project-card-meta {
   color: var(--n-text-color-3, #999);
-  font-size: 12px;
+  font-size: 13px;
   word-break: break-all;
   margin: 0 0 8px;
 }
@@ -489,7 +490,7 @@ function onScmTypeChange(v: ScmTypeDto): void {
 }
 
 .project-card-branch-text {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--n-text-color-2, #666);
 }
 
