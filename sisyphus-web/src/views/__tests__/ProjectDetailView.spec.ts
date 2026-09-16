@@ -130,7 +130,10 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
     })
     await router.push(path)
     await router.isReady()
-    return mount(DetailWrapper, { global: { plugins: [pinia, router, i18n] } })
+    return mount(DetailWrapper, {
+      attachTo: document.body,
+      global: { plugins: [pinia, router, i18n] },
+    })
   }
 
   beforeEach(() => {
@@ -298,6 +301,21 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
   })
 
   it('流水线区空态（fresh-project）：「本项目暂无流水线」+ 新建引导', async () => {
+    server.use(
+      http.get('/api/v1/projects', () =>
+        HttpResponse.json([
+          {
+            id: 9,
+            name: 'fresh-project',
+            scm_type: 'git',
+            scm_url: 'https://example.com/fresh.git',
+            default_branch: 'main',
+            created_at: 1,
+            updated_at: 1,
+          },
+        ]),
+      ),
+    )
     wrapper = await mountAt('/projects/fresh-project')
     await vi.waitFor(() =>
       expect(wrapper.find('[data-testid="project-title"]').text()).toBe('fresh-project'),
@@ -307,6 +325,14 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
     )
     expect(wrapper.find('[data-testid="pipelines-empty"]').text()).toContain('本项目暂无流水线')
     expect(wrapper.find('[data-testid="pipeline-empty-create-btn"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="pipeline-empty-create-btn"]').trigger('click')
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="new-pipeline-dialog"]')).toBeTruthy(),
+    )
+    expect(document.querySelector('[data-testid="new-pipeline-project"]')).toBeNull()
+    expect(
+      document.querySelector('[data-testid="new-pipeline-project-locked"]')?.textContent,
+    ).toContain('fresh-project')
   })
 
   it('流水线清单失败：卡内报错 + 重试，不拖垮整页（项目信息卡仍在）', async () => {
@@ -448,6 +474,8 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
     // 表单面不渲染；编辑项目按钮（项目 admin 专属）不出现。
     expect(wrapper.find('[data-testid="member-save"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="edit-project-btn"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="new-pipeline-btn"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="pipeline-empty-create-btn"]').exists()).toBe(false)
     // 项目信息/流水线/最近构建（viewer 档面）不受影响。
     expect(wrapper.find('.project-info-card').exists()).toBe(true)
     expect(wrapper.find('.project-pipelines-card').exists()).toBe(true)
@@ -555,16 +583,46 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
     )
   })
 
-  it('新建流水线：弹窗输名 → 跳编辑器（保存即创建语义在编辑器侧）', async () => {
-    wrapper = await mountAt('/projects/web-app')
+  it('项目头部复用全局创建对话框：锁定当前项目并携来源进入新建编辑器态', async () => {
+    let definitionGets = 0
+    const projectUrls: string[] = []
+    server.use(
+      http.get('/api/v1/projects', ({ request }) => {
+        projectUrls.push(request.url)
+        return HttpResponse.json([
+          {
+            id: 1,
+            name: 'web-app',
+            scm_type: 'git',
+            scm_url: 'https://github.com/acme/web-app.git',
+            default_branch: 'main',
+            created_at: 1,
+            updated_at: 1,
+          },
+        ])
+      }),
+      http.get(`${BASE}/pipelines/hotfix`, () => {
+        definitionGets += 1
+        return HttpResponse.json(
+          { code: 'NOT_FOUND', message: '流水线不存在', detail: null },
+          { status: 404 },
+        )
+      }),
+    )
+
+    wrapper = await mountAt('/projects/web-app?tab=pipelines')
     await vi.waitFor(() =>
       expect(wrapper.find('[data-testid="new-pipeline-btn"]').exists()).toBe(true),
     )
     await wrapper.get('[data-testid="new-pipeline-btn"]').trigger('click')
-    // NModal 内容 teleport 到 body——按 document 查询。
     await vi.waitFor(() =>
       expect(document.querySelector('.n-modal input[name="new-pipeline-name"]')).toBeTruthy(),
     )
+    expect(document.querySelector('[data-testid="new-pipeline-project"]')).toBeNull()
+    expect(
+      document.querySelector('[data-testid="new-pipeline-project-locked"]')?.textContent,
+    ).toContain('web-app')
+
     const nameInput = document.querySelector('.n-modal input[name="new-pipeline-name"]') as HTMLInputElement
     nameInput.value = 'hotfix'
     await nameInput.dispatchEvent(new Event('input'))
@@ -572,5 +630,71 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
     await createBtn.click()
     await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('pipeline-edit'))
     expect(router.currentRoute.value.params).toMatchObject({ name: 'web-app', pipeline: 'hotfix' })
+    expect(router.currentRoute.value.query).toEqual({
+      create: '1',
+      from: '/projects/web-app?tab=pipelines',
+    })
+    expect(definitionGets).toBe(1)
+    expect(new URL(projectUrls.at(-1)!).searchParams.get('permission')).toBe('admin')
+
+    router.back()
+    await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('project-detail'))
+    expect(router.currentRoute.value.fullPath).toBe('/projects/web-app?tab=pipelines')
+  })
+
+  it('项目内创建的取消、关闭、Escape 与浏览器返回均回真实来源并保留查询', async () => {
+    server.use(
+      http.get('/api/v1/projects', () =>
+        HttpResponse.json([
+          {
+            id: 1,
+            name: 'web-app',
+            scm_type: 'git',
+            scm_url: 'https://github.com/acme/web-app.git',
+            default_branch: 'main',
+            created_at: 1,
+            updated_at: 1,
+          },
+        ]),
+      ),
+    )
+    wrapper = await mountAt('/projects/web-app?tab=pipelines&view=compact')
+    await vi.waitFor(() =>
+      expect(wrapper.find('[data-testid="new-pipeline-btn"]').exists()).toBe(true),
+    )
+
+    const open = async () => {
+      await wrapper.get('[data-testid="new-pipeline-btn"]').trigger('click')
+      await vi.waitFor(() =>
+        expect(document.querySelector('[data-testid="new-pipeline-dialog"]')).toBeTruthy(),
+      )
+    }
+    const expectSource = async () => {
+      await vi.waitFor(() => expect(router.currentRoute.value.query.create).toBeUndefined())
+      expect(router.currentRoute.value.fullPath).toBe(
+        '/projects/web-app?tab=pipelines&view=compact',
+      )
+    }
+
+    await open()
+    ;(
+      document.querySelector('[data-testid="new-pipeline-cancel"]') as HTMLButtonElement
+    ).click()
+    await expectSource()
+    await vi.waitFor(() =>
+      expect(document.activeElement).toBe(wrapper.get('[data-testid="new-pipeline-btn"]').element),
+    )
+
+    await open()
+    ;(document.querySelector('.n-modal .n-base-close') as HTMLButtonElement).click()
+    await expectSource()
+
+    await open()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await expectSource()
+
+    await open()
+    router.back()
+    await expectSource()
   })
 })

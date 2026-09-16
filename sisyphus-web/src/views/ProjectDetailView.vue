@@ -12,7 +12,7 @@
 //   `GET …/stats?window=20`（契约票 #102）——真清单，不再有探测退化。清单
 //   失败卡内报错 + 重试（局部失败不整页化）；行内动作（终止/重试/运行）与
 //   流水线页共用 utils/pipelineAction 映射；「编辑」跳混合编辑器、
-//   「新建流水线」弹窗输名跳编辑器（404 → 空定义保存即创建，编辑器既有语义）。
+//   「新建流水线」复用全局创建对话框并锁定当前项目。
 // - 最近构建：逐条流水线 `GET …/builds?limit=8` 客户端合并取最近 8 条
 //   （无新契约）；行点击跳构建详情。
 // - 轻轮询（5s）：仅对最近构建为排队/运行中的流水线重取统计并重刷最近
@@ -60,6 +60,7 @@ import type {
   MemberRoleDto,
   ProjectResponse,
 } from '@/api/types'
+import PipelineCreateDialog from '@/components/PipelineCreateDialog.vue'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -468,27 +469,13 @@ async function submitEditProject(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// 新建流水线（输名 → 跳编辑器；404 → 空定义保存即创建，编辑器既有语义）
+// 新建流水线（复用全局选择器，项目锁定；查询参数承载弹层历史）
 // ---------------------------------------------------------------------------
 
-const newOpen = ref(false)
-const newPipelineName = ref('')
-const newNameError = ref('')
+const createOpen = computed(() => route.query.create === '1')
 
 function openNewPipeline(): void {
-  newPipelineName.value = ''
-  newNameError.value = ''
-  newOpen.value = true
-}
-
-function createPipeline(): void {
-  const name = newPipelineName.value.trim()
-  if (name === '') {
-    newNameError.value = t('projects.newPipelineNameRequired')
-    return
-  }
-  newOpen.value = false
-  openEditor(name)
+  void router.push({ query: { ...route.query, create: '1' } })
 }
 </script>
 
@@ -547,6 +534,7 @@ function createPipeline(): void {
           {{ t('projects.editProject') }}
         </button>
         <button
+          v-if="isProjectAdmin"
           type="button"
           class="btn-outline blue"
           data-testid="new-pipeline-btn"
@@ -603,6 +591,7 @@ function createPipeline(): void {
           <template #extra>
             <p class="form-hint">{{ t('projects.pipelinesEmptyHint') }}</p>
             <n-button
+              v-if="isProjectAdmin"
               type="primary"
               size="small"
               class="ppl-empty-btn"
@@ -916,34 +905,11 @@ function createPipeline(): void {
       </div>
     </n-modal>
 
-    <!-- 新建流水线弹窗（输名 → 编辑器；保存即创建语义在编辑器侧）。 -->
-    <n-modal
-      v-model:show="newOpen"
-      preset="card"
-      :title="t('plines.newPipeline')"
-      style="width: 400px"
-      :bordered="false"
-    >
-      <n-form-item :label="t('projects.newPipelineName')">
-        <n-input
-          v-model:value="newPipelineName"
-          :input-props="{ name: 'new-pipeline-name', autocomplete: 'off' }"
-          :placeholder="t('projects.newPipelinePlaceholder')"
-          @keyup.enter="createPipeline"
-        />
-      </n-form-item>
-
-      <p v-if="newNameError" class="pdl-error" role="alert">{{ newNameError }}</p>
-
-      <div class="modal-actions">
-        <n-button @click="newOpen = false">
-          {{ t('common.cancel') }}
-        </n-button>
-        <n-button type="primary" data-testid="new-pipeline-create" @click="createPipeline">
-          {{ t('projects.newPipelineCreate') }}
-        </n-button>
-      </div>
-    </n-modal>
+    <PipelineCreateDialog
+      :show="createOpen"
+      :locked-project="projectName"
+      focus-selector="[data-testid='new-pipeline-btn']"
+    />
   </div>
 </template>
 

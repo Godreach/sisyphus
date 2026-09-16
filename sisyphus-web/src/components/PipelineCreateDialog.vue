@@ -20,7 +20,11 @@ import { ApiError } from '@/api/http'
 import type { ProjectResponse } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
-const props = defineProps<{ show: boolean }>()
+const props = defineProps<{
+  show: boolean
+  lockedProject?: string
+  focusSelector?: string
+}>()
 
 const { t } = useI18n()
 const route = useRoute()
@@ -55,8 +59,12 @@ function pipelinesQueryWithoutCreate(): Record<string, string | string[]> {
   return query
 }
 
+function sourceWithoutCreate(): string {
+  return router.resolve({ path: route.path, query: pipelinesQueryWithoutCreate() }).fullPath
+}
+
 function resetForm(): void {
-  selectedProject.value = null
+  selectedProject.value = props.lockedProject ?? null
   pipelineName.value = ''
   projectError.value = ''
   nameError.value = ''
@@ -79,7 +87,17 @@ async function loadManageableProjects(): Promise<void> {
 
 async function close(): Promise<void> {
   if (!props.show || submitting.value) return
-  await router.replace({ name: 'pipelines', query: pipelinesQueryWithoutCreate() })
+  await router.replace({ path: route.path, query: pipelinesQueryWithoutCreate() })
+  await nextTick()
+  restoreFocus()
+}
+
+function restoreFocus(): void {
+  ;(
+    document.querySelector(
+      props.focusSelector ?? '[data-testid="topbar-cta"]',
+    ) as HTMLElement | null
+  )?.focus()
 }
 
 function onKeydown(event: KeyboardEvent): void {
@@ -127,14 +145,16 @@ async function createAndEdit(): Promise<void> {
       return
     }
 
-    const from = router.resolve({
-      name: 'pipelines',
-      query: pipelinesQueryWithoutCreate(),
-    }).fullPath
+    const from = sourceWithoutCreate()
+    const scroll = window.scrollY
     await router.replace({
       name: 'pipeline-edit',
       params: { name: project, pipeline: name },
-      query: { create: '1', from },
+      query: {
+        create: '1',
+        from,
+        ...(scroll > 0 ? { fromScroll: String(scroll) } : {}),
+      },
     })
   } catch (err) {
     submitError.value = describeSubmitError(err)
@@ -151,9 +171,9 @@ watch(
       await loadManageableProjects()
       return
     }
-    if (previous && route.name === 'pipelines') {
+    if (previous) {
       await nextTick()
-      ;(document.querySelector('[data-testid="topbar-cta"]') as HTMLElement | null)?.focus()
+      setTimeout(restoreFocus, 0)
     }
   },
   { immediate: true },
@@ -173,6 +193,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
     :mask-closable="!submitting"
     :close-on-esc="false"
     @update:show="(value: boolean) => { if (!value) void close() }"
+    @after-leave="restoreFocus"
   >
     <div data-testid="new-pipeline-dialog" class="create-pipeline-dialog">
       <template v-if="status === 'loading'">
@@ -221,7 +242,15 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
           :label="t('plines.createProjectLabel')"
           :validation-status="projectError ? 'error' : undefined"
         >
+          <div
+            v-if="lockedProject"
+            class="locked-project"
+            data-testid="new-pipeline-project-locked"
+          >
+            {{ lockedProject }}
+          </div>
           <n-select
+            v-else
             :value="selectedProject"
             :options="projectOptions"
             :filter="filterProjectOption"
@@ -316,5 +345,14 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
   justify-content: flex-end;
   gap: 8px;
   margin-top: 4px;
+}
+
+.locked-project {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--sisy-color-border);
+  border-radius: 6px;
+  background: var(--sisy-color-bg);
+  color: var(--sisy-color-text);
 }
 </style>

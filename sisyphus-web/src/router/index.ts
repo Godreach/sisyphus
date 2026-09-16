@@ -128,6 +128,9 @@ const routes: RouteRecordRaw[] = [
 export const router = createRouter({
   history: createWebHistory(),
   routes,
+  scrollBehavior(_to, _from, savedPosition) {
+    return savedPosition ?? false
+  },
 })
 
 // 守卫：会话恢复 + 未认证重定向登录（guards.ts）。

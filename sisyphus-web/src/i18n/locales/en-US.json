@@ -584,6 +584,7 @@
     "retry": "Retry"
   },
   "editor": {
+    "back": "Back",
     "loadError": "Failed to load pipeline definition",
     "notFound": "Pipeline not configured yet — start from an empty definition; saving creates it (first revision=1).",
     "revision": "Revision",

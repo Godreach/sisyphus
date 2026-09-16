@@ -126,11 +126,13 @@ describe('PipelineEditorView 混合式编辑器', () => {
       routes: [
         // 面包屑链接目标（不导航，仅占位防 unknown-name 警告）。
         { path: '/projects', name: 'projects', component: { template: '<div />' } },
+        { path: '/pipelines', name: 'pipelines', component: { template: '<div />' } },
         {
           path: '/projects/:name/detail',
           name: 'project-detail',
           component: { template: '<div />' },
         },
+        { path: '/:pathMatch(.*)*', name: 'not-found', component: { template: '<div />' } },
         {
           path: '/projects/:name/pipelines/:pipeline',
           name: 'pipeline-edit',
@@ -165,6 +167,40 @@ describe('PipelineEditorView 混合式编辑器', () => {
       ),
     )
     wrapper.unmount()
+  })
+
+  it('显式返回只接受有效应用内来源并恢复查询与滚动；无效来源回退流水线列表', async () => {
+    mockDefinition(defResp())
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    await router.replace({
+      path: '/projects/proj-a/pipelines/main',
+      query: {
+        from: '/projects/proj-a/detail?tab=pipelines&view=compact',
+        fromScroll: '240',
+      },
+    })
+    const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="editor-back"]').exists()).toBe(true))
+
+    await wrapper.get('[data-testid="editor-back"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('project-detail'))
+    expect(router.currentRoute.value.query).toEqual({ tab: 'pipelines', view: 'compact' })
+    expect(scrollTo).toHaveBeenCalledWith({ top: 240, left: 0, behavior: 'auto' })
+    wrapper.unmount()
+
+    for (const from of ['https://evil.example/', '//evil.example/', '/missing']) {
+      await router.replace({
+        path: '/projects/proj-a/pipelines/main',
+        query: { from },
+      })
+      const invalidWrapper = mountView()
+      await vi.waitFor(() =>
+        expect(invalidWrapper.find('[data-testid="editor-back"]').exists()).toBe(true),
+      )
+      await invalidWrapper.get('[data-testid="editor-back"]').trigger('click')
+      await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('pipelines'))
+      invalidWrapper.unmount()
+    }
   })
 
   it('点击 chip → 表单导航到该任务（字段联动）+ 选中态高亮', async () => {

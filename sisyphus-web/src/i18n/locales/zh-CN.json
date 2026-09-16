@@ -584,6 +584,7 @@
     "retry": "重试"
   },
   "editor": {
+    "back": "返回来源页",
     "loadError": "加载 pipeline 定义失败",
     "notFound": "pipeline 尚未配置——以空定义开始，保存即创建（首存 revision=1）。",
     "revision": "修订版本",

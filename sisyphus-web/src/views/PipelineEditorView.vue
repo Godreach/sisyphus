@@ -16,8 +16,8 @@
 // #96: 迁移 Naive UI——页签改 NTabs、保存成功改 NMessage toast、错误面板改
 // NAlert、并发冲突改 NModal、保存/重载改 NButton，交互不变。
 
-import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { NAlert, NButton, NModal, NSkeleton, NTabs, NTabPane, useMessage } from 'naive-ui'
 
@@ -34,11 +34,41 @@ import ParametersTab from '@/components/editor/ParametersTab.vue'
 import EnvListEditor from '@/components/editor/EnvListEditor.vue'
 
 const route = useRoute()
+const router = useRouter()
 const { t } = useI18n()
 const message = useMessage()
 
 const project = computed(() => String(route.params.name ?? ''))
 const pipelineName = computed(() => String(route.params.pipeline ?? ''))
+
+function safeReturnPath(): string {
+  const raw = typeof route.query.from === 'string' ? route.query.from : ''
+  if (!raw.startsWith('/') || raw.startsWith('//')) {
+    return router.resolve({ name: 'pipelines' }).fullPath
+  }
+  const resolved = router.resolve(raw)
+  const routeName = resolved.name
+  if (
+    resolved.matched.length === 0 ||
+    routeName === 'not-found' ||
+    routeName === 'login' ||
+    routeName === 'setup' ||
+    routeName === 'pipeline-edit'
+  ) {
+    return router.resolve({ name: 'pipelines' }).fullPath
+  }
+  return resolved.fullPath
+}
+
+async function returnToSource(): Promise<void> {
+  const rawScroll = typeof route.query.fromScroll === 'string' ? route.query.fromScroll : ''
+  const scroll = Number(rawScroll)
+  await router.replace(safeReturnPath())
+  if (rawScroll !== '' && Number.isFinite(scroll) && scroll >= 0) {
+    await nextTick()
+    window.scrollTo({ top: scroll, left: 0, behavior: 'auto' })
+  }
+}
 
 const pipeline = ref<Pipeline | null>(null)
 const loadedRevision = ref<number | null>(null)
@@ -83,6 +113,7 @@ onMounted(load)
 watch([project, pipelineName], load)
 
 async function load(): Promise<void> {
+  if (project.value === '' || pipelineName.value === '') return
   status.value = 'loading'
   loadError.value = ''
   serverErrors.value = []
@@ -271,7 +302,7 @@ const showConflict = computed({
     </n-alert>
   </div>
 
-  <div v-else-if="pipeline" class="editor-page">
+  <div v-else-if="pipeline && project && pipelineName" class="editor-page">
     <nav class="breadcrumb" aria-label="Breadcrumb">
       <router-link :to="{ name: 'projects' }">{{ t('routes.projects') }}</router-link>
       <span class="breadcrumb-sep">/</span>
@@ -283,6 +314,9 @@ const showConflict = computed({
     </nav>
 
     <header class="editor-header">
+      <n-button data-testid="editor-back" @click="returnToSource">
+        {{ t('editor.back') }}
+      </n-button>
       <h1 class="page-title">{{ pipelineName }}</h1>
       <div class="editor-revision">
         <span class="badge neutral">
