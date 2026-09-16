@@ -197,6 +197,17 @@ describe('PipelineEditorView 混合式编辑器', () => {
     expect(scrollTo).toHaveBeenCalledWith({ top: 240, left: 0, behavior: 'auto' })
     wrapper.unmount()
 
+    await router.replace({
+      path: '/projects/proj-a/pipelines/main',
+      query: { from: '/projects/proj-a/detail?tab=pipelines' },
+    })
+    const topWrapper = mountView()
+    await vi.waitFor(() => expect(topWrapper.find('[data-testid="editor-back"]').exists()).toBe(true))
+    await topWrapper.get('[data-testid="editor-back"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('project-detail'))
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 0, left: 0, behavior: 'auto' })
+    topWrapper.unmount()
+
     for (const from of ['https://evil.example/', '//evil.example/', '/missing']) {
       await router.replace({
         path: '/projects/proj-a/pipelines/main',

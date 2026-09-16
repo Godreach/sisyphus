@@ -65,8 +65,11 @@ async function returnToSource(): Promise<void> {
   const scroll = Number(rawScroll)
   const destination = safeReturnPath()
   await router.replace(destination.path)
-  if (destination.valid && rawScroll !== '' && Number.isFinite(scroll) && scroll >= 0) {
-    restoreScrollWhenReady(scroll, router)
+  if (destination.valid) {
+    restoreScrollWhenReady(
+      rawScroll !== '' && Number.isFinite(scroll) && scroll >= 0 ? scroll : 0,
+      router,
+    )
   }
 }
 
