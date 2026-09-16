@@ -19,6 +19,7 @@ import { describeSubmitError } from '@/api/errors'
 import { ApiError } from '@/api/http'
 import type { ProjectResponse } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
+import { returnSourceQuery } from '@/utils/returnSource'
 
 const props = defineProps<{
   show: boolean
@@ -57,10 +58,6 @@ function pipelinesQueryWithoutCreate(): Record<string, string | string[]> {
       : value
   }
   return query
-}
-
-function sourceWithoutCreate(): string {
-  return router.resolve({ path: route.path, query: pipelinesQueryWithoutCreate() }).fullPath
 }
 
 function resetForm(): void {
@@ -145,16 +142,10 @@ async function createAndEdit(): Promise<void> {
       return
     }
 
-    const from = sourceWithoutCreate()
-    const scroll = window.scrollY
     await router.replace({
       name: 'pipeline-edit',
       params: { name: project, pipeline: name },
-      query: {
-        create: '1',
-        from,
-        ...(scroll > 0 ? { fromScroll: String(scroll) } : {}),
-      },
+      query: { create: '1', ...returnSourceQuery(route, router, ['create']) },
     })
   } catch (err) {
     submitError.value = describeSubmitError(err)

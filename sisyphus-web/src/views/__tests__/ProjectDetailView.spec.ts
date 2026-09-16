@@ -24,6 +24,18 @@ import { server } from '@/mocks/node'
 
 const BASE = '/api/v1/projects/web-app'
 
+function projectFixture(name = 'web-app') {
+  return {
+    id: 1,
+    name,
+    scm_type: 'git',
+    scm_url: `https://github.com/acme/${name}.git`,
+    default_branch: 'main',
+    created_at: 1,
+    updated_at: 1,
+  }
+}
+
 /** 包装组件：NMessageProvider + ProjectDetailView（useMessage 注入可用）。 */
 const DetailWrapper = defineComponent({
   name: 'DetailWrapper',
@@ -241,10 +253,15 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
     await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('build-list'))
     expect(router.currentRoute.value.params).toMatchObject({ name: 'web-app', pipeline: 'main' })
 
-    await router.push('/projects/web-app')
+    await router.push('/projects/web-app?tab=pipelines')
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(180)
     await wrapper.get('[data-testid="pipeline-edit-release"]').trigger('click')
     await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('pipeline-edit'))
     expect(router.currentRoute.value.params).toMatchObject({ name: 'web-app', pipeline: 'release' })
+    expect(router.currentRoute.value.query).toEqual({
+      from: '/projects/web-app?tab=pipelines',
+      fromScroll: '180',
+    })
   })
 
   it('行内动作（latest 失败）：「重试」橙按钮 → POST rerun from_failed → toast', async () => {
@@ -589,17 +606,7 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
     server.use(
       http.get('/api/v1/projects', ({ request }) => {
         projectUrls.push(request.url)
-        return HttpResponse.json([
-          {
-            id: 1,
-            name: 'web-app',
-            scm_type: 'git',
-            scm_url: 'https://github.com/acme/web-app.git',
-            default_branch: 'main',
-            created_at: 1,
-            updated_at: 1,
-          },
-        ])
+        return HttpResponse.json([projectFixture()])
       }),
       http.get(`${BASE}/pipelines/hotfix`, () => {
         definitionGets += 1
@@ -645,17 +652,7 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
   it('项目内创建的取消、关闭、Escape 与浏览器返回均回真实来源并保留查询', async () => {
     server.use(
       http.get('/api/v1/projects', () =>
-        HttpResponse.json([
-          {
-            id: 1,
-            name: 'web-app',
-            scm_type: 'git',
-            scm_url: 'https://github.com/acme/web-app.git',
-            default_branch: 'main',
-            created_at: 1,
-            updated_at: 1,
-          },
-        ]),
+        HttpResponse.json([projectFixture()]),
       ),
     )
     wrapper = await mountAt('/projects/web-app?tab=pipelines&view=compact')

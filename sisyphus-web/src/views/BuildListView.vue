@@ -28,6 +28,7 @@ import { buildsApi } from '@/api/client'
 import { describeActionError } from '@/api/errors'
 import { formatDateTime } from '@/utils/format'
 import type { BuildListResponse, BuildStatusDto, BuildSummaryResponse } from '@/api/types'
+import { returnSourceQuery } from '@/utils/returnSource'
 
 const route = useRoute()
 const router = useRouter()
@@ -47,6 +48,12 @@ const statusFilter = ref<BuildStatusDto | ''>('')
 const totalPages = computed(() =>
   list.value ? Math.max(1, Math.ceil(list.value.total / list.value.limit)) : 1,
 )
+
+const editorLocation = computed(() => ({
+  name: 'pipeline-edit',
+  params: { name: project.value, pipeline: pipeline.value },
+  query: returnSourceQuery(route, router),
+}))
 
 async function loadList(): Promise<void> {
   loading.value = true
@@ -198,7 +205,7 @@ watch(
     <header class="build-list-header">
       <h1>{{ pipeline }}</h1>
       <router-link
-        :to="{ name: 'pipeline-edit', params: { name: project, pipeline } }"
+        :to="editorLocation"
         class="build-list-edit"
       >
         {{ t('buildList.editPipeline') }}

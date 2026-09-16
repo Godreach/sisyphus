@@ -172,6 +172,11 @@ describe('PipelineEditorView 混合式编辑器', () => {
   it('显式返回只接受有效应用内来源并恢复查询与滚动；无效来源回退流水线列表', async () => {
     mockDefinition(defResp())
     const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    let scrollHeight = 100
+    vi.spyOn(document.documentElement, 'scrollHeight', 'get').mockImplementation(
+      () => scrollHeight,
+    )
+    vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(600)
     await router.replace({
       path: '/projects/proj-a/pipelines/main',
       query: {
@@ -185,6 +190,10 @@ describe('PipelineEditorView 混合式编辑器', () => {
     await wrapper.get('[data-testid="editor-back"]').trigger('click')
     await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('project-detail'))
     expect(router.currentRoute.value.query).toEqual({ tab: 'pipelines', view: 'compact' })
+    expect(scrollTo).not.toHaveBeenCalled()
+    scrollHeight = 1200
+    window.dispatchEvent(new Event('resize'))
+    await vi.waitFor(() => expect(scrollTo).toHaveBeenCalled())
     expect(scrollTo).toHaveBeenCalledWith({ top: 240, left: 0, behavior: 'auto' })
     wrapper.unmount()
 

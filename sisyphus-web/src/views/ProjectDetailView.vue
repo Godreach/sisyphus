@@ -61,6 +61,7 @@ import type {
   ProjectResponse,
 } from '@/api/types'
 import PipelineCreateDialog from '@/components/PipelineCreateDialog.vue'
+import { returnSourceQuery } from '@/utils/returnSource'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -215,7 +216,11 @@ function openPipeline(pipeline: string): void {
 }
 
 function openEditor(pipeline: string): void {
-  void router.push({ name: 'pipeline-edit', params: { name: projectName.value, pipeline } })
+  void router.push({
+    name: 'pipeline-edit',
+    params: { name: projectName.value, pipeline },
+    query: returnSourceQuery(route, router),
+  })
 }
 
 // ---------------------------------------------------------------------------

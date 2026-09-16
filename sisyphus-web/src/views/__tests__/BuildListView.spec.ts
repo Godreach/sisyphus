@@ -112,6 +112,20 @@ describe('BuildListView（分页 + 状态过滤）', () => {
 
     // 平板窄视口：七列表格设最小表宽，容器更窄时横向滚动而非挤压列。
     expect(wrapper.findComponent(NDataTable).props('scrollX')).toBe(840)
+
+    vi.spyOn(window, 'scrollY', 'get').mockReturnValue(96)
+    await router.replace('/projects/demo/pipelines/release/builds?status=failed')
+    const editLink = wrapper.findAllComponents({ name: 'RouterLink' }).find((link) =>
+      link.classes().includes('build-list-edit'),
+    )
+    expect(editLink?.props('to')).toEqual({
+      name: 'pipeline-edit',
+      params: { name: 'demo', pipeline: 'release' },
+      query: {
+        from: '/projects/demo/pipelines/release/builds?status=failed',
+        fromScroll: '96',
+      },
+    })
   })
 
   it('状态过滤：NSelect 选择 failed 后重新请求带 status 参数', async () => {

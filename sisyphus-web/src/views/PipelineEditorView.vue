@@ -65,9 +65,32 @@ async function returnToSource(): Promise<void> {
   const scroll = Number(rawScroll)
   await router.replace(safeReturnPath())
   if (rawScroll !== '' && Number.isFinite(scroll) && scroll >= 0) {
-    await nextTick()
+    await waitUntilScrollable(scroll)
     window.scrollTo({ top: scroll, left: 0, behavior: 'auto' })
   }
+}
+
+async function waitUntilScrollable(top: number): Promise<void> {
+  await nextTick()
+  const canReach = () =>
+    document.documentElement.scrollHeight - document.documentElement.clientHeight >= top
+  if (canReach()) return
+
+  await new Promise<void>((resolve) => {
+    const finish = () => {
+      observer.disconnect()
+      window.removeEventListener('resize', check)
+      clearTimeout(timeout)
+      resolve()
+    }
+    const check = () => {
+      if (canReach()) finish()
+    }
+    const observer = new MutationObserver(check)
+    const timeout = window.setTimeout(finish, 3000)
+    observer.observe(document.body, { childList: true, subtree: true })
+    window.addEventListener('resize', check)
+  })
 }
 
 const pipeline = ref<Pipeline | null>(null)
