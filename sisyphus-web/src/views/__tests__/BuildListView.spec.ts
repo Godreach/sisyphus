@@ -115,16 +115,11 @@ describe('BuildListView（分页 + 状态过滤）', () => {
 
     vi.spyOn(window, 'scrollY', 'get').mockReturnValue(96)
     await router.replace('/projects/demo/pipelines/release/builds?status=failed')
-    const editLink = wrapper.findAllComponents({ name: 'RouterLink' }).find((link) =>
-      link.classes().includes('build-list-edit'),
-    )
-    expect(editLink?.props('to')).toEqual({
-      name: 'pipeline-edit',
-      params: { name: 'demo', pipeline: 'release' },
-      query: {
-        from: '/projects/demo/pipelines/release/builds?status=failed',
-        fromScroll: '96',
-      },
+    await wrapper.get('.build-list-edit').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('pipeline-edit'))
+    expect(router.currentRoute.value.query).toEqual({
+      from: '/projects/demo/pipelines/release/builds?status=failed',
+      fromScroll: '96',
     })
   })
 

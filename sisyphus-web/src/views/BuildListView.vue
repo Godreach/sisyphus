@@ -49,11 +49,13 @@ const totalPages = computed(() =>
   list.value ? Math.max(1, Math.ceil(list.value.total / list.value.limit)) : 1,
 )
 
-const editorLocation = computed(() => ({
-  name: 'pipeline-edit',
-  params: { name: project.value, pipeline: pipeline.value },
-  query: returnSourceQuery(route, router),
-}))
+function openEditor(): void {
+  void router.push({
+    name: 'pipeline-edit',
+    params: { name: project.value, pipeline: pipeline.value },
+    query: returnSourceQuery(route, router),
+  })
+}
 
 async function loadList(): Promise<void> {
   loading.value = true
@@ -204,12 +206,13 @@ watch(
 
     <header class="build-list-header">
       <h1>{{ pipeline }}</h1>
-      <router-link
-        :to="editorLocation"
+      <button
+        type="button"
         class="build-list-edit"
+        @click="openEditor"
       >
         {{ t('buildList.editPipeline') }}
-      </router-link>
+      </button>
     </header>
 
     <div class="build-list-toolbar">
@@ -284,9 +287,14 @@ watch(
 }
 
 .build-list-edit {
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
   font-size: 13px;
   color: var(--n-text-color-link, #4f46e5);
   text-decoration: none;
+  cursor: pointer;
 }
 
 .build-list-edit:hover {

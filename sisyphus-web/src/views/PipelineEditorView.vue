@@ -16,7 +16,7 @@
 // #96: 迁移 Naive UI——页签改 NTabs、保存成功改 NMessage toast、错误面板改
 // NAlert、并发冲突改 NModal、保存/重载改 NButton，交互不变。
 
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { NAlert, NButton, NModal, NSkeleton, NTabs, NTabPane, useMessage } from 'naive-ui'
@@ -32,6 +32,7 @@ import PipelineTrack from '@/components/editor/PipelineTrack.vue'
 import JobFormPanel from '@/components/editor/JobFormPanel.vue'
 import ParametersTab from '@/components/editor/ParametersTab.vue'
 import EnvListEditor from '@/components/editor/EnvListEditor.vue'
+import { restoreScrollWhenReady } from '@/utils/returnSource'
 
 const route = useRoute()
 const router = useRouter()
@@ -41,11 +42,10 @@ const message = useMessage()
 const project = computed(() => String(route.params.name ?? ''))
 const pipelineName = computed(() => String(route.params.pipeline ?? ''))
 
-function safeReturnPath(): string {
+function safeReturnPath(): { path: string; valid: boolean } {
+  const fallback = { path: router.resolve({ name: 'pipelines' }).fullPath, valid: false }
   const raw = typeof route.query.from === 'string' ? route.query.from : ''
-  if (!raw.startsWith('/') || raw.startsWith('//')) {
-    return router.resolve({ name: 'pipelines' }).fullPath
-  }
+  if (!raw.startsWith('/') || raw.startsWith('//')) return fallback
   const resolved = router.resolve(raw)
   const routeName = resolved.name
   if (
@@ -55,42 +55,19 @@ function safeReturnPath(): string {
     routeName === 'setup' ||
     routeName === 'pipeline-edit'
   ) {
-    return router.resolve({ name: 'pipelines' }).fullPath
+    return fallback
   }
-  return resolved.fullPath
+  return { path: resolved.fullPath, valid: true }
 }
 
 async function returnToSource(): Promise<void> {
   const rawScroll = typeof route.query.fromScroll === 'string' ? route.query.fromScroll : ''
   const scroll = Number(rawScroll)
-  await router.replace(safeReturnPath())
-  if (rawScroll !== '' && Number.isFinite(scroll) && scroll >= 0) {
-    await waitUntilScrollable(scroll)
-    window.scrollTo({ top: scroll, left: 0, behavior: 'auto' })
+  const destination = safeReturnPath()
+  await router.replace(destination.path)
+  if (destination.valid && rawScroll !== '' && Number.isFinite(scroll) && scroll >= 0) {
+    restoreScrollWhenReady(scroll, router)
   }
-}
-
-async function waitUntilScrollable(top: number): Promise<void> {
-  await nextTick()
-  const canReach = () =>
-    document.documentElement.scrollHeight - document.documentElement.clientHeight >= top
-  if (canReach()) return
-
-  await new Promise<void>((resolve) => {
-    const finish = () => {
-      observer.disconnect()
-      window.removeEventListener('resize', check)
-      clearTimeout(timeout)
-      resolve()
-    }
-    const check = () => {
-      if (canReach()) finish()
-    }
-    const observer = new MutationObserver(check)
-    const timeout = window.setTimeout(finish, 3000)
-    observer.observe(document.body, { childList: true, subtree: true })
-    window.addEventListener('resize', check)
-  })
 }
 
 const pipeline = ref<Pipeline | null>(null)

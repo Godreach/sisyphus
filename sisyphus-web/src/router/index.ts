@@ -10,6 +10,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
 
 import { sessionGuard } from './guards'
+import { restoreScrollWhenReady } from '@/utils/returnSource'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -129,7 +130,8 @@ export const router = createRouter({
   history: createWebHistory(),
   routes,
   scrollBehavior(_to, _from, savedPosition) {
-    return savedPosition ?? false
+    if (savedPosition) restoreScrollWhenReady(savedPosition.top, router)
+    return false
   },
 })
 
