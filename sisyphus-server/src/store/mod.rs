@@ -81,6 +81,8 @@ pub enum StoreError {
     NotFound(String),
     /// 事务内条件更新未命中且重试耗尽（并发写冲突）。
     Conflict(String),
+    /// 条件创建失败：资源已经存在（HTTP 412）。
+    PreconditionFailed(String),
     /// 输入非法（如产物名含路径分隔符——产物名是磁盘路径段，非法名拒绝
     /// 落盘，票 #74）。
     Invalid(String),
@@ -118,6 +120,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Unique(what) => write!(f, "唯一冲突：{what}"),
             StoreError::NotFound(what) => write!(f, "不存在：{what}"),
             StoreError::Conflict(what) => write!(f, "并发写冲突：{what}"),
+            StoreError::PreconditionFailed(what) => write!(f, "前置条件失败：{what}"),
             StoreError::Invalid(what) => write!(f, "输入非法：{what}"),
             StoreError::DefinitionJson(e) => write!(f, "定义 JSON 编解码失败：{e}"),
         }

@@ -388,18 +388,81 @@ describe('PipelineEditorView 混合式编辑器', () => {
     wrapper.unmount()
   })
 
-  it('GET 404 → 空定义开始（未保存），新增阶段可用', async () => {
+  it('明确新建态 GET 404 → 内存空草稿，不预创建；首存带条件头并切普通态', async () => {
     mockDefinition({ code: 'NOT_FOUND', message: 'pipeline 不存在' }, 404)
+    await router.replace('/projects/proj-a/pipelines/main?create=1&from=/pipelines')
+    const headers: string[] = []
+    server.use(http.put(DEF_URL, async ({ request }) => {
+      headers.push(request.headers.get('If-None-Match') ?? '')
+      putBodies.push(await request.json())
+      return HttpResponse.json(saveResp(1))
+    }))
 
     const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.text()).toContain('未保存'))
-    expect(wrapper.text()).toContain('空定义')
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="editor-new-badge"]').exists()).toBe(true))
+    expect(wrapper.text()).toContain('proj-a')
+    expect(wrapper.text()).toContain('main')
+    expect(wrapper.find('[name="editor-save"]').text()).toContain('保存并创建')
+    expect(putBodies).toHaveLength(0)
     expect(wrapper.findAll('.stage-column').length).toBe(0)
 
-    // 空定义也可新增阶段。
     await wrapper.find('[name="track-add-stage"]').trigger('click')
     expect(wrapper.findAll('.stage-column').length).toBe(1)
+    await wrapper.find('[name="editor-save"]').trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('.editor-rev-value').text()).toBe('1'))
+    expect(headers).toEqual(['*'])
+    expect(wrapper.find('[data-testid="editor-new-badge"]').exists()).toBe(false)
+    expect(wrapper.find('[name="editor-save"]').text()).toBe('保存')
+    expect(router.currentRoute.value.query.create).toBeUndefined()
+    expect(router.currentRoute.value.query.from).toBe('/pipelines')
     wrapper.unmount()
+  })
+
+  it('新建态加载遇同名 → 阻止覆盖编辑，并允许主动打开已有', async () => {
+    mockDefinition(defResp())
+    await router.replace('/projects/proj-a/pipelines/main?create=1')
+    const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="create-name-conflict"]').exists()).toBe(true))
+    expect(wrapper.find('[name="editor-save"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="create-open-existing"]').trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('[name="editor-save"]').exists()).toBe(true))
+    expect(router.currentRoute.value.query.create).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('412 保留草稿、不降级覆盖；已修改草稿返回需确认，未修改可直接离开', async () => {
+    mockDefinition({ code: 'NOT_FOUND', message: 'pipeline 不存在' }, 404)
+    await router.replace('/projects/proj-a/pipelines/main?create=1&from=/pipelines')
+    const headers: string[] = []
+    server.use(http.put(DEF_URL, ({ request }) => {
+      headers.push(request.headers.get('If-None-Match') ?? '')
+      return HttpResponse.json(
+        { code: 'PRECONDITION_FAILED', message: 'already exists' },
+        { status: 412 },
+      )
+    }))
+    const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="editor-new-badge"]').exists()).toBe(true))
+    await wrapper.find('[name="track-add-stage"]').trigger('click')
+    await wrapper.find('[name="editor-save"]').trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('草稿已保留'))
+    expect(headers).toEqual(['*'])
+    expect(wrapper.findAll('.stage-column')).toHaveLength(1)
+    await wrapper.get('[data-testid="editor-back"]').trigger('click')
+    await vi.waitFor(() => expect(document.querySelector('[data-testid="unsaved-continue"]')).toBeTruthy())
+    await (document.querySelector('[data-testid="unsaved-continue"]') as HTMLElement).click()
+    expect(router.currentRoute.value.name).toBe('pipeline-edit')
+    await wrapper.get('[data-testid="editor-back"]').trigger('click')
+    await (document.querySelector('[data-testid="unsaved-discard"]') as HTMLElement).click()
+    await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('pipelines'))
+    wrapper.unmount()
+
+    await router.replace('/projects/proj-a/pipelines/main?create=1&from=/pipelines')
+    const clean = mountView()
+    await vi.waitFor(() => expect(clean.find('[data-testid="editor-new-badge"]').exists()).toBe(true))
+    await clean.get('[data-testid="editor-back"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('pipelines'))
+    clean.unmount()
   })
 
   it('参数页签：四类型 + 必填带默认值校验 + enum 候选项', async () => {

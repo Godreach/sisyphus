@@ -302,6 +302,14 @@ export const pipelinesApi = {
       `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}`,
       { json: definition },
     ),
+
+  /** 条件首建：`If-None-Match: *` 要求服务端仅在资源不存在时原子创建；
+   *  同名已存在返回 412，调用方必须保留草稿，绝不能退化成覆盖保存。 */
+  createDefinition: (project: string, pipeline: string, definition: unknown) =>
+    http.put<SaveDefinitionResponse>(
+      `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}`,
+      { json: definition, headers: { 'If-None-Match': '*' } },
+    ),
 }
 
 /** 构建端点（后端 `api/builds.rs`，ADR-0006/0008/0013）。 */

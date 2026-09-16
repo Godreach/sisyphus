@@ -78,6 +78,55 @@ impl PipelineRepo {
         ))
     }
 
+    /// 条件首存：仅当 `(project, pipeline)` 尚不存在时创建 revision=1。
+    ///
+    /// 关键语义是把项目存在性与 INSERT 放在同一原子语句中，并依赖数据库
+    /// 唯一键裁决并发首存；第二个请求不会退化为 upsert，也不会触碰已有
+    /// 定义或修订历史，而是返回 `PreconditionFailed`（HTTP 412）。
+    pub async fn create_if_absent(
+        &self,
+        project: &str,
+        pipeline_name: &str,
+        pipeline: &Pipeline,
+        operator: &str,
+    ) -> Result<Revision, StoreError> {
+        if let Err(errors) = sisyphus_model::validate::validate(pipeline) {
+            return Err(StoreError::InvalidDefinition(errors));
+        }
+        let definition = serde_json::to_string(pipeline).map_err(StoreError::DefinitionJson)?;
+        let now = now_ms();
+
+        let result = sqlx::query(
+            "INSERT INTO pipelines
+                (project_id, name, definition, revision, operator, created_at, updated_at)
+             SELECT id, ?, ?, 1, ?, ?, ? FROM projects WHERE name = ?",
+        )
+        .bind(pipeline_name)
+        .bind(definition)
+        .bind(operator)
+        .bind(now)
+        .bind(now)
+        .bind(project)
+        .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(result) if result.rows_affected() == 0 => {
+                Err(StoreError::NotFound(format!("项目 {project} 不存在")))
+            }
+            Ok(_) => Ok(Revision {
+                number: 1,
+                operator: operator.to_string(),
+                at_ms: now,
+            }),
+            Err(e) if is_unique_violation(&e) => Err(StoreError::PreconditionFailed(format!(
+                "流水线 {project}/{pipeline_name} 已存在"
+            ))),
+            Err(e) if is_busy(&e) => Err(StoreError::Conflict("条件创建遇到数据库写竞争".into())),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// 读当前定义；pipeline 不存在返回 `None`（项目不存在同样视为 `None`，
     /// 资源寻径差异由 API 层裁决）。
     pub async fn get(
@@ -416,6 +465,60 @@ mod tests {
         // 不存在：None。
         assert!(repo.get("demo", "nope").await.expect("读取").is_none());
         assert!(repo.get("nope", "build").await.expect("读取").is_none());
+    }
+
+    #[tokio::test]
+    async fn conditional_create_never_overwrites_existing_pipeline() {
+        let (_dir, repo) = fixture().await;
+        let original = minimal_pipeline();
+        let r1 = repo
+            .create_if_absent("demo", "build", &original, "alice")
+            .await
+            .expect("条件首建");
+        assert_eq!(r1.number, 1);
+
+        let mut replacement = minimal_pipeline();
+        replacement.name = "replacement".into();
+        let err = repo
+            .create_if_absent("demo", "build", &replacement, "bob")
+            .await
+            .expect_err("同名条件首建必须失败");
+        assert!(matches!(err, StoreError::PreconditionFailed(_)));
+
+        let stored = repo.get("demo", "build").await.unwrap().unwrap();
+        assert_eq!(stored.revision, 1, "失败首建不得生成新修订");
+        assert_eq!(stored.operator, "alice", "失败首建不得覆盖操作人");
+        let back: Pipeline = serde_json::from_str(&stored.definition).unwrap();
+        assert_eq!(back, original, "失败首建不得覆盖已有定义");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_conditional_create_has_exactly_one_winner() {
+        let (_dir, repo) = fixture().await;
+        let mut handles = Vec::new();
+        for i in 0..2 {
+            let repo = repo.clone();
+            handles.push(tokio::spawn(async move {
+                let mut definition = minimal_pipeline();
+                definition.name = format!("candidate-{i}");
+                repo.create_if_absent("demo", "race", &definition, &format!("user-{i}"))
+                    .await
+            }));
+        }
+        let mut successes = 0;
+        let mut preconditions = 0;
+        for handle in handles {
+            match handle.await.expect("join") {
+                Ok(revision) => {
+                    successes += 1;
+                    assert_eq!(revision.number, 1);
+                }
+                Err(StoreError::PreconditionFailed(_)) => preconditions += 1,
+                Err(other) => panic!("unexpected error: {other}"),
+            }
+        }
+        assert_eq!((successes, preconditions), (1, 1));
+        assert_eq!(repo.get("demo", "race").await.unwrap().unwrap().revision, 1);
     }
 
     #[tokio::test]

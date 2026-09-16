@@ -123,6 +123,16 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, "CONFLICT", what, None)
     }
 
+    /// 412：条件创建发现资源已存在；调用方应保留草稿并改名或打开已有资源。
+    pub fn precondition_failed(what: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::PRECONDITION_FAILED,
+            "PRECONDITION_FAILED",
+            what,
+            None,
+        )
+    }
+
     /// 504：上游（Agent 经通道查询）超时——Agent 在线但未在窗口内回响应帧
     /// （票 #76，ADR-0011/0012 列表经通道往返）。
     pub fn gateway_timeout(what: impl Into<String>) -> Self {
@@ -172,6 +182,7 @@ impl From<StoreError> for ApiError {
                     .collect(),
             ),
             StoreError::NotFound(what) => ApiError::resource_not_found(what),
+            StoreError::PreconditionFailed(what) => ApiError::precondition_failed(what),
             StoreError::Unique(what) | StoreError::Conflict(what) => ApiError::conflict(what),
             other => ApiError::internal("store", &other),
         }

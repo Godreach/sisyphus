@@ -10,6 +10,7 @@
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -88,7 +89,7 @@ pub async fn get_definition(
 }
 
 /// 保存 pipeline 定义（项目 admin 档，票 B2b-T5；upsert：首存 revision=1，
-/// 续存 +1；操作人为认证用户实名，票 B2b-T1）。
+/// 续存 +1；可选 If-None-Match: * 原子首建，已存在返回 412，票 #120）。
 #[utoipa::path(
     put,
     path = "/api/v1/projects/{name}/pipelines/{pipeline}",
@@ -97,6 +98,7 @@ pub async fn get_definition(
     params(
         ("name" = String, Path, description = "项目名"),
         ("pipeline" = String, Path, description = "pipeline 名"),
+        ("If-None-Match" = Option<String>, Header, description = "首次创建时传 *，原子保证不存在；同名已存在返回 412 且不覆盖。普通编辑不传此头。"),
     ),
     responses(
         (status = 200, description = "已保存，返回新修订版本", body = SaveDefinitionResponse),
@@ -104,6 +106,7 @@ pub async fn get_definition(
         (status = 403, description = "项目权限不足（保存定义需项目 admin 档）", body = ErrorBody),
         (status = 404, description = "项目不存在或不可见（不泄露存在性）", body = ErrorBody),
         (status = 422, description = "model 校验失败，错误清单整组透传", body = ErrorBody),
+        (status = 412, description = "条件首建失败：同项目同名流水线已存在", body = ErrorBody),
     )
 )]
 pub async fn put_definition(
@@ -111,15 +114,29 @@ pub async fn put_definition(
     axum::Extension(auth): axum::Extension<super::auth::AuthContext>,
     RequireAdmin(access): RequireAdmin,
     Path((_project_name, pipeline)): Path<(String, String)>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<SaveDefinitionResponse>, ApiError> {
     // 先落 model 类型：形态错也是校验失败（统一 422 形态，不走 axum 默认拒绝）。
     let definition: Pipeline = parse_body(&body)?;
     // 操作人实名：认证中间件注入的登录用户名（票 B2b-T1）。
-    let revision = state
-        .pipelines
-        .save(&access.project.name, &pipeline, &definition, &auth.username)
-        .await?;
+    // `If-None-Match: *` 是新建态唯一允许的条件首建语义。普通 PUT 不带该头，
+    // 继续沿用历史 upsert 行为，保证已有编辑器/脚本兼容。
+    let revision = if headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim() == "*")
+    {
+        state
+            .pipelines
+            .create_if_absent(&access.project.name, &pipeline, &definition, &auth.username)
+            .await?
+    } else {
+        state
+            .pipelines
+            .save(&access.project.name, &pipeline, &definition, &auth.username)
+            .await?
+    };
     Ok(Json(SaveDefinitionResponse {
         revision: revision.number,
         operator: revision.operator,

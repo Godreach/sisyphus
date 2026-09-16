@@ -168,6 +168,85 @@ async fn role_matrix_on_definition_endpoints() {
     assert_eq!(body_json(resp).await["operator"], "carol");
 }
 
+/// 两名项目管理员同时首次创建：HTTP 条件在服务端裁决，不依赖 GET 预检。
+#[tokio::test]
+async fn conditional_pipeline_create_is_atomic_and_ordinary_edit_stays_compatible() {
+    let (app, admin, alice, _bob, carol, _dave) = fixture_with_roles("demo").await;
+    let headers = [
+        ("sec-fetch-site", "same-origin".to_string()),
+        ("if-none-match", "*".to_string()),
+    ];
+    let path = "/api/v1/projects/demo/pipelines/build";
+    let first = valid_definition();
+    let second = first.replace("cargo build", "cargo test");
+    let (a, b) = tokio::join!(
+        common::custom_req(
+            &app,
+            "PUT",
+            path,
+            Some(first.clone()),
+            Some(&admin),
+            &headers,
+            common::DEFAULT_PEER
+        ),
+        common::custom_req(
+            &app,
+            "PUT",
+            path,
+            Some(second.clone()),
+            Some(&carol),
+            &headers,
+            common::DEFAULT_PEER
+        ),
+    );
+    let a_won = a.status() == StatusCode::OK;
+    let mut statuses = [a.status().as_u16(), b.status().as_u16()];
+    statuses.sort_unstable();
+    assert_eq!(statuses, [200, 412]);
+    let (winner, loser) = if a_won { (a, b) } else { (b, a) };
+    assert_eq!(body_json(winner).await["revision"], 1);
+    assert_eq!(body_json(loser).await["code"], "PRECONDITION_FAILED");
+    let stored = body_json(get_definition(&app, &alice, "demo").await).await;
+    assert_eq!(stored["revision"], 1);
+    let expected: sisyphus_model::pipeline::Pipeline =
+        serde_json::from_str(if a_won { &first } else { &second }).unwrap();
+    let actual: sisyphus_model::pipeline::Pipeline =
+        serde_json::from_value(stored["definition"].clone()).unwrap();
+    assert_eq!(actual, expected);
+    // 条件失败既不覆盖定义，也不产生新的修订；普通 PUT 继续递增。
+    assert_eq!(
+        body_json(put_definition(&app, &carol, "demo").await).await["revision"],
+        2
+    );
+    for (cookie, project, status) in [
+        (&alice, "demo", StatusCode::FORBIDDEN),
+        (&admin, "missing", StatusCode::NOT_FOUND),
+    ] {
+        let response = common::custom_req(
+            &app,
+            "PUT",
+            &format!("/api/v1/projects/{project}/pipelines/new"),
+            Some(first.clone()),
+            Some(cookie),
+            &headers,
+            common::DEFAULT_PEER,
+        )
+        .await;
+        assert_eq!(response.status(), status);
+    }
+    let invalid = common::custom_req(
+        &app,
+        "PUT",
+        "/api/v1/projects/demo/pipelines/invalid",
+        Some("{}".into()),
+        Some(&admin),
+        &headers,
+        common::DEFAULT_PEER,
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
 /// 无角色已登录用户：项目列表不含、单查与定义读写都 404（不泄存在性）；
 /// 非全局 admin 建项目 403；普通用户列表只含有角色的项目。
 #[tokio::test]

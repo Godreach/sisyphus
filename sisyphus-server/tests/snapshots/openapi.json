@@ -2259,7 +2259,7 @@
         "tags": [
           "pipelines"
         ],
-        "summary": "保存 pipeline 定义（项目 admin 档，票 B2b-T5；upsert：首存 revision=1，\n续存 +1；操作人为认证用户实名，票 B2b-T1）。",
+        "summary": "保存 pipeline 定义（项目 admin 档，票 B2b-T5；upsert：首存 revision=1，\n续存 +1；可选 If-None-Match: * 原子首建，已存在返回 412，票 #120）。",
         "operationId": "put_definition",
         "parameters": [
           {
@@ -2278,6 +2278,18 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "description": "首次创建时传 *，原子保证不存在；同名已存在返回 412 且不覆盖。普通编辑不传此头。",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -2324,6 +2336,16 @@
           },
           "404": {
             "description": "项目不存在或不可见（不泄露存在性）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "条件首建失败：同项目同名流水线已存在",
             "content": {
               "application/json": {
                 "schema": {
@@ -5585,6 +5607,7 @@
           "slots_used",
           "slots_total",
           "builds_terminal",
+          "builds_today",
           "artifact_bytes",
           "log_bytes",
           "alerts",
@@ -5615,7 +5638,11 @@
           },
           "builds_terminal": {
             "$ref": "#/components/schemas/BuildsTerminalCounts",
-            "description": "构建终态计数。"
+            "description": "构建终态计数（全量历史）。"
+          },
+          "builds_today": {
+            "$ref": "#/components/schemas/BuildsTerminalCounts",
+            "description": "当天完成的构建终态计数（按服务端本地日历日）。"
           },
           "log_bytes": {
             "type": "integer",

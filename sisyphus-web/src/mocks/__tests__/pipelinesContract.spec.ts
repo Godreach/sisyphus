@@ -126,6 +126,23 @@ describe('Pipeline 定义端点 mock 契约（票 #109）', () => {
     expect(((await get.json()) as DefinitionResponse).revision).toBe(1)
   })
 
+  it('并发 If-None-Match 首建仅一个成功、另一个 412，定义与修订不被覆盖', async () => {
+    const url = `${BASE}/projects/web-app/pipelines/conditional-race`
+    const definitions = [validDefinition({ name: 'candidate-a' }), validDefinition({ name: 'candidate-b' })]
+    const responses = await Promise.all(definitions.map(definition => fetch(url, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', 'If-None-Match': '*' }, body: JSON.stringify(definition),
+    })))
+    expect(responses.map(r => r.status).sort()).toEqual([200, 412])
+    const winner = responses.findIndex(r => r.status === 200)
+    const saved = await (await fetch(url)).json() as DefinitionResponse
+    expect(saved.revision).toBe(1)
+    expect(saved.definition).toEqual(definitions[winner])
+    const rejected = await responses.find(r => r.status === 412)!.json() as { code: string }
+    expect(rejected.code).toBe('PRECONDITION_FAILED')
+    const ordinary = await json('/projects/web-app/pipelines/conditional-race', 'PUT', validDefinition())
+    expect((await ordinary.json() as { revision: number }).revision).toBe(2)
+  })
+
   it('PUT model 校验失败 → 422 VALIDATION_FAILED 错误清单整组透传', async () => {
     // 空 shell 命令 → shell_command_empty；必填参数无默认 → required_parameter_default。
     const def = validDefinition({

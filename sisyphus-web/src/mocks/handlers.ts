@@ -247,6 +247,21 @@ export function createHandlers(options: MockHandlerOptions) {
       )
     }),
 
+    projectsList: http.get('/api/v1/projects', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      await delay(150)
+      const permission = new URL(request.url).searchParams.get('permission')
+      if (permission != null && permission !== 'admin') {
+        return validationError([{ path: 'permission', message: 'permission 只支持 admin' }])
+      }
+      const user = sessionUser(request) ?? 'admin'
+      return HttpResponse.json(db.PROJECTS.filter(project => {
+        const role = db.projectRoleOf(user, project.name)
+        return permission === 'admin' ? role === 'admin' : role != null
+      }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    }),
+
     projectCreate: http.post('/api/v1/projects', async ({ request }) => {
       const denied = guard(options, request)
       if (denied != null) return denied
@@ -519,6 +534,10 @@ export function createHandlers(options: MockHandlerOptions) {
         const errors = validatePipeline(body)
         if (errors.length > 0) {
           return validationError(errors)
+        }
+        // 检查到写入之间不得 await：与服务端单条 INSERT 的原子首建同义。
+        if (request.headers.get('If-None-Match')?.trim() === '*' && db.getPipelineDefinition(name, pipeline) != null) {
+          return jsonError(412, 'PRECONDITION_FAILED', `流水线 ${name}/${pipeline} 已存在`)
         }
         const stored = db.savePipelineDefinition(name, pipeline, body, user)
         return HttpResponse.json({
