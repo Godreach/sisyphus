@@ -88,6 +88,8 @@ pub struct ProjectResponse {
     pub created_at: i64,
     /// 最后更新时间（Unix 毫秒）。
     pub updated_at: i64,
+    /// 项目下的流水线定义数量。
+    pub pipeline_count: i64,
 }
 
 impl From<Project> for ProjectResponse {
@@ -100,6 +102,7 @@ impl From<Project> for ProjectResponse {
             default_branch: p.default_branch,
             created_at: p.created_at,
             updated_at: p.updated_at,
+            pipeline_count: p.pipeline_count,
         }
     }
 }

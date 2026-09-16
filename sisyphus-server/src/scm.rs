@@ -757,6 +757,7 @@ mod tests {
             default_branch: Some("main".into()),
             created_at: 0,
             updated_at: 0,
+            pipeline_count: 0,
         }
     }
 

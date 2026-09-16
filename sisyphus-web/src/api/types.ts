@@ -43,6 +43,7 @@ export interface ProjectResponse {
   default_branch: string | null
   created_at: number
   updated_at: number
+  pipeline_count: number
 }
 
 /** 建项目请求体（后端 `CreateProjectRequest`）。 */

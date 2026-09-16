@@ -68,6 +68,7 @@
     "newProject": "New project",
     "searchPlaceholder": "Search projects…",
     "searchEmpty": "No matching projects",
+    "pipelineCount": "{count} pipelines",
     "save": "Save",
     "saving": "Saving…",
     "empty": "No projects yet",

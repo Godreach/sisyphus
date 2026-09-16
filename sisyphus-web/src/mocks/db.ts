@@ -200,6 +200,7 @@ function project(
     default_branch: scmType === 'git' ? 'main' : null,
     created_at: NOW - 90 * 86400e3,
     updated_at: NOW - 3 * 86400e3,
+    pipeline_count: 0,
   }
 }
 
@@ -538,6 +539,11 @@ export function pipelineListItems(): PipelineListResponse {
     .sort((a, b) => a.project.localeCompare(b.project) || a.name.localeCompare(b.name))
     .map((p, i) => ({ project: p.project, pipeline: p.name, updated_at: NOW - (i + 1) * 3600e3 }))
   return { items, total: items.length }
+}
+
+/** 项目卡片使用的流水线定义数量（与权威清单同一 fixture 来源）。 */
+export function pipelineCountOf(project: string): number {
+  return PIPELINES.filter((pipeline) => pipeline.project === project).length
 }
 
 // ---------------------------------------------------------------------------

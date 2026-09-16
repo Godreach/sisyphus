@@ -258,6 +258,7 @@ async fn projects_round_trip() {
     assert_eq!(alpha["name"], "alpha");
     assert_eq!(alpha["scm_type"], "git");
     assert!(alpha["default_branch"].is_null(), "git 默认分支可空");
+    assert_eq!(alpha["pipeline_count"], 0, "新项目的流水线数量为零");
     assert!(alpha["id"].as_i64().is_some_and(|id| id > 0));
 
     let resp = authed_post(

@@ -72,6 +72,8 @@ pub struct Project {
     pub created_at: i64,
     /// 最后更新时间（Unix 毫秒）。
     pub updated_at: i64,
+    /// 项目下的流水线定义数量。
+    pub pipeline_count: i64,
 }
 
 /// 项目元数据 repo：list / create / get。
@@ -88,12 +90,17 @@ impl ProjectRepo {
 
     /// 列出全部项目（按名排序，输出稳定便于测试与展示）。
     pub async fn list(&self) -> Result<Vec<Project>, StoreError> {
-        let rows = sqlx::query_as::<_, (i64, String, String, String, Option<String>, i64, i64)>(
-            "SELECT id, name, scm_type, scm_url, default_branch, created_at, updated_at
-             FROM projects ORDER BY name",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows =
+            sqlx::query_as::<_, (i64, String, String, String, Option<String>, i64, i64, i64)>(
+                "SELECT p.id, p.name, p.scm_type, p.scm_url, p.default_branch,
+                    p.created_at, p.updated_at, COUNT(pl.id)
+             FROM projects p
+             LEFT JOIN pipelines pl ON pl.project_id = p.id
+             GROUP BY p.id
+             ORDER BY p.name",
+            )
+            .fetch_all(&self.pool)
+            .await?;
         rows.into_iter().map(Project::from_row).collect()
     }
 
@@ -130,18 +137,22 @@ impl ProjectRepo {
         user_id: i64,
         required_role: Option<&str>,
     ) -> Result<Vec<Project>, StoreError> {
-        let rows = sqlx::query_as::<_, (i64, String, String, String, Option<String>, i64, i64)>(
-            "SELECT p.id, p.name, p.scm_type, p.scm_url, p.default_branch,
-                    p.created_at, p.updated_at
-             FROM projects p JOIN project_members m ON m.project_id = p.id
+        let rows =
+            sqlx::query_as::<_, (i64, String, String, String, Option<String>, i64, i64, i64)>(
+                "SELECT p.id, p.name, p.scm_type, p.scm_url, p.default_branch,
+                    p.created_at, p.updated_at, COUNT(pl.id)
+             FROM projects p
+             JOIN project_members m ON m.project_id = p.id
+             LEFT JOIN pipelines pl ON pl.project_id = p.id
              WHERE m.user_id = ? AND (? IS NULL OR m.role = ?)
+             GROUP BY p.id
              ORDER BY p.name",
-        )
-        .bind(user_id)
-        .bind(required_role)
-        .bind(required_role)
-        .fetch_all(&self.pool)
-        .await?;
+            )
+            .bind(user_id)
+            .bind(required_role)
+            .bind(required_role)
+            .fetch_all(&self.pool)
+            .await?;
         rows.into_iter().map(Project::from_row).collect()
     }
 
@@ -177,31 +188,42 @@ impl ProjectRepo {
             default_branch: input.default_branch,
             created_at: now,
             updated_at: now,
+            pipeline_count: 0,
         })
     }
 
     /// 按名取项目；不存在返回 `None`。
     pub async fn get_by_name(&self, name: &str) -> Result<Option<Project>, StoreError> {
-        let row = sqlx::query_as::<_, (i64, String, String, String, Option<String>, i64, i64)>(
-            "SELECT id, name, scm_type, scm_url, default_branch, created_at, updated_at
-             FROM projects WHERE name = ?",
-        )
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query_as::<_, (i64, String, String, String, Option<String>, i64, i64, i64)>(
+                "SELECT p.id, p.name, p.scm_type, p.scm_url, p.default_branch,
+                    p.created_at, p.updated_at, COUNT(pl.id)
+             FROM projects p
+             LEFT JOIN pipelines pl ON pl.project_id = p.id
+             WHERE p.name = ?
+             GROUP BY p.id",
+            )
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await?;
         row.map(Project::from_row).transpose()
     }
 
     /// 按行 id 取项目；不存在返回 `None`（engine 组装 SCM 上下文按
     /// builds.project_id 寻径）。
     pub async fn get_by_id(&self, id: i64) -> Result<Option<Project>, StoreError> {
-        let row = sqlx::query_as::<_, (i64, String, String, String, Option<String>, i64, i64)>(
-            "SELECT id, name, scm_type, scm_url, default_branch, created_at, updated_at
-             FROM projects WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query_as::<_, (i64, String, String, String, Option<String>, i64, i64, i64)>(
+                "SELECT p.id, p.name, p.scm_type, p.scm_url, p.default_branch,
+                    p.created_at, p.updated_at, COUNT(pl.id)
+             FROM projects p
+             LEFT JOIN pipelines pl ON pl.project_id = p.id
+             WHERE p.id = ?
+             GROUP BY p.id",
+            )
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         row.map(Project::from_row).transpose()
     }
 }
@@ -209,7 +231,7 @@ impl ProjectRepo {
 impl Project {
     /// 手工行映射（列形态唯一收敛点，免逐查询散落 `Row::get`）。
     fn from_row(
-        row: (i64, String, String, String, Option<String>, i64, i64),
+        row: (i64, String, String, String, Option<String>, i64, i64, i64),
     ) -> Result<Self, StoreError> {
         Ok(Self {
             id: row.0,
@@ -219,6 +241,7 @@ impl Project {
             default_branch: row.4,
             created_at: row.5,
             updated_at: row.6,
+            pipeline_count: row.7,
         })
     }
 }
@@ -255,12 +278,13 @@ mod tests {
     #[tokio::test]
     async fn create_get_list_round_trip() {
         let (_dir, pool) = migrated_pool().await;
-        let repo = ProjectRepo::new(pool);
+        let repo = ProjectRepo::new(pool.clone());
 
         let created = repo.create(new_project("demo")).await.expect("创建");
         assert!(created.id > 0);
         assert_eq!(created.scm_type, ScmType::Git);
         assert_eq!(created.default_branch.as_deref(), Some("main"));
+        assert_eq!(created.pipeline_count, 0);
         assert!(created.created_at > 0 && created.updated_at == created.created_at);
 
         repo.create(NewProject {
@@ -286,6 +310,26 @@ mod tests {
         assert_eq!(names, ["demo", "svn-proj"]);
         assert_eq!(all[1].scm_type, ScmType::Svn);
         assert_eq!(all[1].default_branch, None);
+
+        // 项目清单与单查都携带流水线定义数量，避免项目页额外拉全量流水线。
+        sqlx::query(
+            "INSERT INTO pipelines
+                (project_id, name, definition, revision, operator, created_at, updated_at)
+             VALUES (?, 'main', '{}', 1, 'admin', 1, 1)",
+        )
+        .bind(created.id)
+        .execute(&pool)
+        .await
+        .expect("插入流水线");
+        assert_eq!(
+            repo.get_by_name("demo")
+                .await
+                .expect("读取")
+                .expect("应存在")
+                .pipeline_count,
+            1
+        );
+        assert_eq!(repo.list().await.expect("清单")[0].pipeline_count, 1);
 
         // 不存在的名字：None 而非错误。
         assert!(repo.get_by_name("nope").await.expect("读取").is_none());

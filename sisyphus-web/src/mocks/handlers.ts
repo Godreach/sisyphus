@@ -259,7 +259,10 @@ export function createHandlers(options: MockHandlerOptions) {
       return HttpResponse.json(db.PROJECTS.filter(project => {
         const role = db.projectRoleOf(user, project.name)
         return permission === 'admin' ? role === 'admin' : role != null
-      }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      }).map(project => ({
+        ...project,
+        pipeline_count: db.pipelineCountOf(project.name),
+      })).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     }),
 
     projectCreate: http.post('/api/v1/projects', async ({ request }) => {
@@ -281,6 +284,7 @@ export function createHandlers(options: MockHandlerOptions) {
         default_branch: body.default_branch ?? null,
         created_at: Date.now(),
         updated_at: Date.now(),
+        pipeline_count: 0,
       }
       db.PROJECTS.push(project)
       return HttpResponse.json(project, { status: 201 })

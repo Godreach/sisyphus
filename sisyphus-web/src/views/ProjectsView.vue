@@ -404,9 +404,15 @@ function onScmTypeChange(v: ScmTypeDto): void {
           </template>
           <p v-if="p.scm_url" class="project-card-meta mono">{{ p.scm_url }}</p>
           <p v-else class="project-card-meta">{{ t('projects.scmNone') }}</p>
-          <div v-if="p.default_branch" class="project-card-branch">
-            <n-icon :component="GitBranch" class="project-card-branch-icon" />
-            <span class="project-card-branch-text">{{ p.default_branch }}</span>
+          <div class="project-card-footer">
+            <div v-if="p.default_branch" class="project-card-branch">
+              <n-icon :component="GitBranch" class="project-card-branch-icon" />
+              <span class="project-card-branch-text">{{ p.default_branch }}</span>
+            </div>
+            <span v-else aria-hidden="true" />
+            <span class="project-card-pipeline-count">
+              {{ t('projects.pipelineCount', { count: p.pipeline_count }) }}
+            </span>
           </div>
         </n-card>
       </div>
@@ -470,6 +476,18 @@ function onScmTypeChange(v: ScmTypeDto): void {
 .project-card {
   cursor: pointer;
   min-height: 144px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.project-card:hover,
+.project-card:focus-visible {
+  border-color: var(--sisy-color-primary);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+}
+
+.project-card:focus-visible {
+  outline: 2px solid var(--sisy-color-primary);
+  outline-offset: 2px;
 }
 
 .project-card-name {
@@ -488,6 +506,19 @@ function onScmTypeChange(v: ScmTypeDto): void {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.project-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.project-card-pipeline-count {
+  flex-shrink: 0;
+  color: var(--sisy-color-text-secondary);
+  font-size: 12px;
 }
 
 .project-card-branch-icon {

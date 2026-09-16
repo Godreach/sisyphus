@@ -68,6 +68,7 @@
     "newProject": "新建项目",
     "searchPlaceholder": "搜索项目…",
     "searchEmpty": "没有匹配的项目",
+    "pipelineCount": "{count} 条流水线",
     "save": "保存",
     "saving": "提交中…",
     "empty": "暂无项目",

@@ -22,7 +22,7 @@ function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers })
 }
 
-function project(id: number, name: string, scmType: 'git' | 'svn' | 'none', url: string) {
+function project(id: number, name: string, scmType: 'git' | 'svn' | 'none', url: string, pipelineCount = 0) {
   return {
     id,
     name,
@@ -31,6 +31,7 @@ function project(id: number, name: string, scmType: 'git' | 'svn' | 'none', url:
     default_branch: scmType === 'git' ? 'main' : null,
     created_at: 0,
     updated_at: 0,
+    pipeline_count: pipelineCount,
   }
 }
 
@@ -376,7 +377,7 @@ describe('ProjectsView Naive UI 迁移（#92）', () => {
 
   it('项目列表改用卡片布局（NCard）：每个项目一张卡，显示名称/SCM 类型/默认分支', async () => {
     fetchMock.mockResolvedValue(
-      jsonResponse(200, [project(1, 'demo', 'git', 'https://x/a.git'), project(2, 'legacy', 'svn', 'https://svn/x/trunk')]),
+      jsonResponse(200, [project(1, 'demo', 'git', 'https://x/a.git', 3), project(2, 'legacy', 'svn', 'https://svn/x/trunk')]),
     )
     wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.findAll('.n-card').length).toBeGreaterThanOrEqual(2))
@@ -386,6 +387,7 @@ describe('ProjectsView Naive UI 迁移（#92）', () => {
     const demoCard = wrapper.findAll('.project-card').find((c) => c.text().includes('demo'))!
     expect(demoCard.text()).toContain('git')
     expect(demoCard.text()).toContain('main')
+    expect(demoCard.text()).toContain('3 条流水线')
   })
 
   it('项目搜索按名称、URL 和 SCM 类型过滤卡片', async () => {
