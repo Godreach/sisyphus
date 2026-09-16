@@ -47,12 +47,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'nav.machines' },
   },
   {
-    // 旧列表入口重定向（侧栏仅三项；深链不断）。
+    // 旧列表入口重定向（深链不断）。
     path: '/agents',
     redirect: { name: 'machines' },
   },
   {
-    // 项目管理页（侧栏无入口；流水线页顶栏从这里选择已有项目）。
+    // 项目库一级入口（复用现有项目列表；流水线新建也从这里选择已有项目）。
     path: '/projects',
     name: 'projects',
     component: () => import('@/views/ProjectsView.vue'),

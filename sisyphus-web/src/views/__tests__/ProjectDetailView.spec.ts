@@ -161,9 +161,9 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
     )
     expect(wrapper.find('[data-testid="project-detail-skeleton"]').exists()).toBe(false)
 
-    // 面包屑：项目 / web-app。
+    // 面包屑：项目库 / web-app；单个项目仍用项目名称。
     const breadcrumb = wrapper.get('nav.breadcrumb')
-    expect(breadcrumb.text()).toContain('项目')
+    expect(breadcrumb.find('a').text()).toBe('项目库')
     expect(breadcrumb.text()).toContain('web-app')
 
     // scm 类型徽章 + 元信息卡。

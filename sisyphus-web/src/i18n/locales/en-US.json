@@ -298,6 +298,7 @@
     "main": "Main",
     "admin": "Admin",
     "workbench": "Dashboard",
+    "projects": "Projects",
     "pipelines": "Pipelines",
     "machines": "Build Machines"
   },

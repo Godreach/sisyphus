@@ -243,7 +243,7 @@ body.sidebar-resizing {
   padding: 0 12px;
 }
 
-/* 批注 2：桌面端三项主导航保持在品牌区下方，并恢复带缩进的左对齐；
+/* 批注 2：桌面端四项主导航保持在品牌区下方，并恢复带缩进的左对齐；
    抽屉继续复用相同的阅读起点。 */
 .app-sidebar > .sidebar-nav {
   padding: 0 28px;

@@ -15,6 +15,7 @@ import { defineComponent, h } from 'vue'
 
 import ProjectsView from '@/views/ProjectsView.vue'
 import { i18n, setLocale } from '@/i18n'
+import { useAuthStore } from '@/stores/auth'
 
 function jsonResponse(status: number, body: unknown): Response {
   const headers = new Headers({ 'Content-Type': 'application/json' })
@@ -57,6 +58,7 @@ describe('ProjectsView 项目列表 + 新建', () => {
     setLocale('zh-CN')
     pinia = createPinia()
     setActivePinia(pinia)
+    useAuthStore().setAuthed({ username: 'admin', isAdmin: true })
     router = createRouter({
       history: createMemoryHistory(),
       routes: [
@@ -93,6 +95,18 @@ describe('ProjectsView 项目列表 + 新建', () => {
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.text()).toContain('暂无项目'))
     expect(wrapper.find('.project-modal-mask').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('普通用户可查看空项目库，但没有新建入口，直访创建参数也不打开表单', async () => {
+    useAuthStore().setAuthed({ username: 'alice', isAdmin: false })
+    fetchMock.mockResolvedValue(jsonResponse(200, []))
+    await router.replace('/projects?create=1')
+    const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.text()).toContain('暂无项目'))
+    expect(wrapper.find('.project-empty-action').exists()).toBe(false)
+    expect(wrapper.find('.project-modal-mask').exists()).toBe(false)
+    expect(router.currentRoute.value.query.create).toBeUndefined()
     wrapper.unmount()
   })
 
@@ -300,7 +314,7 @@ describe('ProjectsView 项目列表 + 新建', () => {
     wrapper.unmount()
   })
 
-  it('新建失败（403 非全局 admin）→ 就地展示错误，表单停留', async () => {
+  it('新建被服务端拒绝（403）→ 就地展示错误，表单停留', async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, []))
     const wrapper = mountView()
     await vi.waitFor(() => expect(wrapper.text()).toContain('暂无项目'))
@@ -342,6 +356,7 @@ describe('ProjectsView Naive UI 迁移（#92）', () => {
     setLocale('zh-CN')
     pinia = createPinia()
     setActivePinia(pinia)
+    useAuthStore().setAuthed({ username: 'admin', isAdmin: true })
     router = createRouter({
       history: createMemoryHistory(),
       routes: [

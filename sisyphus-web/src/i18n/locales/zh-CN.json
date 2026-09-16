@@ -33,7 +33,7 @@
     "step2Title": "构建机",
     "step2Desc": "创建首台构建机条目，签发一次性注册码与构建机 token。注册命令在构建机上执行。",
     "step3Title": "项目",
-    "step3Desc": "创建首个项目（git/svn）。项目的 pipeline 定义可在项目页继续配置。",
+    "step3Desc": "创建首个项目（git/svn）。项目的 pipeline 定义可在项目库继续配置。",
     "skip": "跳过",
     "finish": "完成",
     "next": "下一步",
@@ -298,12 +298,13 @@
     "main": "主区",
     "admin": "管理",
     "workbench": "工作台",
+    "projects": "项目库",
     "pipelines": "流水线",
     "machines": "构建机"
   },
   "routes": {
     "overview": "工作台",
-    "projects": "项目",
+    "projects": "项目库",
     "projectDetail": "项目详情",
     "pipelineEdit": "流水线编辑",
     "buildList": "构建列表",
@@ -396,7 +397,7 @@
     "retry": "重试",
     "emptyStages": "该构建没有阶段/任务记录。",
     "triggerConflict": "无法触发（409）：同一条流水线同时只跑一条构建，请稍后重试。",
-    "backToProjects": "返回项目列表"
+    "backToProjects": "返回项目库"
   },
   "buildLog": {
     "title": "日志",
@@ -418,7 +419,7 @@
   },
   "secrets": {
     "project": "项目",
-    "noProjects": "暂无项目——机密挂在项目下，请先在项目页建项目。",
+    "noProjects": "暂无项目——机密挂在项目下，请先在项目库新建项目。",
     "writeTitle": "写 / 覆写机密",
     "name": "机密名",
     "namePlaceholder": "DEPLOY_KEY",

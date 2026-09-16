@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Headless 冒烟（票 B4-T9 / #71 AC）：构建产物 + 预览端口点击走通 15 条主路径（spec #99 新 IA：工作台/流水线/构建机 + 详情/管理页 + 404 认证面）。
+// Headless 冒烟（票 B4-T9 / #71 AC）：构建产物 + 预览端口点击走通 15 条主路径（工作台/项目库/流水线/构建机 + 详情/管理页 + 404 认证面）。
 //
 // 形态基准：原型 `prototype/web-ui-ia` 分支 `web/scripts/smoke.mjs`（playwright
 // + 预览端口点击）。本脚本是其真实前端版：`vite preview` 伺服 `dist/` 构建产物，
@@ -182,6 +182,7 @@ const overviewSnapshot = {
   slots_used: 0,
   slots_total: 2,
   builds_terminal: { succeeded: 1, failed: 0, cancelled: 0, timeout: 0 },
+  builds_today: { succeeded: 1, failed: 0, cancelled: 0, timeout: 0 },
   artifact_bytes: 1024,
   log_bytes: 2048,
   alerts: { has_no_match: false, has_offline_agent: false, has_draining_incompatible: false },
@@ -333,7 +334,7 @@ async function runAuthed(browser) {
   // NotFoundView 内容，故单独断言 .not-found-page + 描述文案）。
   await visit(page, '/', '工作台', 'workbench')
   await visit(page, '/pipelines', '流水线', 'pipelines')
-  await visit(page, '/projects', '项目', 'projects')
+  await visit(page, '/projects', '项目库', 'projects')
   await visit(page, '/projects/demo', 'demo', 'project-detail')
   await visit(page, '/projects/demo/pipelines/release', 'release', 'pipeline-edit')
   await visit(page, '/projects/demo/pipelines/release/builds', 'release', 'build-list')
@@ -387,7 +388,7 @@ async function runAuthed(browser) {
   // mock 回的 head + 预填默认分支。
   try {
     await page.goto(`${BASE}/projects`, { waitUntil: 'domcontentloaded' })
-    await page.locator('.app-topbar-title', { hasText: '项目' }).first().waitFor({ timeout: 10000 })
+    await page.locator('.app-topbar-title', { hasText: '项目库' }).first().waitFor({ timeout: 10000 })
     // 项目页主 CTA 由 App.vue 统一渲染；项目页改为顶栏 CTA 后，
     // 通过 data-testid 保持 smoke 与页面契约同步。
     await page.locator('[data-testid="topbar-cta"]').click()

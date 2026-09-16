@@ -38,11 +38,14 @@ import { GitBranch, CreateOutline } from '@vicons/ionicons5'
 import { projectsApi } from '@/api/client'
 import { describeSubmitError } from '@/api/errors'
 import type { ProjectResponse, ScmTypeDto } from '@/api/types'
+import { useAuthStore } from '@/stores/auth'
 
 const { t } = useI18n()
 const router = useRouter()
 const route = useRoute()
 const message = useMessage()
+const auth = useAuthStore()
+const isAdmin = computed(() => auth.user?.isAdmin === true)
 
 const projects = ref<ProjectResponse[] | null>(null)
 const listError = ref('')
@@ -100,7 +103,7 @@ const rules = computed<FormRules>(() => ({
 function consumeCreateQuery(): void {
   // 项目页的 `?create=1` 深链 → 打开新建项目弹框并清参。
   if (route.query.create === '1') {
-    openForm()
+    if (isAdmin.value) openForm()
     void router.replace({ query: { ...route.query, create: undefined } })
   }
 }
@@ -178,6 +181,7 @@ async function testConnection(): Promise<void> {
 /** 新建项目：`POST /projects`（全局 admin 专属；403 就地展示）。成功即
  *  收表单 + 刷新列表 + toast 通知。 */
 async function createProject(): Promise<void> {
+  if (!isAdmin.value) return
   submitError.value = ''
   try {
     await formRef.value?.validate()
@@ -231,6 +235,7 @@ function toggleForm(): void {
 }
 
 function openForm(): void {
+  if (!isAdmin.value) return
   submitError.value = ''
   showForm.value = true
 }
@@ -253,7 +258,7 @@ function onScmTypeChange(v: ScmTypeDto): void {
     <n-alert v-if="listError" type="error" :title="listError" role="alert" class="projects-alert" />
 
     <!-- 新建项目表单只在主动点击 CTA 后通过弹框出现。 -->
-    <div v-if="showForm" class="project-modal-mask" role="presentation">
+    <div v-if="isAdmin && showForm" class="project-modal-mask" role="presentation">
       <n-card
         class="project-modal"
         :title="t('projects.newProject')"
@@ -411,7 +416,7 @@ function onScmTypeChange(v: ScmTypeDto): void {
     <div v-else-if="filteredProjects && !listError" class="project-empty">
       <n-empty :description="searchQuery ? t('projects.searchEmpty') : t('projects.empty')">
         <template #extra>
-          <n-button v-if="searchQuery === ''" type="primary" class="project-empty-action" @click="toggleForm">
+          <n-button v-if="isAdmin && searchQuery === ''" type="primary" class="project-empty-action" @click="toggleForm">
             <template #icon>
               <n-icon :component="CreateOutline" />
             </template>
