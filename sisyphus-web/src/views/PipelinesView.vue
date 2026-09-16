@@ -1007,7 +1007,7 @@ function syncPipelineScrollbar(event: Event): void {
 }
 
 .project-group + .project-group {
-  margin-top: 4px;
+  margin-top: 8px;
 }
 
 .project-group-head {
@@ -1075,6 +1075,13 @@ function syncPipelineScrollbar(event: Event): void {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+/* Keep grouped content visually subordinate to its project heading. */
+.project-group:not(.project-group-flat) .project-group-body {
+  margin-inline: 12px;
+  padding-inline-start: 12px;
+  border-inline-start: 2px solid var(--sisy-color-border-light);
 }
 
 .project-group-flat {
@@ -1171,6 +1178,8 @@ function syncPipelineScrollbar(event: Event): void {
 /* 列表视图（原型 pipe-table）。 */
 .pipe-table {
   min-height: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
 }
 
 .pipe-thead {
@@ -1199,15 +1208,19 @@ function syncPipelineScrollbar(event: Event): void {
   padding: 0 20px;
   min-height: 64px;
   border-bottom: 1px solid var(--sisy-color-border-light);
-  transition: background 0.15s;
+  transition: background 0.15s, box-shadow 0.15s;
 }
 
 .pipe-row:last-child {
   border-bottom: none;
 }
 
-.pipe-row:hover {
-  background: var(--sisy-color-bg);
+.pipe-row:hover,
+.pipe-row:focus-within {
+  position: relative;
+  z-index: 1;
+  background: var(--sisy-color-surface);
+  box-shadow: inset 0 0 0 1px var(--sisy-color-primary), 0 4px 16px rgba(0, 0, 0, 0.06);
 }
 
 .pc-fav {
@@ -1347,6 +1360,11 @@ function syncPipelineScrollbar(event: Event): void {
   .pipeline-scrollbar {
     left: 16px;
     right: 16px;
+  }
+
+  .project-group:not(.project-group-flat) .project-group-body {
+    margin-inline: 4px;
+    padding-inline-start: 8px;
   }
 }
 

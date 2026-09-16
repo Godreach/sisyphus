@@ -80,16 +80,16 @@ const drawerOpen = ref(false)
 const SIDEBAR_WIDTH_KEY = 'sisyphus-sidebar-width'
 const SIDEBAR_MIN = 200
 const SIDEBAR_MAX = 400
-const SIDEBAR_DEFAULT = 280
-const SIDEBAR_LEGACY_DEFAULT = 232
+const SIDEBAR_DEFAULT = 316
+const SIDEBAR_LEGACY_DEFAULTS = new Set([232, 280, 320])
 
 function readSidebarWidth(): number {
   try {
     const v = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY))
     if (Number.isFinite(v) && v >= SIDEBAR_MIN && v <= SIDEBAR_MAX) {
       const width = Math.round(v)
-      // 232px 是旧版默认值；迁移它，避免已有浏览器继续打开窄侧栏。
-      return width === SIDEBAR_LEGACY_DEFAULT ? SIDEBAR_DEFAULT : width
+      // 迁移历代默认值，避免已有浏览器继续使用旧版窄侧栏。
+      return SIDEBAR_LEGACY_DEFAULTS.has(width) ? SIDEBAR_DEFAULT : width
     }
   } catch {
     // localStorage 不可用（隐私模式等）：回落默认宽度。
