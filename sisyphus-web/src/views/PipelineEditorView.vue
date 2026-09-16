@@ -554,6 +554,8 @@ const showConflict = computed({
       class="editor-tabs"
       type="line"
       display-directive="show"
+      :inert="saving || undefined"
+      :aria-busy="saving"
       :value="activeTab"
       @update:value="activeTab = $event as 'jobs' | 'params' | 'env'"
     >

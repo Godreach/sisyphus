@@ -418,6 +418,33 @@ describe('PipelineEditorView 混合式编辑器', () => {
     wrapper.unmount()
   })
 
+  it('首次保存请求未完成时锁定编排区，响应后恢复编辑', async () => {
+    mockDefinition({ code: 'NOT_FOUND', message: 'pipeline 不存在' }, 404)
+    await router.replace('/projects/proj-a/pipelines/main?create=1')
+    let finishSave: (() => void) | undefined
+    let requestStarted: (() => void) | undefined
+    const started = new Promise<void>(resolve => { requestStarted = resolve })
+    server.use(http.put(DEF_URL, async () => {
+      requestStarted?.()
+      await new Promise<void>(resolve => { finishSave = resolve })
+      return HttpResponse.json(saveResp(1))
+    }))
+
+    const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="editor-new-badge"]').exists()).toBe(true))
+    await wrapper.get('[name="track-add-stage"]').trigger('click')
+    await wrapper.get('[name="editor-save"]').trigger('click')
+    await started
+    await vi.waitFor(() => expect(wrapper.get('.editor-tabs').attributes('inert')).toBeDefined())
+    expect(wrapper.get('.editor-tabs').attributes('aria-busy')).toBe('true')
+    expect(wrapper.get('[name="editor-save"]').attributes('disabled')).toBeDefined()
+
+    finishSave?.()
+    await vi.waitFor(() => expect(wrapper.get('.editor-rev-value').text()).toBe('1'))
+    expect(wrapper.get('.editor-tabs').attributes('inert')).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('新建态加载遇同名 → 阻止覆盖编辑，并允许主动打开已有', async () => {
     mockDefinition(defResp())
     await router.replace('/projects/proj-a/pipelines/main?create=1')
