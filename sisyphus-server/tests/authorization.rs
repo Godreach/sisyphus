@@ -233,6 +233,76 @@ async fn visibility_filtering_and_no_existence_leak() {
     assert_eq!(body_json(resp).await["code"], "FORBIDDEN");
 }
 
+/// 项目清单的管理权限过滤（票 #118）：`permission=admin` 只返回调用者可管理
+/// 的项目；全局 admin 隐含管理全部项目；不带参数仍保持既有可见性清单。
+#[tokio::test]
+async fn project_list_can_filter_to_admin_projects_without_changing_default_visibility() {
+    let (app, admin, alice, _bob, _carol, _dave) = fixture_with_roles("viewer-project").await;
+    create_project(&app, &admin, "admin-project").await;
+    create_project(&app, &admin, "unrelated-project").await;
+    assign_members(
+        &app,
+        &admin,
+        "admin-project",
+        r#"[{ "username": "alice", "role": "admin" }]"#,
+    )
+    .await;
+
+    let resp = req_with_cookie(&app, "GET", "/api/v1/projects", None, Some(&alice)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let visible: Vec<String> = body_json(resp)
+        .await
+        .as_array()
+        .expect("默认清单")
+        .iter()
+        .map(|project| project["name"].as_str().expect("name").to_string())
+        .collect();
+    assert_eq!(
+        visible,
+        ["admin-project", "viewer-project"],
+        "无参数仍返回全部可见项目"
+    );
+
+    let resp = req_with_cookie(
+        &app,
+        "GET",
+        "/api/v1/projects?permission=admin",
+        None,
+        Some(&alice),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let manageable: Vec<String> = body_json(resp)
+        .await
+        .as_array()
+        .expect("管理清单")
+        .iter()
+        .map(|project| project["name"].as_str().expect("name").to_string())
+        .collect();
+    assert_eq!(manageable, ["admin-project"]);
+
+    let resp = req_with_cookie(
+        &app,
+        "GET",
+        "/api/v1/projects?permission=admin",
+        None,
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let global_admin_projects: Vec<String> = body_json(resp)
+        .await
+        .as_array()
+        .expect("全局管理清单")
+        .iter()
+        .map(|project| project["name"].as_str().expect("name").to_string())
+        .collect();
+    assert_eq!(
+        global_admin_projects,
+        ["admin-project", "unrelated-project", "viewer-project"]
+    );
+}
+
 /// 成员管理：项目 admin 查看 / 整组分配（分配即时生效、移除即时失去）；
 /// viewer / runner 403；输入校验（不存在 / 重复 / 空用户名）422。
 #[tokio::test]

@@ -88,17 +88,21 @@ describe('App 壳（四项导航 + 登出闭环）', () => {
     expect(pushSpy).toHaveBeenCalledWith({ name: 'projects' })
   })
 
-  it('流水线页顶栏新建按钮进入项目列表，不触发新建项目弹窗参数', async () => {
+  it('流水线页顶栏新建按钮在当前页打开创建选择器并保留查询参数', async () => {
     const auth = useAuthStore()
     auth.setAuthed({ username: 'alice', isAdmin: false })
-    await router.push('/pipelines')
+    await router.push('/pipelines?q=deploy&group=flat')
     await wrapper.vm.$nextTick()
 
     await wrapper.get('[data-testid="topbar-cta"]').trigger('click')
 
     await vi.waitFor(() => {
-      expect(router.currentRoute.value.name).toBe('projects')
-      expect(router.currentRoute.value.query.create).toBeUndefined()
+      expect(router.currentRoute.value.name).toBe('pipelines')
+      expect(router.currentRoute.value.query).toEqual({
+        q: 'deploy',
+        group: 'flat',
+        create: '1',
+      })
     })
   })
 

@@ -333,7 +333,15 @@ export function createHandlers(options: MockHandlerOptions) {
       // 可见性过滤（server projects.rs list 同形）：全局 admin 全量、普通用户
       // 仅显式成员项目（node 模式缺省用户 admin → 全量，与既有测试一致）。
       const user = sessionUser(request) ?? 'admin'
-      const visible = db.PROJECTS.filter((p) => db.projectRoleOf(user, p.name) != null)
+      const permission = new URL(request.url).searchParams.get('permission')
+      if (permission != null && permission !== 'admin') {
+        return validationError([{ path: 'permission', message: '仅支持 admin' }])
+      }
+      const visible = db.PROJECTS.filter((p) => {
+        const role = db.projectRoleOf(user, p.name)
+        return permission === 'admin' ? role === 'admin' : role != null
+      })
+      if (permission === 'admin') visible.sort((a, b) => a.name.localeCompare(b.name))
       return HttpResponse.json(visible)
     }),
 

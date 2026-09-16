@@ -11,11 +11,12 @@ import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { NMessageProvider, NSelect } from 'naive-ui'
 import { defineComponent, h } from 'vue'
-import { http, HttpResponse } from 'msw'
+import { delay, http, HttpResponse } from 'msw'
 
 import PipelinesView from '@/views/PipelinesView.vue'
 import { i18n, setLocale } from '@/i18n'
 import { server } from '@/mocks/node'
+import { useAuthStore } from '@/stores/auth'
 
 /** 统计响应（契约票 #102 形态；latest = 最近一条构建，null = 从未运行）。 */
 function statsBody(
@@ -192,6 +193,11 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
       routes: [
         { path: '/', name: 'overview', component: { template: '<div />' } },
         { path: '/pipelines', name: 'pipelines', component: { template: '<div />' } },
+        {
+          path: '/projects/:name/pipelines/:pipeline',
+          name: 'pipeline-edit',
+          component: { template: '<div />' },
+        },
         {
           path: '/projects/:name/pipelines/:pipeline/builds',
           name: 'build-list',
@@ -590,5 +596,224 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     const w = mountView()
     await vi.waitFor(() => expect(w.find('[data-testid="pipelines-skeleton"]').exists()).toBe(true))
     expect(w.find('[role="alert"]').exists()).toBe(false)
+  })
+
+  it('全局新建选择器：仅加载可管理项目、不隐式预选，并直接进入带安全来源的新建编辑器态', async () => {
+    mockList([])
+    const projectUrls: string[] = []
+    let definitionGets = 0
+    server.use(
+      http.get('/api/v1/projects', ({ request }) => {
+        projectUrls.push(request.url)
+        return HttpResponse.json([
+          {
+            id: 1,
+            name: 'alpha',
+            scm_type: 'git',
+            scm_url: 'https://example.com/alpha.git',
+            default_branch: 'main',
+            created_at: 1,
+            updated_at: 1,
+          },
+          {
+            id: 2,
+            name: 'beta',
+            scm_type: 'git',
+            scm_url: 'https://example.com/beta.git',
+            default_branch: 'main',
+            created_at: 1,
+            updated_at: 1,
+          },
+        ])
+      }),
+      http.get('/api/v1/projects/:project/pipelines/:pipeline', async () => {
+        definitionGets += 1
+        await delay(100)
+        return HttpResponse.json(
+          { code: 'NOT_FOUND', message: '流水线不存在', detail: null },
+          { status: 404 },
+        )
+      }),
+    )
+    await router.push('/pipelines?q=deploy&group=flat&create=1')
+    const w = mountView()
+
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="new-pipeline-dialog"]')).toBeTruthy(),
+    )
+    await vi.waitFor(() => expect(projectUrls).toHaveLength(1))
+    expect(new URL(projectUrls[0]!).searchParams.get('permission')).toBe('admin')
+
+    const createProjectSelect = w
+      .findAllComponents(NSelect)
+      .find((select) => select.attributes('data-testid') === 'new-pipeline-project')
+    expect(createProjectSelect).toBeDefined()
+    expect(createProjectSelect!.props('value')).toBeNull()
+    expect(createProjectSelect!.props('filterable')).toBe(true)
+    await createProjectSelect!.vm.$emit('update:value', 'beta')
+
+    const input = document.querySelector(
+      '.n-modal input[name="new-pipeline-name"]',
+    ) as HTMLInputElement
+    input.value = '  release  '
+    input.dispatchEvent(new Event('input'))
+
+    const create = document.querySelector(
+      '.n-modal [data-testid="new-pipeline-create"]',
+    ) as HTMLButtonElement
+    create.click()
+    create.click()
+
+    await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('pipeline-edit'))
+    expect(definitionGets).toBe(1)
+    expect(router.currentRoute.value.params).toMatchObject({
+      name: 'beta',
+      pipeline: 'release',
+    })
+    expect(router.currentRoute.value.query).toEqual({
+      create: '1',
+      from: '/pipelines?q=deploy&group=flat',
+    })
+  })
+
+  it('选择器加载失败显示重试而非空态；恢复为空时按全局管理员给出新建项目动作', async () => {
+    mockList([])
+    useAuthStore().setAuthed({ username: 'admin', isAdmin: true })
+    let calls = 0
+    server.use(
+      http.get('/api/v1/projects', () => {
+        calls += 1
+        return calls === 1
+          ? HttpResponse.json(
+              { code: 'INTERNAL', message: '项目清单暂不可用', detail: null },
+              { status: 500 },
+            )
+          : HttpResponse.json([])
+      }),
+    )
+    await router.push('/pipelines?create=1')
+    mountView()
+
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="create-projects-error"]')).toBeTruthy(),
+    )
+    expect(document.querySelector('[data-testid="create-projects-empty"]')).toBeNull()
+
+    ;(
+      document.querySelector('[data-testid="create-projects-retry"]') as HTMLButtonElement
+    ).click()
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="create-projects-empty"]')).toBeTruthy(),
+    )
+    expect(document.querySelector('[data-testid="create-new-project"]')).toBeTruthy()
+
+    useAuthStore().setAuthed({ username: 'viewer', isAdmin: false })
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="create-new-project"]')).toBeNull(),
+    )
+    expect(document.querySelector('[data-testid="create-projects-empty"]')?.textContent).toContain(
+      '请联系项目管理员',
+    )
+  })
+
+  it('可管理项目请求未完成时明确显示加载态', async () => {
+    mockList([])
+    server.use(http.get('/api/v1/projects', () => new Promise<Response>(() => {})))
+    await router.push('/pipelines?create=1')
+    mountView()
+
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="create-projects-loading"]')).toBeTruthy(),
+    )
+    expect(document.querySelector('[data-testid="create-projects-empty"]')).toBeNull()
+    expect(document.querySelector('[data-testid="create-projects-error"]')).toBeNull()
+  })
+
+  it('流水线名必填且拒绝非法路径名；失败时保留项目与输入', async () => {
+    mockList([])
+    let definitionGets = 0
+    server.use(
+      http.get('/api/v1/projects', () =>
+        HttpResponse.json([
+          {
+            id: 1,
+            name: 'alpha',
+            scm_type: 'git',
+            scm_url: '',
+            default_branch: 'main',
+            created_at: 1,
+            updated_at: 1,
+          },
+        ]),
+      ),
+      http.get('/api/v1/projects/:project/pipelines/:pipeline', () => {
+        definitionGets += 1
+        return HttpResponse.json({}, { status: 404 })
+      }),
+    )
+    await router.push('/pipelines?create=1')
+    const w = mountView()
+    await vi.waitFor(() =>
+      expect(document.querySelector('.n-modal input[name="new-pipeline-name"]')).toBeTruthy(),
+    )
+    const select = w
+      .findAllComponents(NSelect)
+      .find((item) => item.attributes('data-testid') === 'new-pipeline-project')!
+    await select.vm.$emit('update:value', 'alpha')
+
+    const input = document.querySelector(
+      '.n-modal input[name="new-pipeline-name"]',
+    ) as HTMLInputElement
+    input.value = '../release'
+    input.dispatchEvent(new Event('input'))
+    ;(
+      document.querySelector('[data-testid="new-pipeline-create"]') as HTMLButtonElement
+    ).click()
+
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="new-pipeline-name-error"]')).toBeTruthy(),
+    )
+    expect(definitionGets).toBe(0)
+    expect(input.value).toBe('../release')
+    expect(select.props('value')).toBe('alpha')
+    expect(router.currentRoute.value.name).toBe('pipelines')
+  })
+
+  it('取消、Escape 与浏览器返回只关闭对话框，保留查询并恢复入口焦点', async () => {
+    mockList([])
+    server.use(http.get('/api/v1/projects', () => HttpResponse.json([])))
+    const cta = document.createElement('button')
+    cta.dataset.testid = 'topbar-cta'
+    document.body.append(cta)
+    await router.push('/pipelines?q=main&group=flat')
+    await router.push('/pipelines?q=main&group=flat&create=1')
+    mountView()
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="new-pipeline-cancel"]')).toBeTruthy(),
+    )
+
+    ;(
+      document.querySelector('[data-testid="new-pipeline-cancel"]') as HTMLButtonElement
+    ).click()
+    await vi.waitFor(() => expect(router.currentRoute.value.query.create).toBeUndefined())
+    expect(router.currentRoute.value.query).toEqual({ q: 'main', group: 'flat' })
+    await vi.waitFor(() => expect(document.activeElement).toBe(cta))
+
+    await router.push({ query: { ...router.currentRoute.value.query, create: '1' } })
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="new-pipeline-dialog"]')).toBeTruthy(),
+    )
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await vi.waitFor(() => expect(router.currentRoute.value.query.create).toBeUndefined())
+    expect(router.currentRoute.value.query).toEqual({ q: 'main', group: 'flat' })
+
+    await router.push({ query: { ...router.currentRoute.value.query, create: '1' } })
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="new-pipeline-dialog"]')).toBeTruthy(),
+    )
+    router.back()
+    await vi.waitFor(() => expect(router.currentRoute.value.query.create).toBeUndefined())
+    expect(router.currentRoute.value.query).toEqual({ q: 'main', group: 'flat' })
+    cta.remove()
   })
 })

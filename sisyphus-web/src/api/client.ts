@@ -129,7 +129,8 @@ export const overviewApi = {
 /** 项目端点（后端 `api/projects.rs`；建项目为全局 admin 专属）。 */
 export const projectsApi = {
   /** 项目清单（按可见性过滤：全局 admin 全量、普通用户仅有角色者）。 */
-  list: () => http.get<ProjectResponse[]>('projects'),
+  list: (options: { permission?: 'admin' } = {}) =>
+    http.get<ProjectResponse[]>('projects', { query: options }),
 
   /** 项目详情（viewer 档声明：无角色与不存在同形 404，不暴露存在性，票 B2b-T5）。 */
   get: (name: string) => http.get<ProjectResponse>(`projects/${encodeURIComponent(name)}`),

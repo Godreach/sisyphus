@@ -1743,6 +1743,17 @@
         ],
         "summary": "项目清单（按可见性过滤：全局 admin 全量、普通用户只列有角色的项目，\n票 B2b-T5）。",
         "operationId": "list",
+        "parameters": [
+          {
+            "name": "permission",
+            "in": "query",
+            "description": "可选权限过滤；admin 仅返回可管理项目",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "调用者可见的项目（全局 admin 全量、普通用户仅有角色的项目；按名排序）",

@@ -327,7 +327,7 @@ watch(
   },
 )
 
-/** 主按钮：流水线页 → 新建流水线（既有项目创建流）；构建机页 → 接入构建机
+/** 主按钮：流水线页 → 原地打开新建流水线选择器；构建机页 → 接入构建机
  *  （Agent 管理面全局 admin 专属，非 admin 不渲染）。 */
 const ctaLabel = computed(() => {
   if (route.name === 'pipelines') return t('plines.newPipeline')
@@ -338,9 +338,7 @@ const ctaLabel = computed(() => {
 
 function onCta(): void {
   if (route.name === 'pipelines') {
-    // 新建流水线需要先选择已有项目；不要复用项目页的 `create=1`，
-    // 那个参数专门用于打开「新建项目」弹窗。
-    void router.push({ name: 'projects' })
+    void router.push({ query: { ...route.query, create: '1' } })
     return
   }
   if (route.name === 'projects' && isAdmin.value) {

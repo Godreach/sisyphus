@@ -8,7 +8,7 @@
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -104,12 +104,20 @@ impl From<Project> for ProjectResponse {
     }
 }
 
+/// 项目清单可选过滤。
+#[derive(Debug, Default, Deserialize)]
+pub struct ListProjectsQuery {
+    /// `admin` 时仅返回调用者可管理的项目；缺省保持既有可见性语义。
+    pub permission: Option<String>,
+}
+
 /// 项目清单（按可见性过滤：全局 admin 全量、普通用户只列有角色的项目，
 /// 票 B2b-T5）。
 #[utoipa::path(
     get,
     path = "/api/v1/projects",
     tag = "projects",
+    params(("permission" = Option<String>, Query, description = "可选权限过滤；admin 仅返回可管理项目")),
     responses(
         (status = 200, description = "调用者可见的项目（全局 admin 全量、普通用户仅有角色的项目；按名排序）", body = [ProjectResponse]),
         (status = 401, description = "未认证", body = ErrorBody),
@@ -118,11 +126,31 @@ impl From<Project> for ProjectResponse {
 pub async fn list(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthContext>,
+    Query(query): Query<ListProjectsQuery>,
 ) -> Result<Json<Vec<ProjectResponse>>, ApiError> {
-    let projects = state
-        .projects
-        .list_visible(auth.is_admin, auth.user_id)
-        .await?;
+    let projects = match query.permission.as_deref() {
+        None => {
+            state
+                .projects
+                .list_visible(auth.is_admin, auth.user_id)
+                .await?
+        }
+        Some("admin") => {
+            state
+                .projects
+                .list_manageable(auth.is_admin, auth.user_id)
+                .await?
+        }
+        Some(_) => {
+            return Err(ApiError::validation(
+                "项目清单权限过滤无效",
+                vec![ValidationIssue {
+                    path: "permission".into(),
+                    message: "仅支持 admin".into(),
+                }],
+            ));
+        }
+    };
     Ok(Json(projects.into_iter().map(Into::into).collect()))
 }
 
