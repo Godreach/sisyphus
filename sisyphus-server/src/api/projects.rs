@@ -104,11 +104,19 @@ impl From<Project> for ProjectResponse {
     }
 }
 
+/// 项目清单权限过滤值。
+#[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ListProjectsPermission {
+    /// 仅返回调用者可管理的项目。
+    Admin,
+}
+
 /// 项目清单可选过滤。
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct ListProjectsQuery {
     /// `admin` 时仅返回调用者可管理的项目；缺省保持既有可见性语义。
-    pub permission: Option<String>,
+    pub permission: Option<ListProjectsPermission>,
 }
 
 /// 项目清单（按可见性过滤：全局 admin 全量、普通用户只列有角色的项目，
@@ -117,7 +125,7 @@ pub struct ListProjectsQuery {
     get,
     path = "/api/v1/projects",
     tag = "projects",
-    params(("permission" = Option<String>, Query, description = "可选权限过滤；admin 仅返回可管理项目")),
+    params(("permission" = Option<ListProjectsPermission>, Query, description = "可选权限过滤；admin 仅返回可管理项目")),
     responses(
         (status = 200, description = "调用者可见的项目（全局 admin 全量、普通用户仅有角色的项目；按名排序）", body = [ProjectResponse]),
         (status = 401, description = "未认证", body = ErrorBody),
@@ -128,27 +136,18 @@ pub async fn list(
     axum::Extension(auth): axum::Extension<AuthContext>,
     Query(query): Query<ListProjectsQuery>,
 ) -> Result<Json<Vec<ProjectResponse>>, ApiError> {
-    let projects = match query.permission.as_deref() {
+    let projects = match query.permission {
         None => {
             state
                 .projects
                 .list_visible(auth.is_admin, auth.user_id)
                 .await?
         }
-        Some("admin") => {
+        Some(ListProjectsPermission::Admin) => {
             state
                 .projects
                 .list_manageable(auth.is_admin, auth.user_id)
                 .await?
-        }
-        Some(_) => {
-            return Err(ApiError::validation(
-                "项目清单权限过滤无效",
-                vec![ValidationIssue {
-                    path: "permission".into(),
-                    message: "仅支持 admin".into(),
-                }],
-            ));
         }
     };
     Ok(Json(projects.into_iter().map(Into::into).collect()))
@@ -281,9 +280,7 @@ fn validate_create(req: &CreateProjectRequest) -> Vec<ValidationIssue> {
             message: "仓库 URL 不能为空".into(),
         });
     }
-    if matches!(req.scm_type, ScmTypeDto::Svn | ScmTypeDto::None)
-        && req.default_branch.is_some()
-    {
+    if matches!(req.scm_type, ScmTypeDto::Svn | ScmTypeDto::None) && req.default_branch.is_some() {
         issues.push(ValidationIssue {
             path: "default_branch".into(),
             message: "该项目类型无分支概念，不支持默认分支".into(),

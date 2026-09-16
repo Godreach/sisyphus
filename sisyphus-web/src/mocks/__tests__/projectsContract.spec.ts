@@ -42,32 +42,6 @@ describe('项目域 mock 契约（票 #108）', () => {
     expect((await json('/projects/web-app', 'GET', undefined, 'bob')).status).toBe(200)
   })
 
-  it('GET /projects?permission=admin：普通用户仅见可管理项目，全局管理员全量且无参数兼容', async () => {
-    const visible = (await (await json('/projects', 'GET', undefined, 'bob')).json()) as {
-      name: string
-    }[]
-    expect(visible.map((project) => project.name)).toEqual([
-      'web-app',
-      'api-gateway',
-      'cli-tool',
-    ])
-
-    const alice = (await (
-      await json('/projects?permission=admin', 'GET', undefined, 'alice')
-    ).json()) as { name: string }[]
-    expect(alice.map((project) => project.name)).toEqual(['api-gateway', 'web-app'])
-
-    const bob = (await (
-      await json('/projects?permission=admin', 'GET', undefined, 'bob')
-    ).json()) as { name: string }[]
-    expect(bob).toEqual([])
-
-    const admin = (await (
-      await json('/projects?permission=admin', 'GET', undefined, 'admin')
-    ).json()) as { name: string }[]
-    expect(admin).toHaveLength(13)
-  })
-
   it('项目 admin 档守卫：无角色 404 同形 / 有角色非 admin 403', async () => {
     // bob 在 mobile-app 无角色 → 404（不可借 403/404 之辨探测存在性）。
     expect((await json('/projects/mobile-app/members', 'GET', undefined, 'bob')).status).toBe(404)

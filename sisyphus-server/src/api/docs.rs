@@ -118,6 +118,7 @@ use super::users;
         tokens::TokenResponse,
         tokens::CreatedTokenResponse,
         projects::ScmTypeDto,
+        projects::ListProjectsPermission,
         projects::CreateProjectRequest,
         projects::ProjectResponse,
         scm::ScmProbeRequest,

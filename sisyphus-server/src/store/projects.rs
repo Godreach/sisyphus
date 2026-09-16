@@ -108,17 +108,7 @@ impl ProjectRepo {
         if is_admin {
             return self.list().await;
         }
-        let rows = sqlx::query_as::<_, (i64, String, String, String, Option<String>, i64, i64)>(
-            "SELECT p.id, p.name, p.scm_type, p.scm_url, p.default_branch,
-                    p.created_at, p.updated_at
-             FROM projects p JOIN project_members m ON m.project_id = p.id
-             WHERE m.user_id = ?
-             ORDER BY p.name",
-        )
-        .bind(user_id)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(Project::from_row).collect()
+        self.list_for_member(user_id, None).await
     }
 
     /// 列出调用者可管理的项目：全局 admin 隐含管理全部项目；普通用户仅列
@@ -131,14 +121,25 @@ impl ProjectRepo {
         if is_admin {
             return self.list().await;
         }
+        self.list_for_member(user_id, Some("admin")).await
+    }
+
+    /// 按成员关系列项目；`required_role` 为空时接受任意显式角色。
+    async fn list_for_member(
+        &self,
+        user_id: i64,
+        required_role: Option<&str>,
+    ) -> Result<Vec<Project>, StoreError> {
         let rows = sqlx::query_as::<_, (i64, String, String, String, Option<String>, i64, i64)>(
             "SELECT p.id, p.name, p.scm_type, p.scm_url, p.default_branch,
                     p.created_at, p.updated_at
              FROM projects p JOIN project_members m ON m.project_id = p.id
-             WHERE m.user_id = ? AND m.role = 'admin'
+             WHERE m.user_id = ? AND (? IS NULL OR m.role = ?)
              ORDER BY p.name",
         )
         .bind(user_id)
+        .bind(required_role)
+        .bind(required_role)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(Project::from_row).collect()

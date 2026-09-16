@@ -9,7 +9,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, type Router } from 'vue-router'
-import { NMessageProvider, NSelect } from 'naive-ui'
+import { NMessageProvider, NModal, NSelect } from 'naive-ui'
 import { defineComponent, h } from 'vue'
 import { delay, http, HttpResponse } from 'msw'
 
@@ -650,6 +650,12 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     expect(createProjectSelect).toBeDefined()
     expect(createProjectSelect!.props('value')).toBeNull()
     expect(createProjectSelect!.props('filterable')).toBe(true)
+    const projectFilter = createProjectSelect!.props('filter') as (
+      pattern: string,
+      option: { label: string; value: string },
+    ) => boolean
+    expect(projectFilter(' BET ', { label: 'beta', value: 'beta' })).toBe(true)
+    expect(projectFilter('BET', { label: 'alpha', value: 'alpha' })).toBe(false)
     await createProjectSelect!.vm.$emit('update:value', 'beta')
 
     const input = document.querySelector(
@@ -766,6 +772,17 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     ) as HTMLInputElement
     input.value = '../release'
     input.dispatchEvent(new Event('input'))
+    input.value = ''
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }))
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="new-pipeline-name-error"]')).toBeTruthy(),
+    )
+    expect(document.querySelector('[data-testid="new-pipeline-name-error"]')?.textContent).toContain(
+      '请输入流水线名',
+    )
+    input.value = '../release'
+    input.dispatchEvent(new Event('input'))
     ;(
       document.querySelector('[data-testid="new-pipeline-create"]') as HTMLButtonElement
     ).click()
@@ -787,7 +804,7 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     document.body.append(cta)
     await router.push('/pipelines?q=main&group=flat')
     await router.push('/pipelines?q=main&group=flat&create=1')
-    mountView()
+    const w = mountView()
     await vi.waitFor(() =>
       expect(document.querySelector('[data-testid="new-pipeline-cancel"]')).toBeTruthy(),
     )
@@ -803,9 +820,19 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     await vi.waitFor(() =>
       expect(document.querySelector('[data-testid="new-pipeline-dialog"]')).toBeTruthy(),
     )
+    await w.findComponent(NModal).vm.$emit('update:show', false)
+    await vi.waitFor(() => expect(router.currentRoute.value.query.create).toBeUndefined())
+    expect(router.currentRoute.value.query).toEqual({ q: 'main', group: 'flat' })
+    await vi.waitFor(() => expect(document.activeElement).toBe(cta))
+
+    await router.push({ query: { ...router.currentRoute.value.query, create: '1' } })
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="new-pipeline-dialog"]')).toBeTruthy(),
+    )
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     await vi.waitFor(() => expect(router.currentRoute.value.query.create).toBeUndefined())
     expect(router.currentRoute.value.query).toEqual({ q: 'main', group: 'flat' })
+    await vi.waitFor(() => expect(document.activeElement).toBe(cta))
 
     await router.push({ query: { ...router.currentRoute.value.query, create: '1' } })
     await vi.waitFor(() =>
@@ -814,6 +841,7 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     router.back()
     await vi.waitFor(() => expect(router.currentRoute.value.query.create).toBeUndefined())
     expect(router.currentRoute.value.query).toEqual({ q: 'main', group: 'flat' })
+    await vi.waitFor(() => expect(document.activeElement).toBe(cta))
     cta.remove()
   })
 })

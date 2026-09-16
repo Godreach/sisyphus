@@ -1750,7 +1750,7 @@
             "description": "可选权限过滤；admin 仅返回可管理项目",
             "required": false,
             "schema": {
-              "type": "string"
+              "$ref": "#/components/schemas/ListProjectsPermission"
             }
           }
         ],
@@ -5506,6 +5506,13 @@
             "description": "任务状态。"
           }
         }
+      },
+      "ListProjectsPermission": {
+        "type": "string",
+        "description": "项目清单权限过滤值。",
+        "enum": [
+          "admin"
+        ]
       },
       "MeResponse": {
         "type": "object",

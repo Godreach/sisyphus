@@ -22,35 +22,27 @@
 // （橙）；其余 → 运行（蓝），走既有 cancel / rerun / trigger API。
 // 顶栏搜索（`?q=`）按流水线/项目名过滤。
 
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import {
   NAlert,
-  NButton,
   NDropdown,
   NEmpty,
-  NFormItem,
-  NInput,
-  NModal,
-  NSelect,
-  NSkeleton,
   useMessage,
 } from 'naive-ui'
 
-import { buildsApi, favoritesApi, pipelinesApi, projectsApi } from '@/api/client'
+import { buildsApi, favoritesApi, pipelinesApi } from '@/api/client'
 import { describeActionError, describeSubmitError } from '@/api/errors'
-import { ApiError } from '@/api/http'
+import PipelineCreateDialog from '@/components/PipelineCreateDialog.vue'
 import { formatDuration, relativeAge, relativeAgeKey, settledPercent, statusBadgeClass } from '@/utils/format'
 import { pipelineRowActionFor, runPipelineRowAction } from '@/utils/pipelineAction'
-import { useAuthStore } from '@/stores/auth'
-import type { BuildDetailResponse, LatestBuildRef, ProjectResponse } from '@/api/types'
+import type { BuildDetailResponse, LatestBuildRef } from '@/api/types'
 
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-const auth = useAuthStore()
 
 /** 统计窗口（服务端聚合口径，契约票 #102）。 */
 const WINDOW = 20
@@ -125,14 +117,12 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
   void load()
-  document.addEventListener('keydown', onCreateDialogKeydown)
   pollTimer = setInterval(() => {
     void refreshLiveRows()
   }, POLL_MS)
 })
 
 onBeforeUnmount(() => {
-  document.removeEventListener('keydown', onCreateDialogKeydown)
   if (pollTimer != null) clearInterval(pollTimer)
   pollTimer = null
 })
@@ -168,139 +158,6 @@ async function loadFavorites(): Promise<void> {
 // ===== 全局新建流水线选择器（票 #118）=====
 
 const createOpen = computed(() => route.name === 'pipelines' && route.query.create === '1')
-const createStatus = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
-const manageableProjects = ref<ProjectResponse[]>([])
-const selectedCreateProject = ref<string | null>(null)
-const newPipelineName = ref('')
-const createProjectError = ref('')
-const createNameError = ref('')
-const createSubmitError = ref('')
-const createSubmitting = ref(false)
-
-const createProjectOptions = computed(() =>
-  manageableProjects.value.map((project) => ({ label: project.name, value: project.name })),
-)
-
-function pipelinesQueryWithoutCreate(): Record<string, string | string[]> {
-  const query: Record<string, string | string[]> = {}
-  for (const [key, value] of Object.entries(route.query)) {
-    if (key === 'create' || value == null) continue
-    query[key] = Array.isArray(value)
-      ? value.filter((item): item is string => item != null)
-      : value
-  }
-  return query
-}
-
-function resetCreateForm(): void {
-  selectedCreateProject.value = null
-  newPipelineName.value = ''
-  createProjectError.value = ''
-  createNameError.value = ''
-  createSubmitError.value = ''
-  createSubmitting.value = false
-}
-
-async function loadManageableProjects(): Promise<void> {
-  createStatus.value = 'loading'
-  createSubmitError.value = ''
-  try {
-    manageableProjects.value = await projectsApi.list({ permission: 'admin' })
-    createStatus.value = 'ready'
-  } catch (err) {
-    manageableProjects.value = []
-    createSubmitError.value = describeSubmitError(err)
-    createStatus.value = 'error'
-  }
-}
-
-async function closeCreateDialog(): Promise<void> {
-  if (!createOpen.value || createSubmitting.value) return
-  await router.replace({ name: 'pipelines', query: pipelinesQueryWithoutCreate() })
-}
-
-function onCreateDialogKeydown(event: KeyboardEvent): void {
-  if (event.key !== 'Escape' || !createOpen.value || createSubmitting.value) return
-  event.preventDefault()
-  void closeCreateDialog()
-}
-
-async function openNewProjectFlow(): Promise<void> {
-  if (createSubmitting.value) return
-  await router.push({ name: 'projects', query: { create: '1' } })
-}
-
-function validateCreateName(name: string): string {
-  if (name === '') return t('plines.createNameRequired')
-  if (
-    name === '.' ||
-    name === '..' ||
-    /[\\/\u0000-\u001f\u007f]/u.test(name)
-  ) {
-    return t('plines.createNameInvalid')
-  }
-  return ''
-}
-
-async function createAndEditPipeline(): Promise<void> {
-  if (createSubmitting.value) return
-  const project = selectedCreateProject.value
-  const name = newPipelineName.value.trim()
-  createProjectError.value = project == null ? t('plines.createProjectRequired') : ''
-  createNameError.value = validateCreateName(name)
-  createSubmitError.value = ''
-  if (createProjectError.value || createNameError.value || project == null) return
-
-  createSubmitting.value = true
-  try {
-    try {
-      await pipelinesApi.getDefinition(project, name)
-      createNameError.value = t('plines.createNameExists')
-      return
-    } catch (err) {
-      if (!(err instanceof ApiError) || err.status !== 404) throw err
-    }
-
-    // 定义 404 不能单独证明可创建：重新读取管理清单，确认项目仍存在且调用者
-    // 仍有 admin 权限，避免把权限撤销/项目删除误判为“流水线尚不存在”。
-    const refreshed = await projectsApi.list({ permission: 'admin' })
-    manageableProjects.value = refreshed
-    if (!refreshed.some((candidate) => candidate.name === project)) {
-      createProjectError.value = t('plines.createProjectUnavailable')
-      return
-    }
-
-    const from = router.resolve({
-      name: 'pipelines',
-      query: pipelinesQueryWithoutCreate(),
-    }).fullPath
-    await router.replace({
-      name: 'pipeline-edit',
-      params: { name: project, pipeline: name },
-      query: { create: '1', from },
-    })
-  } catch (err) {
-    createSubmitError.value = describeSubmitError(err)
-  } finally {
-    createSubmitting.value = false
-  }
-}
-
-watch(
-  createOpen,
-  async (open, previous) => {
-    if (open) {
-      resetCreateForm()
-      await loadManageableProjects()
-      return
-    }
-    if (previous && route.name === 'pipelines') {
-      await nextTick()
-      ;(document.querySelector('[data-testid="topbar-cta"]') as HTMLElement | null)?.focus()
-    }
-  },
-  { immediate: true },
-)
 
 /** 单条流水线 → 行数据；统计不可见（404）或权限不足（403）按「未运行」行展示。 */
 async function loadRow(item: { project: string; pipeline: string }): Promise<PipelineRow> {
@@ -1030,133 +887,7 @@ function syncPipelineScrollbar(event: Event): void {
       </template>
     </template>
 
-    <n-modal
-      :show="createOpen"
-      preset="card"
-      :title="t('plines.newPipeline')"
-      style="width: min(520px, calc(100vw - 32px))"
-      :bordered="false"
-      :mask-closable="!createSubmitting"
-      :close-on-esc="false"
-      @update:show="(show: boolean) => { if (!show) void closeCreateDialog() }"
-    >
-      <div data-testid="new-pipeline-dialog" class="create-pipeline-dialog">
-        <template v-if="createStatus === 'loading'">
-          <div data-testid="create-projects-loading">
-            <n-skeleton text :repeat="3" height="40px" />
-          </div>
-        </template>
-
-        <n-alert
-          v-else-if="createStatus === 'error'"
-          type="error"
-          :title="createSubmitError || t('plines.createProjectsLoadError')"
-          role="alert"
-          data-testid="create-projects-error"
-        >
-          <n-button
-            secondary
-            type="primary"
-            data-testid="create-projects-retry"
-            @click="loadManageableProjects"
-          >
-            {{ t('plines.retry') }}
-          </n-button>
-        </n-alert>
-
-        <n-empty
-          v-else-if="createStatus === 'ready' && manageableProjects.length === 0"
-          :description="t('plines.createProjectsEmpty')"
-          data-testid="create-projects-empty"
-        >
-          <template #extra>
-            <n-button
-              v-if="auth.user?.isAdmin"
-              type="primary"
-              data-testid="create-new-project"
-              @click="openNewProjectFlow"
-            >
-              {{ t('projects.newProject') }}
-            </n-button>
-            <p v-else class="form-hint">{{ t('plines.createProjectsEmptyHint') }}</p>
-          </template>
-        </n-empty>
-
-        <template v-else-if="createStatus === 'ready'">
-          <n-form-item
-            :label="t('plines.createProjectLabel')"
-            :validation-status="createProjectError ? 'error' : undefined"
-          >
-            <n-select
-              :value="selectedCreateProject"
-              :options="createProjectOptions"
-              filterable
-              clearable
-              data-testid="new-pipeline-project"
-              :placeholder="t('plines.createProjectPlaceholder')"
-              @update:value="(value: string | null) => { selectedCreateProject = value; createProjectError = '' }"
-            />
-          </n-form-item>
-          <p
-            v-if="createProjectError"
-            class="create-field-error"
-            role="alert"
-            data-testid="new-pipeline-project-error"
-          >
-            {{ createProjectError }}
-          </p>
-
-          <n-form-item
-            :label="t('projects.newPipelineName')"
-            :validation-status="createNameError ? 'error' : undefined"
-          >
-            <n-input
-              v-model:value="newPipelineName"
-              :input-props="{ name: 'new-pipeline-name', autocomplete: 'off' }"
-              :placeholder="t('projects.newPipelinePlaceholder')"
-              @update:value="createNameError = ''"
-              @keyup.enter="createAndEditPipeline"
-            />
-          </n-form-item>
-          <p
-            v-if="createNameError"
-            class="create-field-error"
-            role="alert"
-            data-testid="new-pipeline-name-error"
-          >
-            {{ createNameError }}
-          </p>
-
-          <n-alert
-            v-if="createSubmitError"
-            type="error"
-            :title="createSubmitError"
-            role="alert"
-            data-testid="new-pipeline-submit-error"
-          />
-        </template>
-
-        <div class="create-pipeline-actions">
-          <n-button
-            :disabled="createSubmitting"
-            data-testid="new-pipeline-cancel"
-            @click="closeCreateDialog"
-          >
-            {{ t('common.cancel') }}
-          </n-button>
-          <n-button
-            v-if="createStatus === 'ready' && manageableProjects.length > 0"
-            type="primary"
-            :loading="createSubmitting"
-            :disabled="createSubmitting"
-            data-testid="new-pipeline-create"
-            @click="createAndEditPipeline"
-          >
-            {{ t('projects.newPipelineCreate') }}
-          </n-button>
-        </div>
-      </div>
-    </n-modal>
+    <PipelineCreateDialog :show="createOpen" />
   </div>
 </template>
 
@@ -1165,29 +896,6 @@ function syncPipelineScrollbar(event: Event): void {
   display: flex;
   flex-direction: column;
   gap: 16px;
-}
-
-.create-pipeline-dialog {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.create-pipeline-dialog :deep(.n-form-item) {
-  margin-bottom: 0;
-}
-
-.create-field-error {
-  margin: -6px 0 0;
-  color: var(--sisy-color-danger);
-  font-size: 12px;
-}
-
-.create-pipeline-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 4px;
 }
 
 .plines-error {

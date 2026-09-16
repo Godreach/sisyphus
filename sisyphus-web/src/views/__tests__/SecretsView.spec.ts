@@ -24,6 +24,7 @@ import { http, HttpResponse } from 'msw'
 
 import SecretsView from '@/views/SecretsView.vue'
 import { i18n, setLocale } from '@/i18n'
+import * as db from '@/mocks/db'
 import { server } from '@/mocks/node'
 
 /** 改动型用例专用项目（fixture 初始无机密；不进其他断言）。 */
@@ -89,6 +90,8 @@ describe('SecretsView 机密只列名 + 写覆写/删 + 切换项目（#110 定�
     })
     await router.push('/admin/secrets')
     await router.isReady()
+    // 项目列表端点已由后端接管；本页面测试显式提供只读 fixture，避免依赖已删除的生产 mock。
+    server.use(http.get('/api/v1/projects', () => HttpResponse.json(db.PROJECTS)))
     requests = []
     server.events.on('request:start', ({ request }) => {
       void request
