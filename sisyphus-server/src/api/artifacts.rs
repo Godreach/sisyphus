@@ -41,7 +41,7 @@ use super::error::{ApiError, ErrorBody, ValidationIssue};
 use super::policy::RequireViewer;
 use crate::auth::{TokenFamily, token_family, token_hash};
 use crate::store::jobs::JobRepo;
-use crate::store::{ArtifactMetaRepo, ArtifactStore};
+use crate::store::{ArtifactBackend, ArtifactMeta, ArtifactMetaRepo, ArtifactState, ArtifactStore};
 
 /// Agent 面认证通过的上下文（中间件注入请求扩展）。
 #[derive(Debug, Clone)]
@@ -76,6 +76,52 @@ pub struct ArtifactDto {
     pub sha256: String,
     /// 上传时刻（Unix 毫秒；重跑同名再传刷新）。
     pub created_at: i64,
+    /// 正文字节所在后端（历史单文件为 `local`）。
+    pub backend: ArtifactBackendDto,
+    /// 上传任务行；旧数据未记录时为空。
+    pub job_id: Option<i64>,
+    /// 上传任务 attempt；旧数据未记录时为空。
+    pub attempt: Option<i32>,
+    /// 正文字节状态（`ready` / `missing`）。
+    pub state: ArtifactStateDto,
+}
+
+/// 产物正文字节后端。
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactBackendDto {
+    /// Server 本地数据目录。
+    Local,
+    /// S3 兼容对象存储。
+    S3,
+}
+
+impl From<ArtifactBackend> for ArtifactBackendDto {
+    fn from(value: ArtifactBackend) -> Self {
+        match value {
+            ArtifactBackend::Local => Self::Local,
+            ArtifactBackend::S3 => Self::S3,
+        }
+    }
+}
+
+/// 产物正文可用状态。
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactStateDto {
+    /// 正文可用。
+    Ready,
+    /// 元数据存在但正文缺失。
+    Missing,
+}
+
+impl From<ArtifactState> for ArtifactStateDto {
+    fn from(value: ArtifactState) -> Self {
+        match value {
+            ArtifactState::Ready => Self::Ready,
+            ArtifactState::Missing => Self::Missing,
+        }
+    }
 }
 
 /// 构建产物列表响应。
@@ -154,11 +200,13 @@ pub async fn agent_upload(
         .into_data_stream()
         .map(|r| r.map(|b| b.to_vec()).map_err(std::io::Error::other))
         .boxed();
-    let meta = state
+    let mut meta = state
         .artifacts
         .store(job.build_id, &name, stream)
         .await
         .map_err(|e| ApiError::internal("产物落盘", &e))?;
+    meta.job_id = Some(job.id);
+    meta.attempt = Some(job.attempt);
     state
         .artifact_meta
         .record(&meta)
@@ -190,6 +238,7 @@ pub async fn agent_upload(
         (status = 200, description = "产物字节流（响应头 Content-Length + X-Sisyphus-Sha256）", content_type = "application/octet-stream"),
         (status = 401, description = "未认证（仅 Agent token `sisa_` 族可用）", body = ErrorBody),
         (status = 404, description = "任务不存在 / 来源任务不存在 / 依赖产物尚不存在（未上传）", body = ErrorBody),
+        (status = 409, description = "产物元数据存在但正文缺失或后端尚不可用", body = ErrorBody),
     )
 )]
 pub async fn agent_download(
@@ -221,7 +270,7 @@ pub async fn agent_download(
                 "依赖产物尚不存在：任务 {source_job} 的产物 {name} 未上传"
             ))
         })?;
-    artifact_response(&state, meta.sha256.clone(), meta.size, build_id, &name).await
+    artifact_response(&state, meta).await
 }
 
 // ---------------------------------------------------------------------------
@@ -256,17 +305,35 @@ pub async fn list(
         .list_with_created_at(build.id)
         .await
         .map_err(|e| ApiError::internal("产物列表查询", &e))?;
-    Ok(Json(BuildArtifactsResponse {
-        items: entries
-            .into_iter()
-            .map(|e| ArtifactDto {
-                name: e.meta.name,
-                size: e.meta.size,
-                sha256: e.meta.sha256,
-                created_at: e.created_at,
-            })
-            .collect(),
-    }))
+    let mut items = Vec::with_capacity(entries.len());
+    for mut entry in entries {
+        if entry.meta.backend == ArtifactBackend::Local {
+            let observed = state
+                .artifacts
+                .inspect_state(&entry.meta)
+                .await
+                .map_err(|e| ApiError::internal("产物状态检查", &e))?;
+            if observed != entry.meta.state {
+                state
+                    .artifact_meta
+                    .set_state(entry.meta.build_id, &entry.meta.name, observed)
+                    .await
+                    .map_err(|e| ApiError::internal("产物状态更新", &e))?;
+                entry.meta.state = observed;
+            }
+        }
+        items.push(ArtifactDto {
+            name: entry.meta.name,
+            size: entry.meta.size,
+            sha256: entry.meta.sha256,
+            created_at: entry.created_at,
+            backend: entry.meta.backend.into(),
+            job_id: entry.meta.job_id,
+            attempt: entry.meta.attempt,
+            state: entry.meta.state.into(),
+        });
+    }
+    Ok(Json(BuildArtifactsResponse { items }))
 }
 
 /// 单产物下载（viewer 档，票 #74）：流式响应，响应头带大小
@@ -286,6 +353,7 @@ pub async fn list(
         (status = 401, description = "未认证", body = ErrorBody),
         (status = 403, description = "权限不足（需 viewer 档）", body = ErrorBody),
         (status = 404, description = "项目不存在/不可见，构建号或产物不存在", body = ErrorBody),
+        (status = 409, description = "产物元数据存在但正文缺失或后端尚不可用", body = ErrorBody),
     )
 )]
 pub async fn download(
@@ -299,7 +367,7 @@ pub async fn download(
         .find(build.id, &artifact)
         .await?
         .ok_or_else(|| ApiError::resource_not_found(format!("产物 {artifact} 不存在")))?;
-    artifact_response(&state, meta.sha256, meta.size, build.id, &artifact).await
+    artifact_response(&state, meta).await
 }
 
 // ---------------------------------------------------------------------------
@@ -335,32 +403,43 @@ fn validate_name(name: &str) -> Result<(), ApiError> {
 
 /// 打开字节流并组装下载响应（Agent 面 / 用户面共用）：流式 body +
 /// Content-Length（大小）+ X-Sisyphus-Sha256（校验和）+ 附件文件名。
-async fn artifact_response(
-    state: &AppState,
-    sha256: String,
-    size: u64,
-    build_id: i64,
-    name: &str,
-) -> Result<Response, ApiError> {
-    let stream = state
-        .artifacts
-        .open(build_id, name)
-        .await
-        .map_err(|e| ApiError::internal("产物读取", &e))?;
+async fn artifact_response(state: &AppState, meta: ArtifactMeta) -> Result<Response, ApiError> {
+    if meta.backend != ArtifactBackend::Local {
+        return Err(ApiError::conflict(format!(
+            "产物 {} 位于 {} 后端，当前下载 adapter 尚不可用",
+            meta.name,
+            meta.backend.as_str()
+        )));
+    }
+    if meta.state == ArtifactState::Missing {
+        return Err(ApiError::conflict(format!("产物 {} 的正文缺失", meta.name)));
+    }
+    let stream = match state.artifacts.open(meta.build_id, &meta.name).await {
+        Ok(stream) => stream,
+        Err(crate::store::StoreError::NotFound(_)) => {
+            state
+                .artifact_meta
+                .set_state(meta.build_id, &meta.name, ArtifactState::Missing)
+                .await
+                .map_err(|e| ApiError::internal("产物状态更新", &e))?;
+            return Err(ApiError::conflict(format!("产物 {} 的正文缺失", meta.name)));
+        }
+        Err(e) => return Err(ApiError::internal("产物读取", &e)),
+    };
     let body = Body::from_stream(stream.map(|r| r.map(axum::body::Bytes::from)));
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_LENGTH,
-        size.to_string().parse().expect("长度为合法头值"),
+        meta.size.to_string().parse().expect("长度为合法头值"),
     );
     headers.insert(
         header::HeaderName::from_static("x-sisyphus-sha256"),
-        sha256.parse().expect("sha256 hex 为合法头值"),
+        meta.sha256.parse().expect("sha256 hex 为合法头值"),
     );
     // 文件名仅 ASCII 安全字符子集（已过名校验）；attachment 触发浏览器下载。
     headers.insert(
         header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{name}\"")
+        format!("attachment; filename=\"{}\"", meta.name)
             .parse()
             .expect("产物名为合法头值（无控制字符/引号外字符）"),
     );

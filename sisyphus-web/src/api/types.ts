@@ -602,6 +602,14 @@ export interface ArtifactResponse {
   sha256: string
   /** 上传时刻（Unix 毫秒）。 */
   created_at: number
+  /** 正文字节所在后端（历史单文件为 `local`）。 */
+  backend: 'local' | 's3'
+  /** 上传任务行；旧数据未记录时为空。 */
+  job_id: number | null
+  /** 上传任务 attempt；旧数据未记录时为空。 */
+  attempt: number | null
+  /** 正文字节可用状态。 */
+  state: 'ready' | 'missing'
 }
 
 /** 构建产物列表响应。 */

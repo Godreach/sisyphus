@@ -1,5 +1,5 @@
-//! 产物存储（票 #74 / B5-T2，ADR-0004/0006/0007）：本地磁盘字节 + SQLite
-//! 元数据两层。
+//! 产物存储（票 #74/#121，ADR-0004/0026）：本地磁盘字节 + 可区分后端与
+//! 任务 attempt 归属的 SQLite 元数据两层。
 //!
 //! - **字节层**（[`LocalDiskArtifactStore`]）：布局 `data/artifacts/<build_id>/
 //!   <name>`（ADR-0004）。写入流式落 `.part` 临时文件、边写边算 SHA-256 与
@@ -7,10 +7,10 @@
 //!   块流式回放（HTTP 下载响应体）。产物名即磁盘路径段：含路径分隔符或
 //!   `..` 的名在 [`validate_artifact_name`] 拒绝（API 层同规则 422，此处
 //!   防御性兜底）。
-//! - **元数据层**（[`SqliteArtifactMetaRepo`]）：`artifacts` 表一行一份产物，
-//!   (build, name) 唯一——重跑/重试同名再传覆盖为最新（`ON CONFLICT DO
-//!   UPDATE`，与字节层 rename 覆盖同语义）。`retention_until` 与日志共享
-//!   per-build 30 天默认（B5-T6 清理扫描消费，票 #78）。
+//! - **元数据层**（[`SqliteArtifactMetaRepo`]）：`artifacts` 表记录后端、
+//!   build/job/attempt 归属、正文状态、路径、大小和校验和。历史行迁移为
+//!   `local/ready` 且保留原 30 天清理；旧 schema 无法恢复的 job/attempt
+//!   保持空。现有 `(build, name)` 覆盖语义在目录产物集批次前保持兼容。
 //!
 //! Agent 上传端点（`api::artifacts`，agent token 鉴权）消费两层：字节流经
 //! [`ArtifactStore::store`] 落盘、返回的元数据行经 [`ArtifactMetaRepo::record`]
@@ -25,7 +25,9 @@ use sqlx::SqlitePool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::StoreError;
-use super::traits::{ArtifactMeta, ArtifactMetaRepo, ArtifactStore, ByteStream};
+use super::traits::{
+    ArtifactBackend, ArtifactMeta, ArtifactMetaRepo, ArtifactState, ArtifactStore, ByteStream,
+};
 
 /// 产物名长度上限（磁盘路径段 + URL 路径段的宽松界）。
 pub const ARTIFACT_NAME_MAX: usize = 128;
@@ -126,6 +128,21 @@ impl ArtifactStore for LocalDiskArtifactStore {
         });
         Ok(stream.boxed())
     }
+
+    async fn inspect_state(&self, meta: &ArtifactMeta) -> Result<ArtifactState, StoreError> {
+        if meta.backend != ArtifactBackend::Local {
+            return Err(StoreError::Invalid(format!(
+                "本地存储不能检查 {} 后端产物",
+                meta.backend.as_str()
+            )));
+        }
+        let path = self.artifact_path(meta.build_id, &meta.name);
+        if tokio::fs::try_exists(path).await? {
+            Ok(ArtifactState::Ready)
+        } else {
+            Ok(ArtifactState::Missing)
+        }
+    }
 }
 
 /// 流式写盘 + 边写边算 SHA-256/字节数，返回元数据（path 为正斜杠相对键，
@@ -148,6 +165,10 @@ async fn write_stream(
     file.flush().await?;
     Ok(ArtifactMeta {
         build_id,
+        job_id: None,
+        attempt: None,
+        backend: ArtifactBackend::Local,
+        state: ArtifactState::Ready,
         name: name.to_string(),
         path: format!("{build_id}/{name}"),
         size,
@@ -188,6 +209,45 @@ pub struct ArtifactMetaEntry {
     pub created_at: i64,
 }
 
+/// 数据库行的具名形态；统一查询 `created_at`，避免多套长元组依赖列序。
+#[derive(sqlx::FromRow)]
+struct ArtifactRow {
+    build_id: i64,
+    job_id: Option<i64>,
+    attempt: Option<i32>,
+    backend: String,
+    state: String,
+    name: String,
+    path: String,
+    size: i64,
+    sha256: String,
+    created_at: i64,
+}
+
+impl ArtifactRow {
+    fn into_meta(self) -> Result<ArtifactMeta, StoreError> {
+        Ok(ArtifactMeta {
+            build_id: self.build_id,
+            job_id: self.job_id,
+            attempt: self.attempt,
+            backend: ArtifactBackend::try_from(self.backend.as_str())?,
+            state: ArtifactState::try_from(self.state.as_str())?,
+            name: self.name,
+            path: self.path,
+            size: self.size as u64,
+            sha256: self.sha256,
+        })
+    }
+
+    fn into_entry(self) -> Result<ArtifactMetaEntry, StoreError> {
+        let created_at = self.created_at;
+        Ok(ArtifactMetaEntry {
+            meta: self.into_meta()?,
+            created_at,
+        })
+    }
+}
+
 impl SqliteArtifactMetaRepo {
     /// 从既有池装配（表已由迁移建好）。`retention_days` 为全局保留期天数
     /// （config `[retention]` 合并值；与日志共享 per-build 保留期，ADR-0013）。
@@ -205,28 +265,17 @@ impl SqliteArtifactMetaRepo {
         &self,
         build_id: i64,
     ) -> Result<Vec<ArtifactMetaEntry>, StoreError> {
-        let rows = sqlx::query_as::<_, (i64, String, String, i64, String, i64)>(
-            "SELECT build_id, name, path, size, sha256, created_at FROM artifacts
+        let rows = sqlx::query_as::<_, ArtifactRow>(
+            "SELECT build_id, job_id, attempt, backend, state, name, path, size, sha256,
+                    created_at FROM artifacts
              WHERE build_id = ? ORDER BY name",
         )
         .bind(build_id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(
-                |(build_id, name, path, size, sha256, created_at)| ArtifactMetaEntry {
-                    meta: ArtifactMeta {
-                        build_id,
-                        name,
-                        path,
-                        size: size as u64,
-                        sha256,
-                    },
-                    created_at,
-                },
-            )
-            .collect())
+        rows.into_iter()
+            .map(ArtifactRow::into_entry)
+            .collect::<Result<Vec<_>, StoreError>>()
     }
 }
 
@@ -238,13 +287,21 @@ impl ArtifactMetaRepo for SqliteArtifactMetaRepo {
         let now = crate::store::now_ms();
         let retention_until = now + self.retention_days * 24 * 60 * 60 * 1000;
         sqlx::query(
-            "INSERT INTO artifacts (build_id, name, path, size, sha256, created_at, retention_until)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO artifacts
+                (build_id, job_id, attempt, backend, state, name, path, size, sha256,
+                 created_at, retention_until)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (build_id, name) DO UPDATE SET
+               job_id = excluded.job_id, attempt = excluded.attempt,
+               backend = excluded.backend, state = excluded.state,
                path = excluded.path, size = excluded.size, sha256 = excluded.sha256,
                created_at = excluded.created_at, retention_until = excluded.retention_until",
         )
         .bind(meta.build_id)
+        .bind(meta.job_id)
+        .bind(meta.attempt)
+        .bind(meta.backend.as_str())
+        .bind(meta.state.as_str())
         .bind(&meta.name)
         .bind(&meta.path)
         .bind(meta.size as i64)
@@ -257,43 +314,47 @@ impl ArtifactMetaRepo for SqliteArtifactMetaRepo {
     }
 
     async fn find(&self, build_id: i64, name: &str) -> Result<Option<ArtifactMeta>, StoreError> {
-        let row = sqlx::query_as::<_, (i64, String, String, i64, String)>(
-            "SELECT build_id, name, path, size, sha256 FROM artifacts
+        let row = sqlx::query_as::<_, ArtifactRow>(
+            "SELECT build_id, job_id, attempt, backend, state, name, path, size, sha256,
+                    created_at
+             FROM artifacts
              WHERE build_id = ? AND name = ?",
         )
         .bind(build_id)
         .bind(name)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(
-            row.map(|(build_id, name, path, size, sha256)| ArtifactMeta {
-                build_id,
-                name,
-                path,
-                size: size as u64,
-                sha256,
-            }),
-        )
+        row.map(ArtifactRow::into_meta).transpose()
     }
 
     async fn list_by_build(&self, build_id: i64) -> Result<Vec<ArtifactMeta>, StoreError> {
-        let rows = sqlx::query_as::<_, (i64, String, String, i64, String)>(
-            "SELECT build_id, name, path, size, sha256 FROM artifacts
+        let rows = sqlx::query_as::<_, ArtifactRow>(
+            "SELECT build_id, job_id, attempt, backend, state, name, path, size, sha256,
+                    created_at
+             FROM artifacts
              WHERE build_id = ? ORDER BY name",
         )
         .bind(build_id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|(build_id, name, path, size, sha256)| ArtifactMeta {
-                build_id,
-                name,
-                path,
-                size: size as u64,
-                sha256,
-            })
-            .collect())
+        rows.into_iter()
+            .map(ArtifactRow::into_meta)
+            .collect::<Result<Vec<_>, StoreError>>()
+    }
+
+    async fn set_state(
+        &self,
+        build_id: i64,
+        name: &str,
+        state: ArtifactState,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE artifacts SET state = ? WHERE build_id = ? AND name = ?")
+            .bind(state.as_str())
+            .bind(build_id)
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 }
 
@@ -301,6 +362,53 @@ impl ArtifactMetaRepo for SqliteArtifactMetaRepo {
 mod tests {
     use super::*;
     use futures::stream::{self, StreamExt};
+
+    /// #121：0019 可直接升级已有行的 0012 schema，且不要求补造任务归属。
+    #[tokio::test]
+    async fn storage_compat_migration_backfills_legacy_rows() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("内存库");
+        sqlx::raw_sql(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE builds (id INTEGER PRIMARY KEY);
+             CREATE TABLE jobs (id INTEGER PRIMARY KEY);
+             INSERT INTO builds (id) VALUES (7);
+             CREATE TABLE artifacts (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 build_id INTEGER NOT NULL REFERENCES builds(id),
+                 name TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 size INTEGER NOT NULL,
+                 sha256 TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 retention_until INTEGER NOT NULL,
+                 UNIQUE (build_id, name)
+             );
+             CREATE INDEX idx_artifacts_retention ON artifacts(retention_until);
+             INSERT INTO artifacts
+                 (build_id, name, path, size, sha256, created_at, retention_until)
+             VALUES (7, 'legacy.bin', '7/legacy.bin', 3, 'abc', 10, 20);",
+        )
+        .execute(&pool)
+        .await
+        .expect("建旧 schema 与数据");
+
+        sqlx::raw_sql(include_str!("migrations/0019_artifact_storage_compat.sql"))
+            .execute(&pool)
+            .await
+            .expect("升级旧数据");
+
+        let row: (String, Option<i64>, Option<i32>, String) = sqlx::query_as(
+            "SELECT backend, job_id, attempt, state FROM artifacts WHERE build_id = 7",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("读迁移结果");
+        assert_eq!(row, ("local".into(), None, None, "ready".into()));
+    }
 
     /// 临时库装配：bootstrap（迁移含 0012 artifacts 表）+ 父行（项目/构建）。
     async fn fixture() -> (
@@ -413,6 +521,10 @@ mod tests {
         let (_dir, _store, repo) = fixture().await;
         let meta = ArtifactMeta {
             build_id: 1,
+            job_id: None,
+            attempt: None,
+            backend: ArtifactBackend::Local,
+            state: ArtifactState::Ready,
             name: "x".into(),
             path: "1/x".into(),
             size: 3,

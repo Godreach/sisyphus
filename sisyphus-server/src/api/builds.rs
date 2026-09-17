@@ -566,10 +566,11 @@ pub async fn detail(
     }))
 }
 
-/// 手动删构建（项目 admin 档，票 #78，ADR-0013）：立即全删该构建的日志
-/// chunk 与产物（文件 + 元数据）、回收空产物目录；构建记录（状态、号、
-/// 时长）与任务行永久保留。运行中/排队构建不可删（409 可读错误）——终态
-/// 才可删（ADR-0008：在途任务占槽，删数据会让在跑任务失去日志/产物落点）。
+/// 手动删构建（项目 admin 档，票 #78/#121，ADR-0013/0026）：立即删除该
+/// 构建的日志 chunk 与本地产物（文件 + 元数据）、回收空产物目录；其它后端
+/// 记录保留给后续异步删除流程。构建记录（状态、号、时长）与任务行永久
+/// 保留。运行中/排队构建不可删（409 可读错误）——终态才可删（ADR-0008：
+/// 在途任务占槽，删数据会让在跑任务失去日志/产物落点）。
 #[utoipa::path(
     delete,
     path = "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}",
@@ -580,7 +581,7 @@ pub async fn detail(
         ("number" = i64, Path, description = "构建号"),
     ),
     responses(
-        (status = 204, description = "已删除该构建的日志与产物（构建记录保留）"),
+        (status = 204, description = "已删除该构建的日志与本地产物（其它后端和构建记录保留）"),
         (status = 401, description = "未认证", body = ErrorBody),
         (status = 403, description = "viewer/runner 档不足（删构建需项目 admin 档）", body = ErrorBody),
         (status = 404, description = "项目不存在/不可见，或构建号不存在", body = ErrorBody),
@@ -598,7 +599,8 @@ pub async fn remove(
             "构建 #{number} 运行中/排队中，不可删除（终态才可删，ADR-0013）"
         )));
     }
-    // 数据裁剪（日志 + 产物文件 + 元数据 + 空目录回收；builds/jobs 记录保留）。
+    // 数据裁剪（日志 + 本地产物文件/元数据 + 空目录回收；其它后端与
+    // builds/jobs 记录保留）。
     let artifacts_root = state.artifacts.root().to_path_buf();
     crate::store::delete_build_data(&state.pool, &artifacts_root, build.id)
         .await

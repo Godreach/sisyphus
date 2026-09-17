@@ -828,6 +828,10 @@ export function artifactsOf(project: string, pipeline: string, number: number): 
           size,
           sha256: Array.from({ length: 64 }, () => '0123456789abcdef'[Math.floor(rng() * 16)]).join(''),
           created_at: detail.finished_at ?? NOW,
+          backend: 'local',
+          job_id: null,
+          attempt: detail.attempt,
+          state: 'ready',
         })
       }
     }

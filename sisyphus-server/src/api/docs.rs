@@ -149,6 +149,8 @@ use super::users;
         builds::RerunModeDto,
         artifacts::ArtifactUploadedResponse,
         artifacts::ArtifactDto,
+        artifacts::ArtifactBackendDto,
+        artifacts::ArtifactStateDto,
         artifacts::BuildArtifactsResponse,
         triggers::TriggerKindDto,
         triggers::CronSpecDto,

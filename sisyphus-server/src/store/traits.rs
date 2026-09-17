@@ -1,8 +1,8 @@
-//! 存储层 trait 缝（ADR-0004：`LogStore` / `ArtifactStore` / 元数据 repo 层）。
+//! 存储层 trait 缝（ADR-0004/0026：`LogStore` / `ArtifactStore` / 元数据 repo 层）。
 //!
 //! B2a 只定契约不交付实现：SQLite 日志实现随日志批次（连同 builds/jobs 表）、
-//! 磁盘产物实现随产物面批次落在同一缝上。方法面以 ADR-0004/0007/0013
-//! 已定语义为限，不为臆测的需求扩面。
+//! 磁盘产物实现随产物面批次落在同一缝上；#121 增加后端、任务 attempt
+//! 归属和正文状态，供后续对象存储 adapter 共用。
 
 // trait 缝保持 AFIT（async fn in trait）形态：Send/dyn 语义随首个真实实现
 // 批次（日志/产物面）裁定，不在此臆测收紧。
@@ -36,11 +36,81 @@ pub struct LogChunk {
     pub compressed: Vec<u8>,
 }
 
-/// 产物元数据行（ADR-0004：路径/大小/校验和进库；保留期随日志批次落）。
+/// 产物字节所在的存储后端。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactBackend {
+    /// Server 数据目录下的历史单文件存储。
+    Local,
+    /// S3 兼容对象存储（由后续票实现字节 adapter）。
+    S3,
+}
+
+impl ArtifactBackend {
+    /// 数据库与 REST 使用的稳定字符串值。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::S3 => "s3",
+        }
+    }
+}
+
+impl TryFrom<&str> for ArtifactBackend {
+    type Error = StoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "local" => Ok(Self::Local),
+            "s3" => Ok(Self::S3),
+            other => Err(StoreError::Invalid(format!("未知产物后端：{other}"))),
+        }
+    }
+}
+
+/// 产物正文的可用状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactState {
+    /// 元数据和正文均可用。
+    Ready,
+    /// 元数据仍在，但正文已经缺失。
+    Missing,
+}
+
+impl ArtifactState {
+    /// 数据库与 REST 使用的稳定字符串值。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Missing => "missing",
+        }
+    }
+}
+
+impl TryFrom<&str> for ArtifactState {
+    type Error = StoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ready" => Ok(Self::Ready),
+            "missing" => Ok(Self::Missing),
+            other => Err(StoreError::Invalid(format!("未知产物状态：{other}"))),
+        }
+    }
+}
+
+/// 产物元数据行（ADR-0004/0026：后端/归属/路径/大小/校验和进库）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactMeta {
     /// 所属构建。
     pub build_id: i64,
+    /// 上传任务行；历史数据因旧 schema 未记录而为空。
+    pub job_id: Option<i64>,
+    /// 上传任务的执行 attempt；历史数据因旧 schema 未记录而为空。
+    pub attempt: Option<i32>,
+    /// 正文字节所在后端。
+    pub backend: ArtifactBackend,
+    /// 正文字节可用状态。
+    pub state: ArtifactState,
     /// 产物名（任务级声明的上传路径末端名）。
     pub name: String,
     /// 产物键：正斜杠、无盘符的相对路径（ADR-0004：为 v2 对象存储迁移留缝）。
@@ -79,6 +149,9 @@ pub trait ArtifactStore {
 
     /// 流式打开一份产物（HTTP 下载响应体）。
     async fn open(&self, build_id: i64, name: &str) -> Result<ByteStream, StoreError>;
+
+    /// 对照当前后端检查正文是否仍然可用。
+    async fn inspect_state(&self, meta: &ArtifactMeta) -> Result<ArtifactState, StoreError>;
 }
 
 /// 产物元数据行的仓储缝（ADR-0004：元数据进库，与字节存取分属两层）。
@@ -91,4 +164,12 @@ pub trait ArtifactMetaRepo {
 
     /// 列出一次构建的全部产物（构建详情页 / 任务下载依赖解析）。
     async fn list_by_build(&self, build_id: i64) -> Result<Vec<ArtifactMeta>, StoreError>;
+
+    /// 更新正文状态（例如后端检查发现文件缺失）。
+    async fn set_state(
+        &self,
+        build_id: i64,
+        name: &str,
+        state: ArtifactState,
+    ) -> Result<(), StoreError>;
 }

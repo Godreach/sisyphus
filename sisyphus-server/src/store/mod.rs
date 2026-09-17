@@ -41,7 +41,8 @@ pub use logs::SqliteLogStore;
 pub use scm_credentials::ScmCredentialRepo;
 pub use smtp_config::{SmtpConfigRepo, SmtpTls};
 pub use traits::{
-    ArtifactMeta, ArtifactMetaRepo, ArtifactStore, ByteStream, LogChunk, LogLocation, LogStore,
+    ArtifactBackend, ArtifactMeta, ArtifactMetaRepo, ArtifactState, ArtifactStore, ByteStream,
+    LogChunk, LogLocation, LogStore,
 };
 pub use upgrade_packages::{
     LocalDiskUpgradePackageStore, PACKAGE_NAME_MAX, UpgradePackageBytes, UpgradePackageMeta,

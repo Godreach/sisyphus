@@ -480,6 +480,10 @@ async function runBuild(
         size: 512e3 + Math.floor(rng() * 40e6),
         sha256: Array.from({ length: 64 }, () => '0123456789abcdef'[Math.floor(rng() * 16)]).join(''),
         created_at: Date.now(),
+        backend: 'local',
+        job_id: null,
+        attempt: build.attempt,
+        state: 'ready',
       })
     }
     await sleep(400) // 任务间调度间隔

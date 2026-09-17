@@ -76,6 +76,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "产物元数据存在但正文缺失或后端尚不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -2663,7 +2673,7 @@
         "tags": [
           "builds"
         ],
-        "summary": "手动删构建（项目 admin 档，票 #78，ADR-0013）：立即全删该构建的日志\nchunk 与产物（文件 + 元数据）、回收空产物目录；构建记录（状态、号、\n时长）与任务行永久保留。运行中/排队构建不可删（409 可读错误）——终态\n才可删（ADR-0008：在途任务占槽，删数据会让在跑任务失去日志/产物落点）。",
+        "summary": "手动删构建（项目 admin 档，票 #78/#121，ADR-0013/0026）：立即删除该\n构建的日志 chunk 与本地产物（文件 + 元数据）、回收空产物目录；其它后端\n记录保留给后续异步删除流程。构建记录（状态、号、时长）与任务行永久\n保留。运行中/排队构建不可删（409 可读错误）——终态才可删（ADR-0008：\n在途任务占槽，删数据会让在跑任务失去日志/产物落点）。",
         "operationId": "remove",
         "parameters": [
           {
@@ -2697,7 +2707,7 @@
         ],
         "responses": {
           "204": {
-            "description": "已删除该构建的日志与产物（构建记录保留）"
+            "description": "已删除该构建的日志与本地产物（其它后端和构建记录保留）"
           },
           "401": {
             "description": "未认证",
@@ -2898,6 +2908,16 @@
           },
           "404": {
             "description": "项目不存在/不可见，构建号或产物不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "产物元数据存在但正文缺失或后端尚不可用",
             "content": {
               "application/json": {
                 "schema": {
@@ -4660,6 +4680,14 @@
           }
         }
       },
+      "ArtifactBackendDto": {
+        "type": "string",
+        "description": "产物正文字节后端。",
+        "enum": [
+          "local",
+          "s3"
+        ]
+      },
       "ArtifactDto": {
         "type": "object",
         "description": "产物条目（构建产物列表）。",
@@ -4667,13 +4695,35 @@
           "name",
           "size",
           "sha256",
-          "created_at"
+          "created_at",
+          "backend",
+          "state"
         ],
         "properties": {
+          "attempt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "上传任务 attempt；旧数据未记录时为空。"
+          },
+          "backend": {
+            "$ref": "#/components/schemas/ArtifactBackendDto",
+            "description": "正文字节所在后端（历史单文件为 `local`）。"
+          },
           "created_at": {
             "type": "integer",
             "format": "int64",
             "description": "上传时刻（Unix 毫秒；重跑同名再传刷新）。"
+          },
+          "job_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "上传任务行；旧数据未记录时为空。"
           },
           "name": {
             "type": "string",
@@ -4688,8 +4738,20 @@
             "format": "int64",
             "description": "字节数。",
             "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/ArtifactStateDto",
+            "description": "正文字节状态（`ready` / `missing`）。"
           }
         }
+      },
+      "ArtifactStateDto": {
+        "type": "string",
+        "description": "产物正文可用状态。",
+        "enum": [
+          "ready",
+          "missing"
+        ]
       },
       "ArtifactUploadedResponse": {
         "type": "object",

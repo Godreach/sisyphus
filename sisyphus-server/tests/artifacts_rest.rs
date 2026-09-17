@@ -306,6 +306,111 @@ async fn artifact_roundtrip_upload_dep_download_bytes_identical() {
     assert_eq!(&got[..], &bytes[..], "页面下载字节一致");
 }
 
+/// #121：新上传记录显式带本地后端、任务/attempt 归属与 ready 状态。
+#[tokio::test]
+async fn uploaded_artifact_reports_backend_owner_and_state() {
+    let h = harness().await;
+
+    let resp = agent_upload(&h, h.job_a, "dist.tar", b"artifact").await;
+    assert_eq!(resp.status(), 201);
+
+    let path = format!(
+        "/api/v1/projects/demo/pipelines/release/builds/{}/artifacts",
+        h.build.number
+    );
+    let resp = viewer_get(&h, &path).await;
+    assert_eq!(resp.status(), 200);
+    let body = common::body_json(resp).await;
+    let item = &body["items"][0];
+    assert_eq!(item["backend"], "local");
+    assert_eq!(item["job_id"], h.job_a);
+    assert_eq!(item["attempt"], 1);
+    assert_eq!(item["state"], "ready");
+}
+
+/// #121：元数据仍在但本地正文被外部删除时，列表与下载都给出明确状态。
+#[tokio::test]
+async fn missing_local_artifact_is_reported_explicitly() {
+    let h = harness().await;
+    let resp = agent_upload(&h, h.job_a, "lost.bin", b"artifact").await;
+    assert_eq!(resp.status(), 201);
+
+    let path = h
+        ._dir
+        .path()
+        .join("artifacts")
+        .join(h.build.id.to_string())
+        .join("lost.bin");
+    tokio::fs::remove_file(path).await.expect("模拟正文丢失");
+
+    let list_path = format!(
+        "/api/v1/projects/demo/pipelines/release/builds/{}/artifacts",
+        h.build.number
+    );
+    let resp = viewer_get(&h, &list_path).await;
+    assert_eq!(resp.status(), 200);
+    let body = common::body_json(resp).await;
+    assert_eq!(body["items"][0]["state"], "missing");
+
+    let resp = viewer_get(&h, &format!("{list_path}/lost.bin")).await;
+    assert_eq!(resp.status(), 409);
+    let body = common::body_json(resp).await;
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("正文缺失")
+    );
+}
+
+/// #121：旧 schema 形态的本地产物经默认列回填后仍可列表和两种下载。
+#[tokio::test]
+async fn legacy_local_artifact_remains_downloadable() {
+    let h = harness().await;
+    let bytes = b"legacy-artifact";
+    sqlx::query(
+        "INSERT INTO artifacts
+            (build_id, name, path, size, sha256, created_at, retention_until)
+         VALUES (?, 'legacy.bin', ?, ?, ?, 0, ?)",
+    )
+    .bind(h.build.id)
+    .bind(format!("{}/legacy.bin", h.build.id))
+    .bind(bytes.len() as i64)
+    .bind(sha256_hex(bytes))
+    .bind(30_i64 * 24 * 60 * 60 * 1000)
+    .execute(&h.app.state.pool)
+    .await
+    .expect("插旧产物行");
+    let dir = h._dir.path().join("artifacts").join(h.build.id.to_string());
+    tokio::fs::create_dir_all(&dir).await.expect("建旧目录");
+    tokio::fs::write(dir.join("legacy.bin"), bytes)
+        .await
+        .expect("写旧正文");
+
+    let list_path = format!(
+        "/api/v1/projects/demo/pipelines/release/builds/{}/artifacts",
+        h.build.number
+    );
+    let resp = viewer_get(&h, &list_path).await;
+    assert_eq!(resp.status(), 200);
+    let body = common::body_json(resp).await;
+    let item = &body["items"][0];
+    assert_eq!(item["backend"], "local");
+    assert_eq!(item["job_id"], serde_json::Value::Null);
+    assert_eq!(item["attempt"], serde_json::Value::Null);
+    assert_eq!(item["state"], "ready");
+
+    let resp = agent_download(&h, h.job_b, "build", "legacy.bin", &h.agent_token).await;
+    assert_eq!(resp.status(), 200, "旧产物仍可作同构建依赖");
+    let got = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&got[..], bytes);
+
+    let resp = viewer_get(&h, &format!("{list_path}/legacy.bin")).await;
+    assert_eq!(resp.status(), 200, "旧产物仍可从构建详情下载");
+    let got = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&got[..], bytes);
+}
+
 /// 上传鉴权面：非 agent token（PAT / cookie / 无凭据）一律 401。
 #[tokio::test]
 async fn agent_upload_rejects_non_agent_tokens() {

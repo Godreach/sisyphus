@@ -1,15 +1,16 @@
-//! 保留策略清理（票 #78 / B5-T6，ADR-0013/0004）：日志与产物共享 per-build
-//! 保留期（Server 全局配置，默认 30 天），每日低频扫描清理过期构建的日志
-//! chunk 与产物文件 + 元数据；构建记录（状态、号、时长）永久保留；手动删
-//! 构建立即全删该构建的日志与产物（记录保留）。
+//! 保留策略清理（票 #78/#121，ADR-0013/0026）：日志与本地产物共享
+//! per-build 保留期（Server 全局配置，默认 30 天），每日低频扫描清理过期
+//! 构建的日志与本地产物；构建记录及其它后端产物永久保留。
 //!
 //! - [`sweep`]：每日扫描。**per-build 保留语义**——一次构建的日志与产物是
 //!   一个整体（重跑 attempt+1 会追加新日志、同名再传刷新产物，同构建数据
 //!   落在同一保留期），故过期判定取该构建「最新活动时刻」= max(最近日志
 //!   落库时刻, 最近产物上传时刻)，早于 cutoff（now - retention_days）即整
-//!   构建过期，日志 chunk 与产物一起删。只删数据，builds/jobs 记录保留。
+//!   构建过期，日志 chunk 与本地产物一起删。只删数据，builds/jobs 和其它
+//!   后端记录保留。
 //! - [`delete_build_data`]：手动删构建复用同一裁剪（[`purge_build`]）——
-//!   立即全删该构建的日志与产物、回收空目录，与 ADR-0013 保留语义一致。
+//!   立即删除该构建的日志与本地产物、回收空目录；其它后端留给自己的删除
+//!   流程。
 //! - 产物字节层容错：元数据与磁盘文件竞争（上传半截/磁盘丢失）时缺失文件
 //!   记日志跳过、目录非空不回收——不炸扫描、不误删他人数据。
 //! - 与迁移备份协同：清理只删 `artifacts/<build_id>/` 目录内字节，绝不触碰
@@ -89,7 +90,7 @@ pub async fn sweep(
         "SELECT build_id FROM (
              SELECT build_id, created_at AS last FROM logs
              UNION ALL
-             SELECT build_id, created_at AS last FROM artifacts
+             SELECT build_id, created_at AS last FROM artifacts WHERE backend = 'local'
          )
          GROUP BY build_id HAVING MAX(last) < ?",
     )
@@ -126,9 +127,10 @@ pub async fn sweep(
     Ok(report)
 }
 
-/// 手动删构建的数据裁剪（REST DELETE 端点消费）：立即全删该构建的日志与
-/// 产物（文件 + 元数据）+ 回收空目录；构建记录（builds/jobs 行）保留
-/// （ADR-0013 语义）。构建不存在也返回空报告（幂等）。
+/// 手动删构建的数据裁剪（REST DELETE 端点消费）：立即删除该构建的日志与
+/// 本地产物（文件 + 元数据）并回收空目录；其它后端记录保留给各自的异步
+/// 删除流程。构建记录（builds/jobs 行）保留（ADR-0013/0026 语义）。构建
+/// 不存在也返回空报告（幂等）。
 pub async fn delete_build_data(
     pool: &SqlitePool,
     artifacts_root: &Path,
@@ -137,8 +139,9 @@ pub async fn delete_build_data(
     purge_build(pool, artifacts_root, build_id).await
 }
 
-/// 单个构建的数据裁剪：删磁盘产物文件 → 删 logs 行 + artifacts 元数据行
-/// （一事务）→ 回收空构建目录。
+/// 单个构建的数据裁剪：删本地后端的磁盘产物文件 → 删 logs 行 + 本地产物
+/// 元数据行（一事务）→ 回收空构建目录。其它后端不对应 Server 本地路径，
+/// 由各自的删除流程处理。
 async fn purge_build(
     pool: &SqlitePool,
     artifacts_root: &Path,
@@ -147,10 +150,12 @@ async fn purge_build(
     let mut report = CleanupReport::default();
 
     // 产物字节先删（文件名即磁盘路径段，均过存储层名校验；缺失文件容错）。
-    let names = sqlx::query_scalar::<_, String>("SELECT name FROM artifacts WHERE build_id = ?")
-        .bind(build_id)
-        .fetch_all(pool)
-        .await?;
+    let names = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM artifacts WHERE build_id = ? AND backend = 'local'",
+    )
+    .bind(build_id)
+    .fetch_all(pool)
+    .await?;
     let dir = artifacts_root.join(build_id.to_string());
     for name in &names {
         let path = dir.join(name);
@@ -172,7 +177,7 @@ async fn purge_build(
         .bind(build_id)
         .execute(&mut *tx)
         .await?;
-    let metas = sqlx::query("DELETE FROM artifacts WHERE build_id = ?")
+    let metas = sqlx::query("DELETE FROM artifacts WHERE build_id = ? AND backend = 'local'")
         .bind(build_id)
         .execute(&mut *tx)
         .await?;
@@ -377,6 +382,50 @@ mod tests {
 
         // 构建记录永久保留（状态/号/时长可查）。
         assert_eq!(build_count(&pool).await, 2, "builds 行保留");
+        let _ = dir;
+    }
+
+    /// #121：混合后端构建清理只裁剪旧本地产物，不把 S3 记录当成本地路径。
+    #[tokio::test]
+    async fn sweep_preserves_non_local_artifacts_in_mixed_build() {
+        let (dir, pool, artifacts_root) = fixture().await;
+        let (build_id, job_id) = create_build(&pool, 1, "release", 1).await;
+        insert_log(&pool, build_id, job_id, NOW - 31 * DAY_MS).await;
+        insert_artifact(
+            &pool,
+            &artifacts_root,
+            build_id,
+            "legacy.bin",
+            NOW - 31 * DAY_MS,
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO artifacts
+                (build_id, job_id, attempt, backend, state, name, path, size, sha256,
+                 created_at, retention_until)
+             VALUES (?, ?, 1, 's3', 'ready', 'remote.bin', 'objects/remote.bin', 3,
+                     'abc', ?, ?)",
+        )
+        .bind(build_id)
+        .bind(job_id)
+        .bind(NOW - 31 * DAY_MS)
+        .bind(NOW - DAY_MS)
+        .execute(&pool)
+        .await
+        .expect("插 S3 元数据");
+
+        let report = sweep(&pool, &artifacts_root, NOW, 30).await.expect("扫描");
+        assert_eq!(report.logs_deleted, 1);
+        assert_eq!(report.artifact_files_deleted, 1);
+        assert_eq!(report.artifact_meta_deleted, 1, "只删除本地元数据");
+        let remaining: Vec<(String, String)> =
+            sqlx::query_as("SELECT name, backend FROM artifacts WHERE build_id = ?")
+                .bind(build_id)
+                .fetch_all(&pool)
+                .await
+                .expect("查询剩余产物");
+        assert_eq!(remaining, vec![("remote.bin".into(), "s3".into())]);
+        assert!(!artifacts_root.join(build_id.to_string()).exists());
         let _ = dir;
     }
 
