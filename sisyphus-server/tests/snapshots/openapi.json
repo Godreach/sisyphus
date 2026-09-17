@@ -159,6 +159,199 @@
         }
       }
     },
+    "/api/v1/agent/artifacts/{job_id}/sets": {
+      "post": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "为获派任务创建或复用不可变的目录产物清单。",
+        "operationId": "agent_create_set",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "获派任务 ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArtifactSetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "清单与私有文件名",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactSetResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "任务不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "声明或清单非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/artifacts/{job_id}/sets/{set_id}/file": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "同构建内的获派 Agent 下载完整发布集合的单个清单文件。",
+        "operationId": "agent_set_file",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "消费任务 ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "set_id",
+            "in": "path",
+            "description": "集合 ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "清单相对路径",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "文件流",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "302": {
+            "description": "短期 GET URL"
+          },
+          "404": {
+            "description": "集合或文件不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "正文不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/artifacts/{job_id}/sets/{set_id}/publish": {
+      "post": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "核验清单所有文件后原子发布整个集合。",
+        "operationId": "agent_publish_set",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "获派任务 ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "set_id",
+            "in": "path",
+            "description": "集合 ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "幂等发布"
+          },
+          "201": {
+            "description": "完整发布"
+          },
+          "404": {
+            "description": "集合不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "清单尚未完整",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agent/artifacts/{job_id}/{name}": {
       "post": {
         "tags": [
@@ -3138,6 +3331,176 @@
         }
       }
     },
+    "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/artifact-sets": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "构建详情的完整目录产物及文件可用状态。",
+        "operationId": "list_sets",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "流水线",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "description": "构建号",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "已发布目录集合",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactSetsResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "构建不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/artifact-sets/{set_id}/file": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "项目授权后下载 ready 集合内的单个文件。",
+        "operationId": "download_set_file",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "流水线",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "description": "构建号",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "set_id",
+            "in": "path",
+            "description": "集合 ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "清单相对路径",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "本地文件流",
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "302": {
+            "description": "S3 短期 GET URL"
+          },
+          "403": {
+            "description": "权限不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "文件不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "正文不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/artifacts": {
       "get": {
         "tags": [
@@ -5188,6 +5551,14 @@
           }
         }
       },
+      "ArtifactEntryKind": {
+        "type": "string",
+        "description": "目录清单条目的支持类型。",
+        "enum": [
+          "file",
+          "directory"
+        ]
+      },
       "ArtifactPreflightFile": {
         "type": "object",
         "description": "一条待传输的单文件产物。",
@@ -5252,6 +5623,222 @@
               "null"
             ],
             "description": "不可用原因（available=true 时省略）。"
+          }
+        }
+      },
+      "ArtifactSetEntry": {
+        "type": "object",
+        "description": "清单内的普通文件或目录；内部文件名不作为授权凭据。",
+        "required": [
+          "path",
+          "kind",
+          "size",
+          "sha256",
+          "executable"
+        ],
+        "properties": {
+          "artifact_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Server 分配的私有字节对象名；目录为空。"
+          },
+          "executable": {
+            "type": "boolean",
+            "description": "是否保留 Unix 可执行位。"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ArtifactEntryKind",
+            "description": "file 或 directory。"
+          },
+          "path": {
+            "type": "string",
+            "description": "规范化的目录相对路径。"
+          },
+          "sha256": {
+            "type": "string",
+            "description": "小写 SHA-256；目录为空。"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "字节数；目录为零。"
+          }
+        }
+      },
+      "ArtifactSetEntryDto": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ArtifactSetEntry",
+            "description": "清单信息。"
+          },
+          {
+            "type": "object",
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "$ref": "#/components/schemas/ArtifactStateDto",
+                "description": "正文是否可读；目录没有正文字节，始终 ready。"
+              }
+            }
+          }
+        ],
+        "description": "目录清单条目及当前可用状态。"
+      },
+      "ArtifactSetInput": {
+        "type": "object",
+        "description": "一个普通文件或目录的声明信息。",
+        "required": [
+          "path",
+          "kind",
+          "size",
+          "sha256",
+          "executable"
+        ],
+        "properties": {
+          "executable": {
+            "type": "boolean",
+            "description": "Unix 可执行位。"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ArtifactEntryKind",
+            "description": "file 或 directory。"
+          },
+          "path": {
+            "type": "string",
+            "description": "目录相对路径。"
+          },
+          "sha256": {
+            "type": "string",
+            "description": "文件 SHA-256；目录为空。"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "文件大小；目录为零。",
+            "minimum": 0
+          }
+        }
+      },
+      "ArtifactSetRequest": {
+        "type": "object",
+        "description": "Agent 提交的一份目录产物清单。",
+        "required": [
+          "name",
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtifactSetInput"
+            },
+            "description": "完整清单（空目录允许空清单）。"
+          },
+          "name": {
+            "type": "string",
+            "description": "上传声明中的产物名。"
+          }
+        }
+      },
+      "ArtifactSetResponse": {
+        "type": "object",
+        "description": "集合与完整清单。",
+        "required": [
+          "set",
+          "entries",
+          "availability"
+        ],
+        "properties": {
+          "availability": {
+            "$ref": "#/components/schemas/ArtifactStateDto",
+            "description": "全部文件的聚合可用状态。"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtifactSetEntryDto"
+            },
+            "description": "按路径排序的完整清单。"
+          },
+          "set": {
+            "$ref": "#/components/schemas/ArtifactSetRow",
+            "description": "发布元数据。"
+          }
+        }
+      },
+      "ArtifactSetRow": {
+        "type": "object",
+        "description": "一次任务 attempt 的完整目录产物清单及发布状态。",
+        "required": [
+          "id",
+          "build_id",
+          "job_id",
+          "attempt",
+          "name",
+          "state",
+          "created_at"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "上传 attempt。"
+          },
+          "build_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "所属构建。"
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "创建时间（Unix 毫秒）。"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Server 分配的稳定集合 ID。"
+          },
+          "job_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "上传任务行 ID。"
+          },
+          "name": {
+            "type": "string",
+            "description": "任务声明的产物名。"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ArtifactSetState",
+            "description": "发布状态：pending 或 ready。"
+          }
+        }
+      },
+      "ArtifactSetState": {
+        "type": "string",
+        "description": "完整清单的发布状态。",
+        "enum": [
+          "pending",
+          "ready"
+        ]
+      },
+      "ArtifactSetsResponse": {
+        "type": "object",
+        "description": "构建内已发布的目录产物列表。",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtifactSetResponse"
+            },
+            "description": "包含历史 attempt 的集合。"
           }
         }
       },
@@ -6131,6 +6718,7 @@
         "type": "object",
         "description": "任务视图（构建详情内；含 attempt 历史——重跑后同任务多行并列）。",
         "required": [
+          "id",
           "name",
           "status",
           "attempt",
@@ -6176,6 +6764,11 @@
             ],
             "format": "int64",
             "description": "终态时刻。"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "任务行 ID（区分任务及历史 attempt 的产物归属）。"
           },
           "name": {
             "type": "string",

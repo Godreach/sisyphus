@@ -28,8 +28,8 @@ pub struct Sample {
     pub snapshot: bool,
 }
 
-/// 14 条规则码的规范序（`codes.ts` 的 `VALIDATION_CODES` 与 fixtures `rules` 同序）。
-pub const ALL_CODES: [ValidationCode; 14] = [
+/// 15 条规则码的规范序（`codes.ts` 的 `VALIDATION_CODES` 与 fixtures `rules` 同序）。
+pub const ALL_CODES: [ValidationCode; 15] = [
     ValidationCode::RequiredParameterDefault,
     ValidationCode::EnumChoices,
     ValidationCode::WhenWorkspace,
@@ -38,6 +38,7 @@ pub const ALL_CODES: [ValidationCode; 14] = [
     ValidationCode::ContainerImageEmpty,
     ValidationCode::EnvSecretCollision,
     ValidationCode::ArtifactUploadEmpty,
+    ValidationCode::ArtifactUploadDuplicate,
     ValidationCode::ArtifactUploadAbsolute,
     ValidationCode::CacheKeyEmpty,
     ValidationCode::CacheKeyTooLong,
@@ -418,6 +419,26 @@ pub fn samples() -> Vec<Sample> {
         pipeline: p,
         valid: false,
         expected_codes: &[ValidationCode::ArtifactUploadAbsolute],
+        snapshot: false,
+    });
+
+    // R10：同一任务中的产物上传名不唯一（大小写不敏感）。
+    let mut p = base();
+    p.stages[0].jobs[0].artifact_uploads = vec![
+        ArtifactUpload {
+            name: "dist".into(),
+            path: "dist".into(),
+        },
+        ArtifactUpload {
+            name: "DIST".into(),
+            path: "dist-debug".into(),
+        },
+    ];
+    out.push(Sample {
+        id: "r10_artifact_duplicate",
+        pipeline: p,
+        valid: false,
+        expected_codes: &[ValidationCode::ArtifactUploadDuplicate],
         snapshot: false,
     });
 

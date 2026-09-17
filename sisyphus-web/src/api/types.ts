@@ -533,6 +533,8 @@ export interface BuildListResponse {
 
 /** 任务视图（构建详情内；含 attempt 历史——重跑后同任务多行并列）。 */
 export interface JobViewDto {
+  /** 任务行 ID。 */
+  id: number
   /** 任务名。 */
   name: string
   /** 任务状态。 */
@@ -617,6 +619,24 @@ export interface BuildArtifactsResponse {
   /** 构建全部产物（按名排序）。 */
   items: ArtifactResponse[]
 }
+
+export interface ArtifactSetEntryResponse {
+  path: string
+  kind: 'file' | 'directory'
+  size: number
+  sha256: string
+  executable: boolean
+  artifact_name: string | null
+  state: 'ready' | 'missing' | 'unavailable'
+}
+
+export interface ArtifactSetResponse {
+  set: { id: number; build_id: number; job_id: number; attempt: number; name: string; state: 'pending' | 'ready'; created_at: number }
+  entries: ArtifactSetEntryResponse[]
+  availability: 'ready' | 'missing' | 'unavailable'
+}
+
+export interface ArtifactSetsResponse { items: ArtifactSetResponse[] }
 
 /** 普通 API 可见的 S3 后端摘要（无凭据，票 #122）。 */
 export interface S3BackendDto {

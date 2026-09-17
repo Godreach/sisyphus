@@ -13,7 +13,7 @@ use axum::body::Body as HttpBody;
 use common::{DEFAULT_PEER, custom_req};
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
-use sisyphus_model::pipeline::{Job, Pipeline, Revision, Stage};
+use sisyphus_model::pipeline::{ArtifactDownload, Job, Pipeline, Revision, Stage};
 use sisyphus_model::validate::BuildSnapshot;
 use sisyphus_server::auth::{TokenFamily, generate_register_code, generate_token, token_hash};
 use sisyphus_server::store::agents::NewAgent;
@@ -93,7 +93,15 @@ async fn harness() -> Harness {
         retry_count: 0,
         timeout_minutes: 0,
         artifact_uploads: vec![],
-        artifact_downloads: vec![],
+        artifact_downloads: if name == "package" {
+            vec![ArtifactDownload {
+                job: "build".into(),
+                name: "dist.tar".into(),
+                path: "dist.tar".into(),
+            }]
+        } else {
+            vec![]
+        },
         caches: vec![],
         secrets: vec![],
         steps: vec![],

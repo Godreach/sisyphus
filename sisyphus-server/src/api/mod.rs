@@ -287,6 +287,18 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
     // （Bearer 天然免疫 CSRF，且 Agent 无 cookie 语义）。
     let v1_agent_artifacts = Router::new()
         .route(
+            "/agent/artifacts/{job_id}/sets",
+            post(artifacts::agent_create_set),
+        )
+        .route(
+            "/agent/artifacts/{job_id}/sets/{set_id}/publish",
+            post(artifacts::agent_publish_set),
+        )
+        .route(
+            "/agent/artifacts/{job_id}/sets/{set_id}/file",
+            get(artifacts::agent_set_file),
+        )
+        .route(
             "/agent/artifacts/{job_id}/preflight",
             post(artifacts::agent_preflight),
         )
@@ -380,6 +392,14 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route(
             "/projects/{name}/pipelines/{pipeline}/builds/{number}/artifacts",
             get(artifacts::list),
+        )
+        .route(
+            "/projects/{name}/pipelines/{pipeline}/builds/{number}/artifact-sets",
+            get(artifacts::list_sets),
+        )
+        .route(
+            "/projects/{name}/pipelines/{pipeline}/builds/{number}/artifact-sets/{set_id}/file",
+            get(artifacts::download_set_file),
         )
         .route(
             "/projects/{name}/pipelines/{pipeline}/builds/{number}/artifacts/{artifact}",

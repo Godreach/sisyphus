@@ -377,6 +377,12 @@ export const artifactsApi = {
     http.get<BuildArtifactsResponse>(
       `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}/artifacts`,
     ),
+  sets: (project: string, pipeline: string, number: number) =>
+    http.get<import('@/api/types').ArtifactSetsResponse>(
+      `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}/artifact-sets`,
+    ),
+  setFileUrl: (project: string, pipeline: string, number: number, setId: number, path: string) =>
+    `/api/v1/projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}/artifact-sets/${setId}/file?path=${encodeURIComponent(path)}`,
 
   /** 单产物下载 URL（相对路径——cookie 会话随同源导航自动携带；响应头带
    *  大小与校验和，浏览器原生下载）。 */

@@ -131,6 +131,14 @@ function validateJob(errors: ValidationError[], path: string, job: Job): void {
       })
     }
   })
+  const uploadNames = new Set<string>()
+  ;(job.artifact_uploads ?? []).forEach((u, ui: number) => {
+    const folded = u.name.toLocaleLowerCase('en-US')
+    if (uploadNames.has(folded)) {
+      errors.push({ path: `${path}.artifact_uploads[${ui}].name`, code: 'artifact_upload_duplicate', message: '同一任务的产物上传名必须唯一' })
+    }
+    uploadNames.add(folded)
+  })
 
   // 缓存声明（R10–R14）。
   ;(job.caches ?? []).forEach((cache: CacheSpec, ci: number) => {

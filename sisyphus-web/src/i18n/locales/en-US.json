@@ -395,6 +395,11 @@
     "commit": "Commit (git, optional)",
     "artifacts": "Artifacts",
     "artifactPlaceholder": "download pending",
+    "artifactState": {
+      "ready": "Available",
+      "missing": "Content missing",
+      "unavailable": "Storage unavailable"
+    },
     "loadingStages": "Loading…",
     "forbidden": "No access to this build: project access is required (403).",
     "retry": "Retry",

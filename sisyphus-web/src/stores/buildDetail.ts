@@ -37,6 +37,7 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
   const definition = ref<ModelPipeline | null>(null)
   /** 已上传产物清单（详情页产物区：声明 × 已上传比对）。 */
   const artifacts = ref<BuildArtifactsResponse['items']>([])
+  const artifactSets = ref<import('@/api/types').ArtifactSetsResponse['items']>([])
   const status = ref<BuildDetailStatus>('loading')
   const errorMessage = ref('')
 
@@ -91,6 +92,8 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
       definition.value =
         (defResp?.definition as ModelPipeline | undefined) ?? null
       artifacts.value = arts?.items ?? []
+      const sets = await artifactsApi.sets(project, pipeline, number).catch(() => null)
+      artifactSets.value = sets?.items ?? []
       status.value = 'ready'
       schedulePoll(project, pipeline, number)
     } catch (err) {
@@ -120,6 +123,8 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
       ])
       build.value = detail
       artifacts.value = arts?.items ?? []
+      const sets = await artifactsApi.sets(project, pipeline, number).catch(() => null)
+      artifactSets.value = sets?.items ?? []
       status.value = 'ready'
       schedulePoll(project, pipeline, number)
     } catch {
@@ -202,6 +207,7 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
     build,
     definition,
     artifacts,
+    artifactSets,
     status,
     errorMessage,
     jobLabels,

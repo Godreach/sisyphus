@@ -35,6 +35,8 @@ pub enum ValidationCode {
     EnvSecretCollision,
     /// 产物上传需指定非空 name 与路径。
     ArtifactUploadEmpty,
+    /// 同一任务的产物上传名重复（大小写折叠后）。
+    ArtifactUploadDuplicate,
     /// 产物上传路径必须是 workspace 相对路径。
     ArtifactUploadAbsolute,
     /// 缓存 key 不能为空（ADR-0012）。
@@ -184,6 +186,16 @@ fn validate_job(errors: &mut Vec<ValidationError>, path: &str, job: &Job) {
                 format!("{path}.artifact_uploads[{ui}].path"),
                 "产物上传路径必须是 workspace 相对路径，不支持绝对路径",
                 ValidationCode::ArtifactUploadAbsolute,
+            ));
+        }
+    }
+    let mut upload_names = std::collections::HashSet::new();
+    for (ui, u) in job.artifact_uploads.iter().enumerate() {
+        if !upload_names.insert(u.name.to_ascii_lowercase()) {
+            errors.push(ValidationError::new(
+                format!("{path}.artifact_uploads[{ui}].name"),
+                "同一任务的产物上传名必须唯一",
+                ValidationCode::ArtifactUploadDuplicate,
             ));
         }
     }

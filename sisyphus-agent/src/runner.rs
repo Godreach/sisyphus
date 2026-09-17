@@ -58,7 +58,7 @@ use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::ReceiptLog;
-use crate::artifacts::{ArtifactIo, safe_join};
+use crate::artifacts::{ArtifactIo, reject_links, safe_join};
 use crate::cache::{Cache, RestoreError};
 use crate::checkout;
 use crate::container;
@@ -924,10 +924,24 @@ async fn download_deps(
     spec: &JobSpec,
     ws_dir: &Path,
 ) -> Result<(), String> {
+    let mut targets = Vec::new();
+    for d in &spec.downloads {
+        let dest = safe_join(ws_dir, &d.path).map_err(|e| e.to_string())?;
+        if targets
+            .iter()
+            .any(|previous: &PathBuf| dest.starts_with(previous) || previous.starts_with(&dest))
+        {
+            return Err("依赖产物下载目标不能相同或嵌套".into());
+        }
+        targets.push(dest);
+    }
     for d in &spec.downloads {
         let source_job = d.job_id.as_str();
         let dest =
             safe_join(ws_dir, &d.path).map_err(|e| format!("下载依赖产物 {} 失败：{e}", d.name))?;
+        reject_links(&dest)
+            .await
+            .map_err(|e| format!("下载依赖产物 {} 失败：{e}", d.name))?;
         io.download(&spec.job_id, source_job, &d.name, &dest)
             .await
             .map_err(|e| format!("下载依赖产物 {} 失败：{e}", d.name))?;
@@ -945,13 +959,29 @@ async fn upload_artifacts(
 ) -> Result<(), String> {
     let mut sources = Vec::with_capacity(spec.uploads.len());
     let mut files = Vec::with_capacity(spec.uploads.len());
+    let mut names = std::collections::HashSet::new();
     for u in &spec.uploads {
+        if !names.insert(u.name.to_ascii_lowercase()) {
+            return Err(format!("上传产物名重复：{}", u.name));
+        }
         let src =
             safe_join(ws_dir, &u.path).map_err(|e| format!("上传产物 {} 失败：{e}", u.name))?;
-        let size = tokio::fs::metadata(&src)
+        reject_links(&src)
             .await
-            .map_err(|e| format!("上传产物 {} 失败：源路径不存在或无法读取（{e}）", u.name))?
-            .len();
+            .map_err(|e| format!("上传产物 {} 失败：{e}", u.name))?;
+        let metadata = tokio::fs::symlink_metadata(&src)
+            .await
+            .map_err(|e| format!("上传产物 {} 失败：源路径不存在或无法读取（{e}）", u.name))?;
+        let size = if metadata.is_file() {
+            metadata.len()
+        } else if metadata.is_dir() {
+            0
+        } else {
+            return Err(format!(
+                "上传产物 {} 失败：源路径不是普通文件或目录",
+                u.name
+            ));
+        };
         files.push((u.name.clone(), size));
         sources.push((u, src));
     }
@@ -959,9 +989,18 @@ async fn upload_artifacts(
         .await
         .map_err(|e| format!("任务产物传输前限额校验失败：{e}"))?;
     for (u, src) in sources {
-        io.upload(&spec.job_id, &u.name, &src)
+        reject_links(&src)
             .await
             .map_err(|e| format!("上传产物 {} 失败：{e}", u.name))?;
+        let metadata = tokio::fs::symlink_metadata(&src)
+            .await
+            .map_err(|e| format!("上传产物 {} 失败：{e}", u.name))?;
+        let result = if metadata.is_dir() {
+            io.upload_directory(&spec.job_id, &u.name, &src).await
+        } else {
+            io.upload(&spec.job_id, &u.name, &src).await
+        };
+        result.map_err(|e| format!("上传产物 {} 失败：{e}", u.name))?;
     }
     Ok(())
 }

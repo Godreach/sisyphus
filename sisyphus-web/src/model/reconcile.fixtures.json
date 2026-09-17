@@ -8,6 +8,7 @@
     "container_image_empty",
     "env_secret_collision",
     "artifact_upload_empty",
+    "artifact_upload_duplicate",
     "artifact_upload_absolute",
     "cache_key_empty",
     "cache_key_too_long",
@@ -461,6 +462,39 @@
                   {
                     "name": "bin",
                     "path": "/absolute/path"
+                  }
+                ],
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "artifact_upload_duplicate"
+      ],
+      "id": "r10_artifact_duplicate",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "artifact_uploads": [
+                  {
+                    "name": "dist",
+                    "path": "dist"
+                  },
+                  {
+                    "name": "DIST",
+                    "path": "dist-debug"
                   }
                 ],
                 "name": "compile",

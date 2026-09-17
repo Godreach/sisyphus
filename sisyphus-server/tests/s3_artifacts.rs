@@ -366,7 +366,15 @@ async fn harness_with_limits(limits: sisyphus_server::api::ArtifactTransferLimit
                 path: p.into(),
             })
             .collect(),
-        artifact_downloads: vec![],
+        artifact_downloads: if name == "package" {
+            vec![sisyphus_model::pipeline::ArtifactDownload {
+                job: "build".into(),
+                name: "dist.bin".into(),
+                path: "dist".into(),
+            }]
+        } else {
+            vec![]
+        },
         caches: vec![],
         secrets: vec![],
         steps: vec![],
@@ -432,7 +440,7 @@ async fn harness_with_limits(limits: sisyphus_server::api::ArtifactTransferLimit
             stage_index: 0,
             name: "package".into(),
             attempt: 1,
-            spec_json: Some(r#"{"artifact_uploads":[]}"#.into()),
+            spec_json: Some(r#"{"artifact_uploads":[],"artifact_downloads":[{"job":"build","name":"dist.bin","path":"dist"}]}"#.into()),
             agent_id: Some(agent.id),
             labels: vec![],
             timeout_minutes: 0,
@@ -457,6 +465,195 @@ async fn harness_with_limits(limits: sisyphus_server::api::ArtifactTransferLimit
 
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[tokio::test]
+async fn directory_set_binds_uploads_and_publishes_only_complete_manifest() {
+    let h = harness().await;
+    let bytes = b"abc";
+    let digest = sha256_hex(bytes);
+    let create = format!("/api/v1/agent/artifacts/{}/sets", h.job_a);
+    let payload = serde_json::json!({"name":"dist.bin","entries":[
+        {"path":"empty","kind":"directory","size":0,"sha256":"","executable":false},
+        {"path":"nested/a.txt","kind":"file","size":3,"sha256":digest,"executable":true}
+    ]})
+    .to_string();
+    let response = agent_post_json(&h, &create, &payload).await;
+    assert_eq!(response.status(), 200);
+    let manifest = common::body_json(response).await;
+    let set_id = manifest["set"]["id"].as_i64().unwrap();
+    let internal = manifest["entries"][1]["artifact_name"].as_str().unwrap();
+    let publish = format!("{create}/{set_id}/publish");
+    assert_eq!(agent_post_json(&h, &publish, "{}").await.status(), 409);
+    let list = format!(
+        "/api/v1/projects/demo/pipelines/release/builds/{}/artifact-sets",
+        h.build.number
+    );
+    assert_eq!(
+        common::body_json(viewer_get(&h, &list).await).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let retry = common::body_json(agent_post_json(&h, &create, &payload).await).await;
+    assert_eq!(retry["set"]["id"], set_id);
+    let grant = format!("/api/v1/agent/artifacts/{}/{internal}/upload-url", h.job_a);
+    let complete = format!("/api/v1/agent/artifacts/{}/{internal}/complete", h.job_a);
+    for endpoint in ["upload-url", "complete"] {
+        let spoof = format!("/api/v1/agent/artifacts/{}/{internal}/{endpoint}", h.job_b);
+        assert_eq!(
+            agent_post_json(&h, &spoof, &format!(r#"{{"size":3,"sha256":"{digest}"}}"#))
+                .await
+                .status(),
+            404
+        );
+        let invented = format!(
+            "/api/v1/agent/artifacts/{}/.set-999999-0/{endpoint}",
+            h.job_a
+        );
+        assert_eq!(
+            agent_post_json(
+                &h,
+                &invented,
+                &format!(r#"{{"size":3,"sha256":"{digest}"}}"#)
+            )
+            .await
+            .status(),
+            404
+        );
+    }
+    assert_eq!(
+        agent_post_json(&h, &grant, r#"{"size":4}"#).await.status(),
+        409
+    );
+    assert_eq!(
+        agent_post_json(
+            &h,
+            &complete,
+            &format!(r#"{{"size":4,"sha256":"{digest}"}}"#)
+        )
+        .await
+        .status(),
+        409
+    );
+    let upload = common::body_json(agent_post_json(&h, &grant, r#"{"size":3}"#).await).await;
+    http_client()
+        .put(upload["url"].as_str().unwrap())
+        .body(bytes.to_vec())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let completion = format!(r#"{{"size":3,"sha256":"{digest}"}}"#);
+    assert_eq!(
+        agent_post_json(&h, &complete, &completion).await.status(),
+        201
+    );
+    assert_eq!(agent_post_json(&h, &publish, "{}").await.status(), 201);
+    assert_eq!(agent_post_json(&h, &publish, "{}").await.status(), 200);
+    let listed = common::body_json(viewer_get(&h, &list).await).await;
+    assert_eq!(listed["items"][0]["availability"], "ready");
+    assert_eq!(listed["items"][0]["entries"][1]["sha256"], digest);
+    assert_eq!(listed["items"][0]["set"]["job_id"], h.job_a);
+    assert_eq!(
+        agent_post_json(&h, &grant, r#"{"size":3}"#).await.status(),
+        404,
+        "发布后的集合不可再写入"
+    );
+    let file = format!("{list}/{set_id}/file?path=nested%2Fa.txt");
+    assert_eq!(viewer_get(&h, &file).await.status(), 302);
+    let agent_file = format!(
+        "/api/v1/agent/artifacts/{}/sets/{set_id}/file?path=nested%2Fa.txt",
+        h.job_b
+    );
+    assert_eq!(
+        custom_req(
+            &h.app,
+            "GET",
+            &agent_file,
+            None,
+            None,
+            &[("authorization", format!("Bearer {}", h.agent_token))],
+            DEFAULT_PEER
+        )
+        .await
+        .status(),
+        302
+    );
+    let unauthorized = format!(
+        "/api/v1/agent/artifacts/{}/sets/{set_id}/file?path=nested%2Fa.txt",
+        h.job_a
+    );
+    assert_eq!(
+        custom_req(
+            &h.app,
+            "GET",
+            &unauthorized,
+            None,
+            None,
+            &[("authorization", format!("Bearer {}", h.agent_token))],
+            DEFAULT_PEER
+        )
+        .await
+        .status(),
+        404
+    );
+    let pending_body = common::body_json(
+        viewer_get(
+            &h,
+            &format!(
+                "/api/v1/projects/demo/pipelines/release/builds/{}/artifacts",
+                h.build.number
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        pending_body["items"].as_array().unwrap().is_empty(),
+        "内部文件不能独立列出"
+    );
+    h.mock.objects.lock().unwrap().clear();
+    let missing = common::body_json(viewer_get(&h, &list).await).await;
+    assert_eq!(missing["items"][0]["entries"][1]["state"], "missing");
+}
+
+#[tokio::test]
+async fn directory_manifest_rejects_portable_path_conflicts_and_supports_empty_root() {
+    let h = harness().await;
+    let create = format!("/api/v1/agent/artifacts/{}/sets", h.job_a);
+    let entry = |path: &str, kind: &str| {
+        serde_json::json!({"path":path,"kind":kind,"size":0,
+        "sha256": if kind == "file" { sha256_hex(b"") } else { String::new() }, "executable":false})
+    };
+    for entries in [
+        vec![entry("../escape", "file")],
+        vec![entry("CON.txt", "file")],
+        vec![entry("trailing.", "file")],
+        vec![entry("A.txt", "file"), entry("a.txt", "file")],
+        vec![entry("parent", "file"), entry("parent/child", "file")],
+    ] {
+        let body = serde_json::json!({"name":"dist.bin", "entries":entries}).to_string();
+        assert_eq!(agent_post_json(&h, &create, &body).await.status(), 422);
+    }
+    let empty = r#"{"name":"dist.bin","entries":[]}"#;
+    let manifest = common::body_json(agent_post_json(&h, &create, empty).await).await;
+    let changed =
+        serde_json::json!({"name":"dist.bin", "entries":[entry("extra", "directory")]}).to_string();
+    assert_eq!(
+        agent_post_json(&h, &create, &changed).await.status(),
+        422,
+        "空清单重试也不可改变"
+    );
+    let id = manifest["set"]["id"].as_i64().unwrap();
+    assert_eq!(
+        agent_post_json(&h, &format!("{create}/{id}/publish"), "{}")
+            .await
+            .status(),
+        201
+    );
 }
 
 async fn agent_post_json(h: &Harness, path: &str, body: &str) -> axum::response::Response {

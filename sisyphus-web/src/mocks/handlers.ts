@@ -751,6 +751,11 @@ export function createHandlers(options: MockHandlerOptions) {
       },
     ),
 
+    artifactSets: http.get(
+      '/api/v1/projects/:name/pipelines/:pipeline/builds/:number/artifact-sets',
+      ({ request }) => guard(options, request) ?? HttpResponse.json({ items: [] }),
+    ),
+
     artifacts: http.get(
       '/api/v1/projects/:name/pipelines/:pipeline/builds/:number/artifacts',
       async ({ request, params }) => {

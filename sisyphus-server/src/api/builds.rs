@@ -265,6 +265,8 @@ pub struct BuildListResponse {
 /// 任务视图（构建详情内；含 attempt 历史——重跑后同任务多行并列）。
 #[derive(Debug, Serialize, ToSchema)]
 pub struct JobViewDto {
+    /// 任务行 ID（区分任务及历史 attempt 的产物归属）。
+    pub id: i64,
     /// 任务名。
     pub name: String,
     /// 任务状态。
@@ -715,6 +717,7 @@ fn stages_by_index(jobs: &[crate::store::jobs::JobRow]) -> Vec<StageViewDto> {
 /// 任务行 → 任务视图。
 fn job_view(j: &crate::store::jobs::JobRow) -> JobViewDto {
     JobViewDto {
+        id: j.id,
         name: j.name.clone(),
         status: j.status.into(),
         attempt: j.attempt,

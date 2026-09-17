@@ -27,7 +27,7 @@ tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "stream"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "stream", "query"] }
 # 产物上传/下载的请求/响应体流式化（票 #74：reqwest Body::wrap_stream /
 # bytes_stream 需 stream feature；workspace 已有）。
 futures.workspace = true

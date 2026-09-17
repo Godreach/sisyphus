@@ -24,6 +24,7 @@ import { AGENTS, findPipeline, mulberry32, nextBuildNumber } from './db'
 
 /** 动态构建内存态。 */
 interface DynJob {
+  id: number
   name: string
   /** 所属阶段序（从 0 起，触发时从定义快照固定）。 */
   stageIndex: number
@@ -227,6 +228,7 @@ export function dynamicDetail(
 
 function toJobView(j: DynJob): JobViewDto {
   return {
+    id: j.id,
     name: j.name,
     status: j.status,
     attempt: j.attempt,
@@ -295,6 +297,7 @@ function createBuild(
   for (let si = 0; si < def.stages.length; si++) {
     for (const job of def.stages[si]?.jobs ?? []) {
       jobs.push({
+        id: buildId * 10000 + jobs.length + 1,
         name: job.name,
         stageIndex: si,
         status: 'queued',

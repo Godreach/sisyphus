@@ -445,3 +445,135 @@ async fn download_large_payload_roundtrips() {
         .expect("下载");
     assert_eq!(tokio::fs::read(&dest).await.expect("读回"), payload);
 }
+
+async fn directory_stub(corrupt: bool, unsafe_path: bool, empty: bool) -> String {
+    let entries = if empty {
+        vec![]
+    } else {
+        vec![
+            serde_json::json!({"path":"empty","kind":"directory","size":0,"sha256":"","executable":false}),
+            serde_json::json!({"path":if unsafe_path { "../escape" } else { "nested/a.txt" },"kind":"file","size":3,
+            "sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "executable":true}),
+        ]
+    };
+    let app = Router::new()
+        .route(
+            "/api/v1/agent/artifacts/{job_id}/downloads/{source_job}/{name}",
+            get(move || {
+                let entries = entries.clone();
+                async move {
+                    axum::Json(
+                        serde_json::json!({"set":{"id":7,"state":"ready"}, "entries":entries}),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/api/v1/agent/artifacts/{job_id}/sets/{set_id}/file",
+            get(move || async move { if corrupt { "bad" } else { "abc" } }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn directory_dependency_validates_and_replaces_instead_of_merging() {
+    let addr = directory_stub(false, false, false).await;
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("target");
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::write(dest.join("old.txt"), "old").unwrap();
+    io(&addr)
+        .download("42", "build", "dist", &dest)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(dest.join("nested/a.txt")).unwrap(), b"abc");
+    assert!(dest.join("empty").is_dir());
+    assert!(!dest.join("old.txt").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(
+            std::fs::metadata(dest.join("nested/a.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "staging 和旧目录均已清理"
+    );
+}
+
+#[tokio::test]
+async fn failed_directory_dependency_preserves_old_directory_and_rejects_escape() {
+    for (corrupt, unsafe_path) in [(true, false), (false, true)] {
+        let addr = directory_stub(corrupt, unsafe_path, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("target");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::write(dest.join("old.txt"), "old").unwrap();
+        assert!(
+            io(&addr)
+                .download("42", "build", "dist", &dest)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(dest.join("old.txt")).unwrap(), b"old");
+        assert!(!dir.path().join("escape").exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+}
+
+#[tokio::test]
+async fn empty_directory_dependency_replaces_old_tree() {
+    let addr = directory_stub(false, false, true).await;
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("target");
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::write(dest.join("old.txt"), "old").unwrap();
+    io(&addr)
+        .download("42", "build", "dist", &dest)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_dir(dest).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn directory_upload_rejects_root_and_ancestor_links() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside");
+    let link = dir.path().join("link");
+    std::fs::create_dir_all(outside.join("nested")).unwrap();
+    std::fs::write(outside.join("nested/secret.txt"), "secret").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    #[cfg(windows)]
+    {
+        let result = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "创建测试 junction 失败");
+    }
+    for path in [&link, &link.join("nested")] {
+        let error = io("http://127.0.0.1:1")
+            .upload_directory("42", "dist", path)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ArtifactError::Io(_)),
+            "链接必须在发送 HTTP 前拒绝：{error}"
+        );
+    }
+}

@@ -395,6 +395,11 @@
     "commit": "Commit（git，可选）",
     "artifacts": "产物",
     "artifactPlaceholder": "下载占位",
+    "artifactState": {
+      "ready": "可下载",
+      "missing": "正文缺失",
+      "unavailable": "存储后端不可用"
+    },
     "loadingStages": "加载中…",
     "forbidden": "无权查看该构建：需要该项目访问权限（403）。",
     "retry": "重试",

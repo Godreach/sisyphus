@@ -27,7 +27,7 @@
 
 use axum::Json;
 use axum::body::Body;
-use axum::extract::{Extension, Path, Request, State};
+use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -43,7 +43,7 @@ use super::error::{ApiError, ErrorBody, ValidationIssue, parse_body};
 use super::policy::RequireViewer;
 use crate::auth::{TokenFamily, token_family, token_hash};
 use crate::storage::{ObjectClass, ObjectPhase, artifact_blob_name, object_key};
-use crate::store::artifacts::MultipartUploadRow;
+use crate::store::artifacts::{ArtifactSetEntry, ArtifactSetRow, MultipartUploadRow};
 use crate::store::builds::BuildRepo;
 use crate::store::jobs::JobRepo;
 use crate::store::{ArtifactBackend, ArtifactMeta, ArtifactMetaRepo, ArtifactState, ArtifactStore};
@@ -183,6 +183,331 @@ pub struct ArtifactDto {
     pub state: ArtifactStateDto,
 }
 
+/// Agent 提交的一份目录产物清单。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ArtifactSetRequest {
+    /// 上传声明中的产物名。
+    pub name: String,
+    /// 完整清单（空目录允许空清单）。
+    pub entries: Vec<ArtifactSetInput>,
+}
+
+/// 一个普通文件或目录的声明信息。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ArtifactSetInput {
+    /// 目录相对路径。
+    pub path: String,
+    /// file 或 directory。
+    pub kind: crate::store::artifacts::ArtifactEntryKind,
+    /// 文件大小；目录为零。
+    pub size: u64,
+    /// 文件 SHA-256；目录为空。
+    pub sha256: String,
+    /// Unix 可执行位。
+    pub executable: bool,
+}
+
+/// 目录清单条目及当前可用状态。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ArtifactSetEntryDto {
+    /// 清单信息。
+    #[serde(flatten)]
+    pub entry: ArtifactSetEntry,
+    /// 正文是否可读；目录没有正文字节，始终 ready。
+    pub state: ArtifactStateDto,
+}
+
+/// 集合与完整清单。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ArtifactSetResponse {
+    /// 发布元数据。
+    pub set: ArtifactSetRow,
+    /// 按路径排序的完整清单。
+    pub entries: Vec<ArtifactSetEntryDto>,
+    /// 全部文件的聚合可用状态。
+    pub availability: ArtifactStateDto,
+}
+
+/// 构建内已发布的目录产物列表。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ArtifactSetsResponse {
+    /// 包含历史 attempt 的集合。
+    pub items: Vec<ArtifactSetResponse>,
+}
+
+fn valid_set_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 1024
+        && !path.contains('\\')
+        && path.split('/').all(|segment| {
+            let base = segment.split('.').next().unwrap_or("").to_ascii_uppercase();
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && !segment.ends_with(['.', ' '])
+                && !segment
+                    .chars()
+                    .any(|c| c.is_control() || ":*?\"<>|".contains(c))
+                && !matches!(
+                    base.as_str(),
+                    "CON"
+                        | "PRN"
+                        | "AUX"
+                        | "NUL"
+                        | "COM1"
+                        | "COM2"
+                        | "COM3"
+                        | "COM4"
+                        | "COM5"
+                        | "COM6"
+                        | "COM7"
+                        | "COM8"
+                        | "COM9"
+                        | "LPT1"
+                        | "LPT2"
+                        | "LPT3"
+                        | "LPT4"
+                        | "LPT5"
+                        | "LPT6"
+                        | "LPT7"
+                        | "LPT8"
+                        | "LPT9"
+                )
+        })
+}
+
+fn validate_set_entries(
+    state: &AppState,
+    entries: &[ArtifactSetInput],
+) -> Result<Vec<ArtifactSetEntry>, ApiError> {
+    let mut paths = std::collections::HashSet::new();
+    let mut total = 0_u64;
+    let mut files = 0;
+    for entry in entries {
+        if !valid_set_path(&entry.path) || !paths.insert(entry.path.to_lowercase()) {
+            return Err(ApiError::validation(
+                "产物集路径非法或跨平台冲突",
+                vec![ValidationIssue {
+                    path: "entries.path".into(),
+                    message: entry.path.clone(),
+                }],
+            ));
+        }
+        if entry.kind == crate::store::artifacts::ArtifactEntryKind::File {
+            files += 1;
+            total = total.saturating_add(entry.size);
+            if entry.size > state.artifact_transfer_limits.single_file_limit
+                || entry.size > i64::MAX as u64
+                || entry.sha256.len() != 64
+                || !entry.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(ApiError::validation(
+                    "产物集文件大小或摘要非法",
+                    vec![ValidationIssue {
+                        path: "entries".into(),
+                        message: entry.path.clone(),
+                    }],
+                ));
+            }
+        } else if entry.kind != crate::store::artifacts::ArtifactEntryKind::Directory
+            || entry.size != 0
+            || !entry.sha256.is_empty()
+            || entry.executable
+        {
+            return Err(ApiError::validation(
+                "产物集目录条目非法",
+                vec![ValidationIssue {
+                    path: "entries".into(),
+                    message: entry.path.clone(),
+                }],
+            ));
+        }
+    }
+    if files > 10_000 || total > state.artifact_transfer_limits.task_limit {
+        return Err(ApiError::validation(
+            "产物集超出文件数或任务大小限额",
+            vec![ValidationIssue {
+                path: "entries".into(),
+                message: format!("{files} files, {total} bytes"),
+            }],
+        ));
+    }
+    for entry in entries {
+        let mut parent = entry.path.as_str();
+        while let Some((prefix, _)) = parent.rsplit_once('/') {
+            if entries.iter().any(|other| {
+                other.kind == crate::store::artifacts::ArtifactEntryKind::File
+                    && other.path.to_lowercase() == prefix.to_lowercase()
+            }) {
+                return Err(ApiError::validation(
+                    "文件不能作为目录父级",
+                    vec![ValidationIssue {
+                        path: "entries.path".into(),
+                        message: entry.path.clone(),
+                    }],
+                ));
+            }
+            parent = prefix;
+        }
+    }
+    let mut result = entries
+        .iter()
+        .map(|entry| ArtifactSetEntry {
+            path: entry.path.clone(),
+            kind: entry.kind,
+            size: entry.size as i64,
+            sha256: entry.sha256.to_ascii_lowercase(),
+            executable: entry.executable,
+            artifact_name: None,
+        })
+        .collect::<Vec<_>>();
+    result.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(result)
+}
+
+/// 为获派任务创建或复用不可变的目录产物清单。
+#[utoipa::path(post, path = "/api/v1/agent/artifacts/{job_id}/sets", tag = "artifacts",
+    params(("job_id" = i64, Path, description = "获派任务 ID")), request_body = ArtifactSetRequest,
+    responses((status = 200, description = "清单与私有文件名", body = ArtifactSetResponse),
+        (status = 404, description = "任务不存在", body = ErrorBody),
+        (status = 422, description = "声明或清单非法", body = ErrorBody)))]
+pub async fn agent_create_set(
+    State(state): State<AppState>,
+    Extension(agent): Extension<AgentAuth>,
+    Path(job_id): Path<i64>,
+    body: axum::body::Bytes,
+) -> Result<Json<ArtifactSetResponse>, ApiError> {
+    let job = load_own_job(&state, &agent, job_id).await?;
+    let req: ArtifactSetRequest = parse_body(&body)?;
+    validate_name(&req.name)?;
+    if req.name.starts_with(".set-") {
+        return Err(ApiError::conflict("内部文件名不能声明为产物集"));
+    }
+    ensure_declared_upload(&state, &job, &req.name).await?;
+    if state
+        .artifact_meta
+        .find_including_pending(job.build_id, &req.name)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::conflict("同名产物已经作为普通文件上传"));
+    }
+    let entries = validate_set_entries(&state, &req.entries)?;
+    let (set, entries) = state
+        .artifact_meta
+        .create_set(job.build_id, job.id, job.attempt, &req.name, &entries)
+        .await
+        .map_err(|e| {
+            ApiError::validation(
+                "产物集清单冲突",
+                vec![ValidationIssue {
+                    path: "entries".into(),
+                    message: e.to_string(),
+                }],
+            )
+        })?;
+    Ok(Json(set_response(&state, set, entries).await?))
+}
+
+/// 核验清单所有文件后原子发布整个集合。
+#[utoipa::path(post, path = "/api/v1/agent/artifacts/{job_id}/sets/{set_id}/publish", tag = "artifacts",
+    params(("job_id" = i64, Path, description = "获派任务 ID"), ("set_id" = i64, Path, description = "集合 ID")),
+    responses((status = 201, description = "完整发布"), (status = 200, description = "幂等发布"),
+        (status = 404, description = "集合不存在", body = ErrorBody),
+        (status = 409, description = "清单尚未完整", body = ErrorBody)))]
+pub async fn agent_publish_set(
+    State(state): State<AppState>,
+    Extension(agent): Extension<AgentAuth>,
+    Path((job_id, set_id)): Path<(i64, i64)>,
+) -> Result<StatusCode, ApiError> {
+    let job = load_own_job(&state, &agent, job_id).await?;
+    let set = state
+        .artifact_meta
+        .set(set_id)
+        .await?
+        .filter(|s| s.job_id == job.id && s.attempt == job.attempt)
+        .ok_or_else(|| ApiError::resource_not_found("产物集不存在"))?;
+    if set.state == crate::store::artifacts::ArtifactSetState::Ready {
+        return Ok(StatusCode::OK);
+    }
+    state
+        .artifact_meta
+        .publish_set(set_id)
+        .await
+        .map_err(|e| ApiError::conflict(e.to_string()))?;
+    Ok(StatusCode::CREATED)
+}
+
+/// 构建详情的完整目录产物及文件可用状态。
+#[utoipa::path(get, path = "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/artifact-sets", tag = "artifacts",
+    params(("name" = String, Path, description = "项目"), ("pipeline" = String, Path, description = "流水线"),
+        ("number" = i64, Path, description = "构建号")),
+    responses((status = 200, description = "已发布目录集合", body = ArtifactSetsResponse),
+        (status = 403, description = "权限不足", body = ErrorBody), (status = 404, description = "构建不存在", body = ErrorBody)))]
+pub async fn list_sets(
+    State(state): State<AppState>,
+    RequireViewer(access): RequireViewer,
+    Path((_project, pipeline, number)): Path<(String, String, i64)>,
+) -> Result<Json<ArtifactSetsResponse>, ApiError> {
+    let build = load_build(&state, &access.project.id, &pipeline, number).await?;
+    let mut items = Vec::new();
+    for set in state.artifact_meta.list_sets(build.id).await? {
+        let entries = state.artifact_meta.set_entries(set.id).await?;
+        items.push(set_response(&state, set, entries).await?);
+    }
+    Ok(Json(ArtifactSetsResponse { items }))
+}
+
+/// 清单文件的精确相对路径查询。
+#[derive(Debug, Deserialize)]
+pub struct SetFileQuery {
+    /// 不进行模糊或前缀匹配的相对路径。
+    pub path: String,
+}
+
+/// 项目授权后下载 ready 集合内的单个文件。
+#[utoipa::path(get, path = "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/artifact-sets/{set_id}/file", tag = "artifacts",
+    params(("name" = String, Path, description = "项目"), ("pipeline" = String, Path, description = "流水线"),
+        ("number" = i64, Path, description = "构建号"), ("set_id" = i64, Path, description = "集合 ID"),
+        ("path" = String, Query, description = "清单相对路径")),
+    responses((status = 200, description = "本地文件流", content_type = "application/octet-stream"),
+        (status = 302, description = "S3 短期 GET URL"), (status = 403, description = "权限不足", body = ErrorBody),
+        (status = 404, description = "文件不存在", body = ErrorBody), (status = 409, description = "正文不可用", body = ErrorBody)))]
+pub async fn download_set_file(
+    State(state): State<AppState>,
+    RequireViewer(access): RequireViewer,
+    Path((_project, pipeline, number, set_id)): Path<(String, String, i64, i64)>,
+    Query(query): Query<SetFileQuery>,
+) -> Result<Response, ApiError> {
+    let build = load_build(&state, &access.project.id, &pipeline, number).await?;
+    let set = state
+        .artifact_meta
+        .set(set_id)
+        .await?
+        .filter(|s| {
+            s.build_id == build.id && s.state == crate::store::artifacts::ArtifactSetState::Ready
+        })
+        .ok_or_else(|| ApiError::resource_not_found("产物集不存在"))?;
+    let entry = state
+        .artifact_meta
+        .set_entries(set.id)
+        .await?
+        .into_iter()
+        .find(|e| {
+            e.path == query.path && e.kind == crate::store::artifacts::ArtifactEntryKind::File
+        })
+        .ok_or_else(|| ApiError::resource_not_found("产物文件不存在"))?;
+    let name = entry
+        .artifact_name
+        .ok_or_else(|| ApiError::resource_not_found("产物文件不存在"))?;
+    let meta = state
+        .artifact_meta
+        .find(build.id, &name)
+        .await?
+        .ok_or_else(|| ApiError::conflict("产物正文尚未就绪"))?;
+    artifact_response(&state, meta).await
+}
+
 /// 产物正文字节后端。
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -203,7 +528,7 @@ impl From<ArtifactBackend> for ArtifactBackendDto {
 }
 
 /// 产物正文可用状态。
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ArtifactStateDto {
     /// 正文可用。
@@ -287,6 +612,7 @@ pub async fn agent_preflight(
     body: axum::body::Bytes,
 ) -> Result<StatusCode, ApiError> {
     let job = load_own_job(&state, &agent, job_id).await?;
+
     if state.s3.is_none() {
         return Ok(StatusCode::NO_CONTENT);
     }
@@ -296,6 +622,7 @@ pub async fn agent_preflight(
     for file in &request.files {
         validate_name(&file.name)?;
         ensure_declared_upload(&state, &job, &file.name).await?;
+        ensure_no_set_collision(&state, &job, &file.name).await?;
         if !seen.insert(&file.name) {
             return Err(ApiError::validation(
                 "上传清单含重复产物名",
@@ -367,17 +694,47 @@ pub async fn agent_upload(
     validate_name(&name)?;
     let job = load_own_job(&state, &agent, job_id).await?;
 
+    let expected = if name.starts_with(".set-") {
+        ensure_declared_upload(&state, &job, &name).await?;
+        if state
+            .artifact_meta
+            .find(job.build_id, &name)
+            .await?
+            .is_some()
+        {
+            return Err(ApiError::conflict("已校验的集合文件不能覆盖"));
+        }
+        state
+            .artifact_meta
+            .pending_set_file(job.build_id, job.id, job.attempt, &name)
+            .await?
+    } else {
+        ensure_no_set_collision(&state, &job, &name).await?;
+        None
+    };
+
     // 请求体流 → 字节流缝（axum DataStream 的错误归一为 io::Error；Bytes
     // → Vec 与缝的元素型对齐）。
     let stream = body
         .into_data_stream()
         .map(|r| r.map(|b| b.to_vec()).map_err(std::io::Error::other))
         .boxed();
-    let mut meta = state
-        .artifacts
-        .store(job.build_id, &name, stream)
-        .await
-        .map_err(|e| ApiError::internal("产物落盘", &e))?;
+    let stored = if let Some(expected) = &expected {
+        enforce_transfer_limits(&state, &job, &name, expected.size as u64).await?;
+        state
+            .artifacts
+            .store_verified(
+                job.build_id,
+                &name,
+                stream,
+                expected.size as u64,
+                &expected.sha256,
+            )
+            .await
+    } else {
+        state.artifacts.store(job.build_id, &name, stream).await
+    };
+    let mut meta = stored.map_err(|e| ApiError::conflict(e.to_string()))?;
     meta.job_id = Some(job.id);
     meta.attempt = Some(job.attempt);
     state
@@ -428,7 +785,9 @@ pub async fn agent_upload_url(
         .ok_or_else(|| ApiError::conflict("未配置 S3，无法签发直传 URL"))?;
     cleanup_expired_multipart_uploads(&state).await?;
     ensure_declared_upload(&state, &job, &name).await?;
+    ensure_no_set_collision(&state, &job, &name).await?;
     let request: ArtifactUploadGrantRequest = parse_body(&body)?;
+    ensure_set_file_content(&state, &job, &name, request.size, None).await?;
     enforce_transfer_limits(&state, &job, &name, request.size).await?;
 
     let (tmp_key, final_key) = artifact_object_keys(s3.prefix(), &job, &name);
@@ -601,7 +960,6 @@ pub async fn agent_complete(
         .as_ref()
         .ok_or_else(|| ApiError::conflict("未配置 S3，无法完成直传"))?;
     cleanup_expired_multipart_uploads(&state).await?;
-    ensure_declared_upload(&state, &job, &name).await?;
     let req: ArtifactCompleteRequest = parse_body(&body)?;
     let sha = req.sha256.to_ascii_lowercase();
 
@@ -611,6 +969,8 @@ pub async fn agent_complete(
         .await?
         && meta.state == ArtifactState::Ready
         && meta.backend == ArtifactBackend::S3
+        && meta.job_id == Some(job.id)
+        && meta.attempt == Some(job.attempt)
     {
         if meta.size == req.size && meta.sha256 == sha {
             return Ok((
@@ -626,6 +986,8 @@ pub async fn agent_complete(
             "产物 {name} 已 ready，摘要不一致"
         )));
     }
+    ensure_declared_upload(&state, &job, &name).await?;
+    ensure_set_file_content(&state, &job, &name, req.size, Some(&sha)).await?;
 
     enforce_transfer_limits(&state, &job, &name, req.size).await?;
     let pending = state
@@ -865,6 +1227,24 @@ pub async fn agent_download(
         )));
     }
 
+    if let Some(set) = state
+        .artifact_meta
+        .list_sets(build_id)
+        .await?
+        .into_iter()
+        .filter(|s| {
+            s.name == name
+                && jobs
+                    .iter()
+                    .any(|j| j.id == s.job_id && j.name == source_job)
+        })
+        .max_by_key(|s| s.attempt)
+    {
+        let entries = state.artifact_meta.set_entries(set.id).await?;
+        ensure_declared_download(&state, &job, &source_job, &name).await?;
+        return Ok(Json(set_response(&state, set, entries).await?).into_response());
+    }
+
     let meta = state
         .artifact_meta
         .find(build_id, &name)
@@ -876,6 +1256,11 @@ pub async fn agent_download(
                 "依赖产物尚不存在：任务 {source_job} 的产物 {name} 未上传"
             ))
         })?;
+    if name.starts_with(".set-") {
+        return Err(ApiError::resource_not_found(
+            "目录产物只能在整组 ready 后读取",
+        ));
+    }
     artifact_response(&state, meta).await
 }
 
@@ -913,6 +1298,9 @@ pub async fn list(
         .map_err(|e| ApiError::internal("产物列表查询", &e))?;
     let mut items = Vec::with_capacity(entries.len());
     for mut entry in entries {
+        if entry.meta.name.starts_with(".set-") {
+            continue;
+        }
         if entry.meta.backend == ArtifactBackend::Local {
             let observed = state
                 .artifacts
@@ -970,6 +1358,9 @@ pub async fn download(
     Path((_project, pipeline, number, artifact)): Path<(String, String, i64, String)>,
 ) -> Result<Response, ApiError> {
     let build = load_build(&state, &access.project.id, &pipeline, number).await?;
+    if artifact.starts_with(".set-") {
+        return Err(ApiError::resource_not_found("产物不存在"));
+    }
     let meta = state
         .artifact_meta
         .find(build.id, &artifact)
@@ -1002,6 +1393,17 @@ async fn ensure_declared_upload(
     job: &crate::store::jobs::JobRow,
     name: &str,
 ) -> Result<(), ApiError> {
+    if name.starts_with(".set-") {
+        if state
+            .artifact_meta
+            .pending_set_file(job.build_id, job.id, job.attempt, name)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        return Err(ApiError::resource_not_found("产物集文件不存在"));
+    }
     if declared_uploads(job).contains(&name.to_string()) {
         return Ok(());
     }
@@ -1033,6 +1435,190 @@ async fn ensure_declared_upload(
             message: format!("任务 {} 未声明上传 {name}", job.name),
         }],
     ))
+}
+
+async fn ensure_no_set_collision(
+    state: &AppState,
+    job: &crate::store::jobs::JobRow,
+    name: &str,
+) -> Result<(), ApiError> {
+    if !name.starts_with(".set-")
+        && state
+            .artifact_meta
+            .set_by_name(job.id, job.attempt, name)
+            .await?
+            .is_some()
+    {
+        return Err(ApiError::conflict("同名产物已经作为目录清单创建"));
+    }
+    Ok(())
+}
+
+async fn ensure_declared_download(
+    state: &AppState,
+    job: &crate::store::jobs::JobRow,
+    source_job: &str,
+    name: &str,
+) -> Result<(), ApiError> {
+    let from_spec = job
+        .spec_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|value| {
+            value
+                .get("artifact_downloads")
+                .and_then(|v| v.as_array())
+                .cloned()
+        })
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("job").and_then(|v| v.as_str()) == Some(source_job)
+                    && item.get("name").and_then(|v| v.as_str()) == Some(name)
+            })
+        });
+    if from_spec {
+        return Ok(());
+    }
+    let build = BuildRepo::new(state.pool.clone())
+        .get(job.build_id)
+        .await?
+        .ok_or_else(|| ApiError::resource_not_found(format!("构建 {} 不存在", job.build_id)))?;
+    let snapshot: BuildSnapshot = serde_json::from_str(&build.snapshot)
+        .map_err(|e| ApiError::internal("解析构建快照", &e))?;
+    let declared = snapshot
+        .pipeline
+        .stages
+        .get(job.stage_index as usize)
+        .and_then(|stage| {
+            stage
+                .jobs
+                .iter()
+                .find(|candidate| candidate.name == job.name)
+        })
+        .is_some_and(|candidate| {
+            candidate
+                .artifact_downloads
+                .iter()
+                .any(|download| download.job == source_job && download.name == name)
+        });
+    if declared {
+        return Ok(());
+    }
+    Err(ApiError::resource_not_found("依赖产物不在本任务下载声明内"))
+}
+
+async fn ensure_set_file_content(
+    state: &AppState,
+    job: &crate::store::jobs::JobRow,
+    name: &str,
+    size: u64,
+    sha256: Option<&str>,
+) -> Result<(), ApiError> {
+    if !name.starts_with(".set-") {
+        return Ok(());
+    }
+    let entry = state
+        .artifact_meta
+        .pending_set_file(job.build_id, job.id, job.attempt, name)
+        .await?
+        .ok_or_else(|| ApiError::resource_not_found("产物集文件不存在"))?;
+    if size != entry.size as u64 || sha256.is_some_and(|sha| sha != entry.sha256) {
+        return Err(ApiError::conflict("文件大小或摘要与不可变清单不一致"));
+    }
+    Ok(())
+}
+
+async fn set_response(
+    state: &AppState,
+    set: ArtifactSetRow,
+    entries: Vec<ArtifactSetEntry>,
+) -> Result<ArtifactSetResponse, ApiError> {
+    let mut items = Vec::with_capacity(entries.len());
+    let mut availability = ArtifactStateDto::Ready;
+    for entry in entries {
+        let observed = if let Some(name) = entry.artifact_name.as_deref() {
+            match state.artifact_meta.find(set.build_id, name).await? {
+                Some(meta) if meta.backend == ArtifactBackend::S3 => match &state.s3 {
+                    None => ArtifactStateDto::Unavailable,
+                    Some(s3) => match s3.head_object(&meta.path).await {
+                        Ok(size) if size == meta.size => ArtifactStateDto::Ready,
+                        Ok(_) => ArtifactStateDto::Missing,
+                        Err(crate::storage::StorageError::MissingBucket(_)) => {
+                            ArtifactStateDto::Missing
+                        }
+                        Err(_) => ArtifactStateDto::Unavailable,
+                    },
+                },
+                Some(meta) => state.artifacts.inspect_state(&meta).await?.into(),
+                None => ArtifactStateDto::Missing,
+            }
+        } else {
+            ArtifactStateDto::Ready
+        };
+        availability = match (availability, observed) {
+            (ArtifactStateDto::Unavailable, _) | (_, ArtifactStateDto::Unavailable) => {
+                ArtifactStateDto::Unavailable
+            }
+            (ArtifactStateDto::Missing, _) | (_, ArtifactStateDto::Missing) => {
+                ArtifactStateDto::Missing
+            }
+            _ => ArtifactStateDto::Ready,
+        };
+        items.push(ArtifactSetEntryDto {
+            entry,
+            state: observed,
+        });
+    }
+    Ok(ArtifactSetResponse {
+        set,
+        entries: items,
+        availability,
+    })
+}
+
+/// 同构建内的获派 Agent 下载完整发布集合的单个清单文件。
+#[utoipa::path(get, path = "/api/v1/agent/artifacts/{job_id}/sets/{set_id}/file", tag = "artifacts",
+    params(("job_id" = i64, Path, description = "消费任务 ID"), ("set_id" = i64, Path, description = "集合 ID"),
+        ("path" = String, Query, description = "清单相对路径")),
+    responses((status = 200, description = "文件流", content_type = "application/octet-stream"),
+        (status = 302, description = "短期 GET URL"), (status = 404, description = "集合或文件不存在", body = ErrorBody),
+        (status = 409, description = "正文不可用", body = ErrorBody)))]
+pub async fn agent_set_file(
+    State(state): State<AppState>,
+    Extension(agent): Extension<AgentAuth>,
+    Path((job_id, set_id)): Path<(i64, i64)>,
+    Query(query): Query<SetFileQuery>,
+) -> Result<Response, ApiError> {
+    let job = load_own_job(&state, &agent, job_id).await?;
+    let set = state
+        .artifact_meta
+        .set(set_id)
+        .await?
+        .filter(|s| {
+            s.build_id == job.build_id
+                && s.state == crate::store::artifacts::ArtifactSetState::Ready
+        })
+        .ok_or_else(|| ApiError::resource_not_found("产物集不存在"))?;
+    let source = JobRepo::new(state.pool.clone())
+        .get(set.job_id)
+        .await?
+        .ok_or_else(|| ApiError::resource_not_found("来源任务不存在"))?;
+    ensure_declared_download(&state, &job, &source.name, &set.name).await?;
+    let entry = state
+        .artifact_meta
+        .set_entries(set.id)
+        .await?
+        .into_iter()
+        .find(|e| {
+            e.path == query.path && e.kind == crate::store::artifacts::ArtifactEntryKind::File
+        })
+        .ok_or_else(|| ApiError::resource_not_found("清单文件不存在"))?;
+    let meta = state
+        .artifact_meta
+        .find(set.build_id, &entry.artifact_name.unwrap_or_default())
+        .await?
+        .ok_or_else(|| ApiError::conflict("产物正文缺失"))?;
+    artifact_response(&state, meta).await
 }
 
 fn artifact_object_keys(

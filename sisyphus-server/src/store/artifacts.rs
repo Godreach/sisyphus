@@ -87,6 +87,47 @@ impl ArtifactStore for LocalDiskArtifactStore {
         name: &str,
         content: ByteStream,
     ) -> Result<ArtifactMeta, StoreError> {
+        self.store_checked(build_id, name, content, None).await
+    }
+
+    async fn open(&self, build_id: i64, name: &str) -> Result<ByteStream, StoreError> {
+        self.open_stream(build_id, name).await
+    }
+
+    async fn inspect_state(&self, meta: &ArtifactMeta) -> Result<ArtifactState, StoreError> {
+        if meta.backend != ArtifactBackend::Local {
+            return Err(StoreError::Invalid("本地存储不能检查非本地产物".into()));
+        }
+        match tokio::fs::metadata(self.artifact_path(meta.build_id, &meta.name)).await {
+            Ok(m) if m.is_file() && m.len() == meta.size => Ok(ArtifactState::Ready),
+            Ok(_) => Ok(ArtifactState::Missing),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ArtifactState::Missing),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+impl LocalDiskArtifactStore {
+    /// 在正文可见前核验清单摘要与大小，错误内容只留在临时文件并清理。
+    pub async fn store_verified(
+        &self,
+        build_id: i64,
+        name: &str,
+        content: ByteStream,
+        size: u64,
+        sha256: &str,
+    ) -> Result<ArtifactMeta, StoreError> {
+        self.store_checked(build_id, name, content, Some((size, sha256)))
+            .await
+    }
+
+    async fn store_checked(
+        &self,
+        build_id: i64,
+        name: &str,
+        content: ByteStream,
+        expected: Option<(u64, &str)>,
+    ) -> Result<ArtifactMeta, StoreError> {
         validate_artifact_name(name)?;
         let dir = self.root.join(build_id.to_string());
         tokio::fs::create_dir_all(&dir).await?;
@@ -94,7 +135,15 @@ impl ArtifactStore for LocalDiskArtifactStore {
         // 半截写入不可见：先落 .part 临时文件（同目录保证 rename 原子），
         // 流尽且校验和算完才 rename 到最终名。失败清理临时文件。
         let tmp = dir.join(format!(".{name}.part-{}", now_part_suffix()));
-        let meta = write_stream(&tmp, build_id, name, content).await;
+        let meta = write_stream(&tmp, build_id, name, content)
+            .await
+            .and_then(|meta| {
+                if expected.is_some_and(|(size, sha)| meta.size != size || meta.sha256 != sha) {
+                    Err(StoreError::Invalid("目录文件与清单大小或摘要不符".into()))
+                } else {
+                    Ok(meta)
+                }
+            });
         match meta {
             Ok(meta) => {
                 tokio::fs::rename(&tmp, self.artifact_path(build_id, name)).await?;
@@ -107,7 +156,7 @@ impl ArtifactStore for LocalDiskArtifactStore {
         }
     }
 
-    async fn open(&self, build_id: i64, name: &str) -> Result<ByteStream, StoreError> {
+    async fn open_stream(&self, build_id: i64, name: &str) -> Result<ByteStream, StoreError> {
         validate_artifact_name(name)?;
         let path = self.artifact_path(build_id, name);
         if !tokio::fs::try_exists(&path).await? {
@@ -127,21 +176,6 @@ impl ArtifactStore for LocalDiskArtifactStore {
             }
         });
         Ok(stream.boxed())
-    }
-
-    async fn inspect_state(&self, meta: &ArtifactMeta) -> Result<ArtifactState, StoreError> {
-        if meta.backend != ArtifactBackend::Local {
-            return Err(StoreError::Invalid(format!(
-                "本地存储不能检查 {} 后端产物",
-                meta.backend.as_str()
-            )));
-        }
-        let path = self.artifact_path(meta.build_id, &meta.name);
-        if tokio::fs::try_exists(path).await? {
-            Ok(ArtifactState::Ready)
-        } else {
-            Ok(ArtifactState::Missing)
-        }
     }
 }
 
@@ -209,6 +243,74 @@ pub struct ArtifactMetaEntry {
     pub created_at: i64,
 }
 
+/// 目录清单条目的支持类型。
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    sqlx::Type,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
+)]
+#[sqlx(type_name = "TEXT", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactEntryKind {
+    /// 普通文件。
+    File,
+    /// 普通目录。
+    Directory,
+}
+
+/// 完整清单的发布状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type, serde::Serialize, utoipa::ToSchema)]
+#[sqlx(type_name = "TEXT", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactSetState {
+    /// 全部正文尚未核验完成。
+    Pending,
+    /// 全部正文核验完成，可以整体消费。
+    Ready,
+}
+
+/// 一次任务 attempt 的完整目录产物清单及发布状态。
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize, utoipa::ToSchema)]
+pub struct ArtifactSetRow {
+    /// Server 分配的稳定集合 ID。
+    pub id: i64,
+    /// 所属构建。
+    pub build_id: i64,
+    /// 上传任务行 ID。
+    pub job_id: i64,
+    /// 上传 attempt。
+    pub attempt: i32,
+    /// 任务声明的产物名。
+    pub name: String,
+    /// 发布状态：pending 或 ready。
+    pub state: ArtifactSetState,
+    /// 创建时间（Unix 毫秒）。
+    pub created_at: i64,
+}
+
+/// 清单内的普通文件或目录；内部文件名不作为授权凭据。
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize, utoipa::ToSchema)]
+pub struct ArtifactSetEntry {
+    /// 规范化的目录相对路径。
+    pub path: String,
+    /// file 或 directory。
+    pub kind: ArtifactEntryKind,
+    /// 字节数；目录为零。
+    pub size: i64,
+    /// 小写 SHA-256；目录为空。
+    pub sha256: String,
+    /// 是否保留 Unix 可执行位。
+    pub executable: bool,
+    /// Server 分配的私有字节对象名；目录为空。
+    pub artifact_name: Option<String>,
+}
+
 /// 尚未完成的 S3 multipart 上传会话。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultipartUploadRow {
@@ -274,6 +376,175 @@ impl ArtifactRow {
 }
 
 impl SqliteArtifactMetaRepo {
+    /// 创建不可变清单；同一 attempt 重试必须提供完全相同的条目。
+    pub async fn create_set(
+        &self,
+        build_id: i64,
+        job_id: i64,
+        attempt: i32,
+        name: &str,
+        entries: &[ArtifactSetEntry],
+    ) -> Result<(ArtifactSetRow, Vec<ArtifactSetEntry>), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let inserted = sqlx::query("INSERT INTO artifact_sets (build_id, job_id, attempt, name, state, created_at)
+                     VALUES (?, ?, ?, ?, 'pending', ?) ON CONFLICT (job_id, attempt, name) DO NOTHING")
+            .bind(build_id).bind(job_id).bind(attempt).bind(name)
+            .bind(crate::store::now_ms()).execute(&mut *tx).await?.rows_affected() != 0;
+        let set = sqlx::query_as::<_, ArtifactSetRow>(
+            "SELECT id, build_id, job_id, attempt, name, state, created_at FROM artifact_sets
+             WHERE job_id = ? AND attempt = ? AND name = ?",
+        )
+        .bind(job_id)
+        .bind(attempt)
+        .bind(name)
+        .fetch_one(&mut *tx)
+        .await?;
+        let existing = sqlx::query_as::<_, ArtifactSetEntry>(
+            "SELECT path, kind, size, sha256, executable, artifact_name FROM artifact_set_entries
+             WHERE set_id = ? ORDER BY path",
+        )
+        .bind(set.id)
+        .fetch_all(&mut *tx)
+        .await?;
+        if inserted {
+            for (index, entry) in entries.iter().enumerate() {
+                // Internal names cannot collide with declared names or other attempts.
+                let internal = (entry.kind == ArtifactEntryKind::File)
+                    .then(|| format!(".set-{}-{index}", set.id));
+                sqlx::query(
+                    "INSERT INTO artifact_set_entries
+                             (set_id, path, kind, size, sha256, executable, artifact_name)
+                             VALUES (?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(set.id)
+                .bind(&entry.path)
+                .bind(entry.kind)
+                .bind(entry.size)
+                .bind(&entry.sha256)
+                .bind(entry.executable)
+                .bind(internal)
+                .execute(&mut *tx)
+                .await?;
+            }
+        } else if existing.len() != entries.len()
+            || existing.iter().zip(entries).any(|(a, b)| {
+                a.path != b.path
+                    || a.kind != b.kind
+                    || a.size != b.size
+                    || a.sha256 != b.sha256
+                    || a.executable != b.executable
+            })
+        {
+            return Err(StoreError::Invalid("重试清单与已有产物集不一致".into()));
+        }
+        let actual = sqlx::query_as::<_, ArtifactSetEntry>(
+            "SELECT path, kind, size, sha256, executable, artifact_name FROM artifact_set_entries
+             WHERE set_id = ? ORDER BY path",
+        )
+        .bind(set.id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok((set, actual))
+    }
+
+    /// 查询当前构建、任务、attempt 的清单文件，仅允许 pending 集合写入。
+    pub async fn pending_set_file(
+        &self,
+        build_id: i64,
+        job_id: i64,
+        attempt: i32,
+        artifact_name: &str,
+    ) -> Result<Option<ArtifactSetEntry>, StoreError> {
+        Ok(sqlx::query_as(
+            "SELECT e.path, e.kind, e.size, e.sha256, e.executable, e.artifact_name FROM artifact_set_entries e
+                           JOIN artifact_sets s ON s.id = e.set_id
+                           WHERE e.artifact_name = ? AND s.state = 'pending'
+                             AND s.build_id = ? AND s.job_id = ? AND s.attempt = ? AND e.kind = 'file'",
+        )
+        .bind(artifact_name)
+        .bind(build_id).bind(job_id).bind(attempt)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// 列出已经完整发布的目录产物，包括历史 attempt。
+    pub async fn list_sets(&self, build_id: i64) -> Result<Vec<ArtifactSetRow>, StoreError> {
+        Ok(sqlx::query_as(
+            "SELECT id, build_id, job_id, attempt, name, state, created_at
+                           FROM artifact_sets WHERE build_id = ? AND state = 'ready' ORDER BY id",
+        )
+        .bind(build_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// 按稳定 ID 查询集合；调用方负责归属授权。
+    pub async fn set(&self, set_id: i64) -> Result<Option<ArtifactSetRow>, StoreError> {
+        Ok(sqlx::query_as(
+            "SELECT id, build_id, job_id, attempt, name, state, created_at
+                           FROM artifact_sets WHERE id = ?",
+        )
+        .bind(set_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// 按任务 attempt 与声明名查询集合，用于防止文件/目录命名空间碰撞。
+    pub async fn set_by_name(
+        &self,
+        job_id: i64,
+        attempt: i32,
+        name: &str,
+    ) -> Result<Option<ArtifactSetRow>, StoreError> {
+        Ok(sqlx::query_as(
+            "SELECT id, build_id, job_id, attempt, name, state, created_at FROM artifact_sets
+                           WHERE job_id = ? AND attempt = ? AND name = ?",
+        )
+        .bind(job_id)
+        .bind(attempt)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// 按相对路径顺序读取不可变清单。
+    pub async fn set_entries(&self, set_id: i64) -> Result<Vec<ArtifactSetEntry>, StoreError> {
+        Ok(sqlx::query_as(
+            "SELECT path, kind, size, sha256, executable, artifact_name
+                           FROM artifact_set_entries WHERE set_id = ? ORDER BY path",
+        )
+        .bind(set_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// 在事务内验证全部文件归属、字节数和摘要，然后整体发布。
+    pub async fn publish_set(&self, set_id: i64) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let missing: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM artifact_set_entries e JOIN artifact_sets s ON s.id = e.set_id
+             LEFT JOIN artifacts a
+             ON a.name = e.artifact_name AND a.state = 'ready'
+                AND a.build_id = s.build_id AND a.job_id = s.job_id AND a.attempt = s.attempt
+             WHERE e.set_id = ? AND e.kind = 'file'
+               AND (a.id IS NULL OR a.size != e.size OR a.sha256 != e.sha256)",
+        )
+        .bind(set_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if missing != 0 {
+            return Err(StoreError::Invalid(format!(
+                "产物集还有 {missing} 个文件未完成校验"
+            )));
+        }
+        sqlx::query("UPDATE artifact_sets SET state = 'ready' WHERE id = ? AND state = 'pending'")
+            .bind(set_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
     /// 从既有池装配（表已由迁移建好）。`retention_days` 为全局保留期天数
     /// （config `[retention]` 合并值；与日志共享 per-build 保留期，ADR-0013）。
     pub fn new(pool: SqlitePool, retention_days: i64) -> Self {
@@ -293,7 +564,7 @@ impl SqliteArtifactMetaRepo {
         let rows = sqlx::query_as::<_, ArtifactRow>(
             "SELECT build_id, job_id, attempt, backend, state, name, path, size, sha256,
                     created_at FROM artifacts
-             WHERE build_id = ? AND state != 'pending' ORDER BY name",
+             WHERE build_id = ? AND state != 'pending' AND name NOT LIKE '.set-%' ORDER BY name",
         )
         .bind(build_id)
         .fetch_all(&self.pool)

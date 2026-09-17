@@ -46,6 +46,7 @@ function buildDetailBody(overrides: Record<string, unknown> = {}) {
         jobs: [
           {
             name: 'compile',
+            id: 11,
             status: 'succeeded',
             attempt: 1,
             started_at: 1_700_000_000_000,
@@ -63,6 +64,7 @@ function buildDetailBody(overrides: Record<string, unknown> = {}) {
         jobs: [
           {
             name: 'push',
+            id: 12,
             status: 'queued',
             attempt: 1,
             started_at: null,
@@ -221,6 +223,34 @@ describe('BuildDetailView（#107 定稿：阶段/任务卡 + 动作闭环 + SSE 
     expect(wrapper!.find('.build-title-row .badge.running').exists()).toBe(true)
     expect(wrapper!.find('.job-card .badge.success').exists()).toBe(true)
     expect(wrapper!.find('.job-card .badge.info').exists()).toBe(true)
+  })
+
+  it('目录产物按任务和 attempt 展示，显示摘要与缺失状态且禁用缺失下载', async () => {
+    mockDetail(buildDetailBody())
+    mockDefinitionAndArtifacts()
+    const checksum = 'a'.repeat(64)
+    const item = (id: number, jobId: number, attempt: number, name: string) => ({
+      set: { id, job_id: jobId, attempt, name, state: 'ready' }, availability: 'missing',
+      entries: [
+        { path: 'nested/app.txt', kind: 'file', size: 3, sha256: checksum, state: 'ready' },
+        { path: 'missing.txt', kind: 'file', size: 2, sha256: checksum, state: 'missing' },
+        { path: 'empty', kind: 'directory', size: 0, sha256: '', state: 'ready' },
+      ],
+    })
+    server.use(http.get(`${BASE}/builds/7/artifact-sets`, () => HttpResponse.json({ items: [
+      item(1, 11, 1, 'compile-dir'), item(2, 12, 1, 'push-dir'), item(3, 11, 2, 'other-attempt'),
+    ] })))
+    mountView()
+    await vi.waitFor(() => expect(wrapper!.findAll('.artifact-set')).toHaveLength(2))
+    const stages = wrapper!.findAll('.stage-block')
+    expect(stages[0]!.text()).toContain('compile-dir')
+    expect(stages[0]!.text()).not.toContain('push-dir')
+    expect(stages[1]!.text()).toContain('push-dir')
+    expect(wrapper!.text()).not.toContain('other-attempt')
+    expect(wrapper!.text()).toContain(checksum)
+    expect(wrapper!.text()).toContain('正文缺失')
+    expect(wrapper!.find('a[href*="missing.txt"]').exists()).toBe(false)
+    expect(wrapper!.get('.artifact-set a').attributes('href')).toContain('path=nested%2Fapp.txt')
   })
 
   it('排队任务 attempt 历史（attempt>1 标注并列）', async () => {

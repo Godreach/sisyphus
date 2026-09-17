@@ -12,6 +12,7 @@ export const VALIDATION_CODES = [
   "container_image_empty",
   "env_secret_collision",
   "artifact_upload_empty",
+  "artifact_upload_duplicate",
   "artifact_upload_absolute",
   "cache_key_empty",
   "cache_key_too_long",

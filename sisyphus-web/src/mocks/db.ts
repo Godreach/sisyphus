@@ -766,6 +766,7 @@ export function buildDetailOf(project: string, pipeline: string, number: number)
           cell?.status === 'queued' ? null : (summary.started_at ?? NOW - 60e3) + idxInStage * 30e3 + (attempt - 1) * 1200e3
         const finishedAt = done ? (startedAt as number) + 25e3 + idxInStage * 10e3 : null
         jobs.push({
+          id: number * 10000 + si * 1000 + idxInStage * 10 + attempt,
           name: job.name,
           status: (cell?.status ?? 'unknown') as JobStatusDto,
           attempt,
