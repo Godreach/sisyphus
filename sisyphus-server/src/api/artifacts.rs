@@ -6,18 +6,19 @@
 //!   `Authorization: Bearer sisa_…`（Agent token 族，与 gRPC 通道同一查行面
 //!   [`AgentRepo::find_active_by_hash`]；非 Agent token 一律 401——PAT/会话
 //!   不混入本面）。
-//!   - 上传 `POST /agent/artifacts/{job_id}/{name}`：请求体即产物字节流式
-//!     写盘（不整读入内存）、边写边算 SHA-256，完成后记元数据行。`job_id`
-//!     为上传任务自身行 id（JobSpec.job_id 同源）——Server 侧解析出
-//!     build_id 定位磁盘目录。
+//!   - 上传 `POST /agent/artifacts/{job_id}/{name}`：未配置 S3 时请求体即
+//!     产物字节流式写盘。已配置 S3 时 409，改走直传。
+//!   - 直传 `POST /agent/artifacts/{job_id}/{name}/upload-url`（票 #123）：
+//!     仅任务上传声明内的名，签发临时 key 短期 PUT URL（不含长期凭据）。
+//!   - 完成 `POST /agent/artifacts/{job_id}/{name}/complete`：流式 SHA-256
+//!     核验临时对象，复制到从未签发写权限的最终 key 后 ready；完成前不可见。
 //!   - 下载依赖 `GET /agent/artifacts/{job_id}/downloads/{source_job}/{name}`：
 //!     `job_id` 为拉取任务自身行 id（由此定位构建）、`source_job` 为声明里
 //!     的来源任务名（报错定位用）、`name` 为产物名。产物按 (build, name)
 //!     寻址——**尚不存在**（来源任务未成功上传）时 404 附清晰报错，Agent
-//!     侧据此任务失败（不静默等待）。
+//!     侧据此任务失败（不静默等待）。S3 产物 302 到短期 GET URL。
 //! - **用户面**（viewer 档，挂构建资源下）：构建产物列表（详情页产物区数据
-//!   源）+ 单产物流式下载（响应头带 `Content-Length`（大小）与
-//!   `X-Sisyphus-Sha256`（校验和））。
+//!   源）+ 本地下载字节流 / S3 短期 GET URL（302 Location）。
 //!
 //! 槽位语义（ADR-0008）：槽位占用到**产物上传完成**由时序保证——Agent 在
 //! 步骤全部成功、缓存 save 之后、终态上报之前上传产物，Server 侧终态
@@ -31,15 +32,18 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sisyphus_model::validate::BuildSnapshot;
 use utoipa::ToSchema;
 
 use super::AppState;
 use super::auth::bearer_token;
 use super::builds::load_build;
-use super::error::{ApiError, ErrorBody, ValidationIssue};
+use super::error::{ApiError, ErrorBody, ValidationIssue, parse_body};
 use super::policy::RequireViewer;
 use crate::auth::{TokenFamily, token_family, token_hash};
+use crate::storage::{ObjectClass, ObjectPhase, artifact_blob_name, object_key};
+use crate::store::builds::BuildRepo;
 use crate::store::jobs::JobRepo;
 use crate::store::{ArtifactBackend, ArtifactMeta, ArtifactMetaRepo, ArtifactState, ArtifactStore};
 
@@ -65,6 +69,27 @@ pub struct ArtifactUploadedResponse {
     pub sha256: String,
 }
 
+/// Agent 预签名上传 URL（仅临时对象，票 #123）。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ArtifactUploadUrlResponse {
+    /// 短期 PUT URL（查询串签名，不含长期 secret）。
+    pub url: String,
+    /// 有效秒数。
+    pub expires_in: i64,
+}
+
+/// Agent 完成上传：声明的大小与 SHA-256。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ArtifactCompleteRequest {
+    /// 字节数。
+    pub size: u64,
+    /// SHA-256 校验和（十六进制小写）。
+    pub sha256: String,
+}
+
+/// 预签名有效期（秒）：上传 PUT 与用户 GET 同为 5 分钟。
+const PRESIGN_SECS: i64 = 5 * 60;
+
 /// 产物条目（构建产物列表）。
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ArtifactDto {
@@ -82,7 +107,7 @@ pub struct ArtifactDto {
     pub job_id: Option<i64>,
     /// 上传任务 attempt；旧数据未记录时为空。
     pub attempt: Option<i32>,
-    /// 正文字节状态（`ready` / `missing`）。
+    /// 正文字节状态（`ready` / `missing` / `unavailable`；pending 不出现）。
     pub state: ArtifactStateDto,
 }
 
@@ -122,6 +147,7 @@ impl From<ArtifactState> for ArtifactStateDto {
         match value {
             ArtifactState::Ready => Self::Ready,
             ArtifactState::Missing => Self::Missing,
+            ArtifactState::Pending => Self::Missing, // 列表已过滤；防御性兜底
         }
     }
 }
@@ -193,6 +219,11 @@ pub async fn agent_upload(
     Path((job_id, name)): Path<(i64, String)>,
     body: Body,
 ) -> Result<(StatusCode, Json<ArtifactUploadedResponse>), ApiError> {
+    if state.s3.is_some() {
+        return Err(ApiError::conflict(
+            "已配置 S3：请经预签名临时对象直传后再 complete",
+        ));
+    }
     validate_name(&name)?;
     let job = load_own_job(&state, &agent, job_id).await?;
 
@@ -224,6 +255,207 @@ pub async fn agent_upload(
     ))
 }
 
+/// Agent 申请单文件临时对象 PUT URL（票 #123）：仅任务上传声明内的名，
+/// 不接触长期凭据；最终 key 从不签发写权限。
+#[utoipa::path(
+    post,
+    path = "/api/v1/agent/artifacts/{job_id}/{name}/upload-url",
+    tag = "artifacts",
+    params(
+        ("job_id" = i64, Path, description = "上传任务自身行 id"),
+        ("name" = String, Path, description = "产物名（须在任务上传声明内）"),
+    ),
+    responses(
+        (status = 200, description = "短期 PUT URL", body = ArtifactUploadUrlResponse),
+        (status = 401, description = "未认证", body = ErrorBody),
+        (status = 404, description = "任务行不存在", body = ErrorBody),
+        (status = 409, description = "未配置 S3", body = ErrorBody),
+        (status = 422, description = "产物名非法或不在上传声明内", body = ErrorBody),
+    )
+)]
+pub async fn agent_upload_url(
+    State(state): State<AppState>,
+    Extension(agent): Extension<AgentAuth>,
+    Path((job_id, name)): Path<(i64, String)>,
+) -> Result<Json<ArtifactUploadUrlResponse>, ApiError> {
+    validate_name(&name)?;
+    let job = load_own_job(&state, &agent, job_id).await?;
+    let s3 = state
+        .s3
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("未配置 S3，无法签发直传 URL"))?;
+    ensure_declared_upload(&state, &job, &name).await?;
+
+    let (tmp_key, final_key) = artifact_object_keys(s3.prefix(), &job, &name);
+    let existing = state
+        .artifact_meta
+        .find_including_pending(job.build_id, &name)
+        .await?;
+    if existing
+        .as_ref()
+        .is_some_and(|m| m.state == ArtifactState::Ready)
+    {
+        return Err(ApiError::conflict(format!(
+            "产物 {name} 已 ready，重试请 complete 同一摘要"
+        )));
+    }
+    state
+        .artifact_meta
+        .record(&ArtifactMeta {
+            build_id: job.build_id,
+            job_id: Some(job.id),
+            attempt: Some(job.attempt),
+            backend: ArtifactBackend::S3,
+            state: ArtifactState::Pending,
+            name: name.clone(),
+            path: final_key,
+            size: 0,
+            sha256: String::new(),
+        })
+        .await
+        .map_err(|e| ApiError::internal("产物 pending 落库", &e))?;
+    let url = s3
+        .presign_put(&tmp_key, PRESIGN_SECS)
+        .map_err(|e| ApiError::internal("签发上传 URL", &e))?;
+    Ok(Json(ArtifactUploadUrlResponse {
+        url,
+        expires_in: PRESIGN_SECS,
+    }))
+}
+
+/// Agent 提交清单：流式核验临时对象 SHA-256，复制到最终 key 后 ready。
+#[utoipa::path(
+    post,
+    path = "/api/v1/agent/artifacts/{job_id}/{name}/complete",
+    tag = "artifacts",
+    request_body = ArtifactCompleteRequest,
+    params(
+        ("job_id" = i64, Path, description = "上传任务自身行 id"),
+        ("name" = String, Path, description = "产物名"),
+    ),
+    responses(
+        (status = 201, description = "已固化为 ready", body = ArtifactUploadedResponse),
+        (status = 200, description = "已 ready，幂等", body = ArtifactUploadedResponse),
+        (status = 401, description = "未认证", body = ErrorBody),
+        (status = 404, description = "任务行不存在", body = ErrorBody),
+        (status = 409, description = "未配置 S3", body = ErrorBody),
+        (status = 422, description = "校验失败", body = ErrorBody),
+    )
+)]
+pub async fn agent_complete(
+    State(state): State<AppState>,
+    Extension(agent): Extension<AgentAuth>,
+    Path((job_id, name)): Path<(i64, String)>,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<ArtifactUploadedResponse>), ApiError> {
+    validate_name(&name)?;
+    let job = load_own_job(&state, &agent, job_id).await?;
+    let s3 = state
+        .s3
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("未配置 S3，无法完成直传"))?;
+    ensure_declared_upload(&state, &job, &name).await?;
+    let req: ArtifactCompleteRequest = parse_body(&body)?;
+    let sha = req.sha256.to_ascii_lowercase();
+
+    if let Some(meta) = state
+        .artifact_meta
+        .find_including_pending(job.build_id, &name)
+        .await?
+        && meta.state == ArtifactState::Ready
+        && meta.backend == ArtifactBackend::S3
+    {
+        if meta.size == req.size && meta.sha256 == sha {
+            return Ok((
+                StatusCode::OK,
+                Json(ArtifactUploadedResponse {
+                    name: meta.name,
+                    size: meta.size,
+                    sha256: meta.sha256,
+                }),
+            ));
+        }
+        return Err(ApiError::conflict(format!(
+            "产物 {name} 已 ready，摘要不一致"
+        )));
+    }
+
+    let (tmp_key, final_key) = artifact_object_keys(s3.prefix(), &job, &name);
+
+    let (size, digest) = match s3.hash_object(&tmp_key).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(ApiError::validation(
+                "临时对象校验失败",
+                vec![ValidationIssue {
+                    path: "upload".into(),
+                    message: e.to_string(),
+                }],
+            ));
+        }
+    };
+    if size != req.size || digest != sha {
+        let _ = s3.delete_object(&tmp_key).await;
+        return Err(ApiError::validation(
+            "产物内容与声明不符",
+            vec![ValidationIssue {
+                path: "sha256".into(),
+                message: format!(
+                    "声明 size={}/sha256={}，实际 size={}/sha256={digest}",
+                    req.size, sha, size
+                ),
+            }],
+        ));
+    }
+    s3.copy_object(&tmp_key, &final_key)
+        .await
+        .map_err(|e| ApiError::internal("复制最终对象", &e))?;
+    let (final_size, final_digest) = match s3.hash_object(&final_key).await {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = s3.delete_object(&final_key).await;
+            let _ = s3.delete_object(&tmp_key).await;
+            return Err(ApiError::internal("校验最终对象", &e));
+        }
+    };
+    if final_size != size || final_digest != digest {
+        let _ = s3.delete_object(&final_key).await;
+        let _ = s3.delete_object(&tmp_key).await;
+        return Err(ApiError::validation(
+            "最终对象校验失败",
+            vec![ValidationIssue {
+                path: "sha256".into(),
+                message: "复制后最终对象与临时对象不一致".into(),
+            }],
+        ));
+    }
+    let _ = s3.delete_object(&tmp_key).await;
+    let meta = ArtifactMeta {
+        build_id: job.build_id,
+        job_id: Some(job.id),
+        attempt: Some(job.attempt),
+        backend: ArtifactBackend::S3,
+        state: ArtifactState::Ready,
+        name: name.clone(),
+        path: final_key,
+        size,
+        sha256: digest.clone(),
+    };
+    state
+        .artifact_meta
+        .record(&meta)
+        .await
+        .map_err(|e| ApiError::internal("产物元数据落库", &e))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ArtifactUploadedResponse {
+            name: meta.name,
+            size: meta.size,
+            sha256: meta.sha256,
+        }),
+    ))
+}
+
 /// Agent 依赖产物下载（agent token 鉴权，票 #74）：拉取本次构建内其它
 /// 任务的产物。`job_id` 定位构建，`source_job`/`name` 定位产物（声明的
 /// 来源任务名用于报错定位）。产物尚不存在 → 404 附清晰报错。
@@ -237,7 +469,8 @@ pub async fn agent_upload(
         ("name" = String, Path, description = "产物名"),
     ),
     responses(
-        (status = 200, description = "产物字节流（响应头 Content-Length + X-Sisyphus-Sha256）", content_type = "application/octet-stream"),
+        (status = 200, description = "本地产物字节流（响应头 Content-Length + X-Sisyphus-Sha256）", content_type = "application/octet-stream"),
+        (status = 302, description = "S3 产物：Location 为短期 GET URL"),
         (status = 401, description = "未认证（仅 Agent token `sisa_` 族可用）", body = ErrorBody),
         (status = 404, description = "任务不存在 / 来源任务不存在 / 依赖产物尚不存在（未上传）", body = ErrorBody),
         (status = 409, description = "产物元数据存在但正文缺失或后端尚不可用", body = ErrorBody),
@@ -352,7 +585,8 @@ pub async fn list(
         ("artifact" = String, Path, description = "产物名"),
     ),
     responses(
-        (status = 200, description = "产物字节流（Content-Length = 大小，X-Sisyphus-Sha256 = 校验和）", content_type = "application/octet-stream"),
+        (status = 200, description = "本地产物字节流（Content-Length = 大小，X-Sisyphus-Sha256 = 校验和）", content_type = "application/octet-stream"),
+        (status = 302, description = "S3 产物：Location 为短期 GET URL"),
         (status = 401, description = "未认证", body = ErrorBody),
         (status = 403, description = "权限不足（需 viewer 档）", body = ErrorBody),
         (status = 404, description = "项目不存在/不可见，构建号或产物不存在", body = ErrorBody),
@@ -391,6 +625,83 @@ async fn load_own_job(
         .ok_or_else(|| ApiError::resource_not_found(format!("任务 {job_id} 不存在")))
 }
 
+/// 任务上传声明：优先 jobs.spec_json，缺省回落到构建快照。
+async fn ensure_declared_upload(
+    state: &AppState,
+    job: &crate::store::jobs::JobRow,
+    name: &str,
+) -> Result<(), ApiError> {
+    if declared_uploads(job).contains(&name.to_string()) {
+        return Ok(());
+    }
+    let build = BuildRepo::new(state.pool.clone())
+        .get(job.build_id)
+        .await?
+        .ok_or_else(|| ApiError::resource_not_found(format!("构建 {} 不存在", job.build_id)))?;
+    let snapshot: BuildSnapshot = serde_json::from_str(&build.snapshot)
+        .map_err(|e| ApiError::internal("解析构建快照", &e))?;
+    let declared = snapshot
+        .pipeline
+        .stages
+        .get(job.stage_index as usize)
+        .and_then(|s| s.jobs.iter().find(|j| j.name == job.name))
+        .map(|j| {
+            j.artifact_uploads
+                .iter()
+                .map(|u| u.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if declared.iter().any(|n| n == name) {
+        return Ok(());
+    }
+    Err(ApiError::validation(
+        "产物名不在本任务上传声明内",
+        vec![ValidationIssue {
+            path: "name".into(),
+            message: format!("任务 {} 未声明上传 {name}", job.name),
+        }],
+    ))
+}
+
+fn artifact_object_keys(
+    prefix: &str,
+    job: &crate::store::jobs::JobRow,
+    name: &str,
+) -> (String, String) {
+    let blob = artifact_blob_name(job.build_id, job.id, job.attempt, name);
+    (
+        object_key(
+            prefix,
+            ObjectClass::Artifacts,
+            ObjectPhase::Temporary,
+            &blob,
+        ),
+        object_key(prefix, ObjectClass::Artifacts, ObjectPhase::Final, &blob),
+    )
+}
+
+fn declared_uploads(job: &crate::store::jobs::JobRow) -> Vec<String> {
+    let Some(spec) = job.spec_json.as_deref() else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(spec) else {
+        return Vec::new();
+    };
+    v.get("artifact_uploads")
+        .and_then(|u| u.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    item.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(ToOwned::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn dto_state(state: &AppState, meta: &ArtifactMeta) -> ArtifactStateDto {
     if meta.backend == ArtifactBackend::S3 && state.s3.is_none() {
         ArtifactStateDto::Unavailable
@@ -415,20 +726,36 @@ fn validate_name(name: &str) -> Result<(), ApiError> {
 /// 打开字节流并组装下载响应（Agent 面 / 用户面共用）：流式 body +
 /// Content-Length（大小）+ X-Sisyphus-Sha256（校验和）+ 附件文件名。
 async fn artifact_response(state: &AppState, meta: ArtifactMeta) -> Result<Response, ApiError> {
-    if meta.backend != ArtifactBackend::Local {
-        let msg = if state.s3.is_none() {
-            format!("产物 {} 的存储后端未配置", meta.name)
-        } else {
-            format!(
-                "产物 {} 位于 {} 后端，当前下载 adapter 尚不可用",
-                meta.name,
-                meta.backend.as_str()
-            )
-        };
-        return Err(ApiError::conflict(msg));
-    }
     if meta.state == ArtifactState::Missing {
         return Err(ApiError::conflict(format!("产物 {} 的正文缺失", meta.name)));
+    }
+    if meta.backend == ArtifactBackend::S3 {
+        let Some(s3) = state.s3.as_ref() else {
+            return Err(ApiError::conflict(format!(
+                "产物 {} 的存储后端未配置",
+                meta.name
+            )));
+        };
+        let url = s3
+            .presign_get(&meta.path, PRESIGN_SECS)
+            .map_err(|e| ApiError::internal("签发下载 URL", &e))?;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::LOCATION,
+            url.parse().expect("预签名 URL 为合法头值"),
+        );
+        headers.insert(
+            header::HeaderName::from_static("x-sisyphus-sha256"),
+            meta.sha256.parse().expect("sha256 hex 为合法头值"),
+        );
+        return Ok((StatusCode::FOUND, headers).into_response());
+    }
+    if meta.backend != ArtifactBackend::Local {
+        return Err(ApiError::conflict(format!(
+            "产物 {} 位于 {} 后端，当前下载 adapter 尚不可用",
+            meta.name,
+            meta.backend.as_str()
+        )));
     }
     let stream = match state.artifacts.open(meta.build_id, &meta.name).await {
         Ok(stream) => stream,

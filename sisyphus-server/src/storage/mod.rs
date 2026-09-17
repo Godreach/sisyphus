@@ -8,7 +8,7 @@ use sqlx::SqlitePool;
 use crate::config::S3Config;
 use crate::store::{S3BackendIdentity, S3IdentityRepo, StoreError};
 
-pub use keys::{ObjectClass, ObjectPhase, object_key, probe_key};
+pub use keys::{ObjectClass, ObjectPhase, artifact_blob_name, object_key, probe_key};
 pub use s3::{S3Client, S3PublicView};
 
 /// 存储面错误（启动校验 / 连接自检）。错误正文不含凭据。

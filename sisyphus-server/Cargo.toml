@@ -56,7 +56,7 @@ metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 # S3 兼容后端 HTTP（票 #122，ADR-0026）：reqwest + rustls，与 SMTP 同走 rustls/ring
 # 例外，不引入 native-tls/openssl。SigV4 HMAC-SHA256 用已有 sha2，不另引 hmac。
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 
 [dev-dependencies]
 tempfile = "3"

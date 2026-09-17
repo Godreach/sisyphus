@@ -36,6 +36,19 @@ async fn spawn_stub(
     let upload_state = uploads.clone();
     let app = Router::new()
         .route(
+            "/api/v1/agent/artifacts/{job_id}/{name}/upload-url",
+            post(|| async {
+                (
+                    StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({
+                        "code": "CONFLICT",
+                        "message": "未配置 S3，无法签发直传 URL",
+                    })),
+                )
+                    .into_response()
+            }),
+        )
+        .route(
             "/api/v1/agent/artifacts/{job_id}/{name}",
             post(
                 move |AxumPath((job_id, name)): AxumPath<(String, String)>,
@@ -114,6 +127,7 @@ fn io(addr: &str) -> RealArtifactIo {
     // 环境代理 502）；生产构造（`new`）不受影响。
     let client = reqwest::Client::builder()
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("build");
     RealArtifactIo::with_client(
@@ -212,6 +226,76 @@ async fn download_rejection_surfaces_clear_message() {
         other => panic!("应为 Rejected：{other}"),
     }
     assert!(!dest.exists(), "失败不落半截文件");
+}
+
+/// 已配置 S3：Agent 申请临时 PUT URL、直传字节、再 complete。
+#[tokio::test]
+async fn upload_uses_presigned_put_then_complete() {
+    let put_seen = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let complete_seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let put_state = put_seen.clone();
+    let complete_state = complete_seen.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let put_url = format!("http://{addr}/s3/tmp/dist.bin");
+    let grant_url = put_url.clone();
+    let app = Router::new()
+        .route(
+            "/api/v1/agent/artifacts/{job_id}/{name}/upload-url",
+            post(move || {
+                let grant_url = grant_url.clone();
+                async move {
+                    axum::Json(serde_json::json!({ "url": grant_url, "expires_in": 300 }))
+                        .into_response()
+                }
+            }),
+        )
+        .route(
+            "/s3/tmp/dist.bin",
+            axum::routing::put(move |body: axum::body::Bytes| {
+                let put_state = put_state.clone();
+                async move {
+                    put_state.lock().expect("锁").push(body.to_vec());
+                    StatusCode::OK
+                }
+            }),
+        )
+        .route(
+            "/api/v1/agent/artifacts/{job_id}/{name}/complete",
+            post(move |body: axum::body::Bytes| {
+                let complete_state = complete_state.clone();
+                async move {
+                    complete_state
+                        .lock()
+                        .expect("锁")
+                        .push(String::from_utf8_lossy(&body).into_owned());
+                    (
+                        StatusCode::CREATED,
+                        axum::Json(serde_json::json!({
+                            "name": "dist.bin", "size": 3, "sha256": "x"
+                        })),
+                    )
+                        .into_response()
+                }
+            }),
+        );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let dir = tempfile::tempdir().expect("临时目录");
+    let src = dir.path().join("dist.bin");
+    tokio::fs::write(&src, b"abc").await.expect("写");
+    io(&format!("http://{addr}"))
+        .upload("42", "dist.bin", &src)
+        .await
+        .expect("直传应成功");
+    assert_eq!(put_seen.lock().expect("锁").as_slice(), [b"abc".to_vec()]);
+    let complete = complete_seen.lock().expect("锁").clone();
+    assert_eq!(complete.len(), 1);
+    assert!(complete[0].contains("\"size\":3"), "{}", complete[0]);
 }
 
 /// 契约常量与端点 URL 拼接（纯函数，同票 #57 的 url 单测纪律）。

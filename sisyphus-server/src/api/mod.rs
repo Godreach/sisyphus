@@ -261,6 +261,14 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
             post(artifacts::agent_upload),
         )
         .route(
+            "/agent/artifacts/{job_id}/{name}/upload-url",
+            post(artifacts::agent_upload_url),
+        )
+        .route(
+            "/agent/artifacts/{job_id}/{name}/complete",
+            post(artifacts::agent_complete),
+        )
+        .route(
             "/agent/artifacts/{job_id}/downloads/{source_job}/{name}",
             get(artifacts::agent_download),
         )

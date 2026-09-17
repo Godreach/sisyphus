@@ -57,6 +57,11 @@ pub fn probe_key(prefix: &str, probe_id: &str, name: &str) -> String {
     join_key(prefix, &[".sisyphus-probe", probe_id, name])
 }
 
+/// 单文件产物在临时/最终前缀下的对象名（构建/任务/attempt/产物名）。
+pub fn artifact_blob_name(build_id: i64, job_id: i64, attempt: i32, name: &str) -> String {
+    format!("{build_id}/{job_id}/{attempt}/{name}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,5 +88,6 @@ mod tests {
             !probe_key("prod", "p1", "blob").starts_with("prod/artifacts/")
                 && !probe_key("prod", "p1", "blob").starts_with("prod/logs/")
         );
+        assert_eq!(artifact_blob_name(7, 3, 1, "dist.bin"), "7/3/1/dist.bin");
     }
 }

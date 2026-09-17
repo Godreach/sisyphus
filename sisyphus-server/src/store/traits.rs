@@ -74,6 +74,8 @@ pub enum ArtifactState {
     Ready,
     /// 元数据仍在，但正文已经缺失。
     Missing,
+    /// 已签发临时上传、尚未完成校验复制；对用户与依赖任务不可见。
+    Pending,
 }
 
 impl ArtifactState {
@@ -82,6 +84,7 @@ impl ArtifactState {
         match self {
             Self::Ready => "ready",
             Self::Missing => "missing",
+            Self::Pending => "pending",
         }
     }
 }
@@ -93,6 +96,7 @@ impl TryFrom<&str> for ArtifactState {
         match value {
             "ready" => Ok(Self::Ready),
             "missing" => Ok(Self::Missing),
+            "pending" => Ok(Self::Pending),
             other => Err(StoreError::Invalid(format!("未知产物状态：{other}"))),
         }
     }

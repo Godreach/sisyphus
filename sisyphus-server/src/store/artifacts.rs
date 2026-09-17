@@ -268,7 +268,7 @@ impl SqliteArtifactMetaRepo {
         let rows = sqlx::query_as::<_, ArtifactRow>(
             "SELECT build_id, job_id, attempt, backend, state, name, path, size, sha256,
                     created_at FROM artifacts
-             WHERE build_id = ? ORDER BY name",
+             WHERE build_id = ? AND state != 'pending' ORDER BY name",
         )
         .bind(build_id)
         .fetch_all(&self.pool)
@@ -276,6 +276,25 @@ impl SqliteArtifactMetaRepo {
         rows.into_iter()
             .map(ArtifactRow::into_entry)
             .collect::<Result<Vec<_>, StoreError>>()
+    }
+
+    /// 含 pending 的按名查询（grant/complete 复用同一 pending 行）。
+    pub async fn find_including_pending(
+        &self,
+        build_id: i64,
+        name: &str,
+    ) -> Result<Option<ArtifactMeta>, StoreError> {
+        let row = sqlx::query_as::<_, ArtifactRow>(
+            "SELECT build_id, job_id, attempt, backend, state, name, path, size, sha256,
+                    created_at
+             FROM artifacts
+             WHERE build_id = ? AND name = ?",
+        )
+        .bind(build_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(ArtifactRow::into_meta).transpose()
     }
 }
 
@@ -285,7 +304,11 @@ impl ArtifactMetaRepo for SqliteArtifactMetaRepo {
         // 字节层 rename 覆盖同语义）。retention 自落库时刻起保留期（全局
         // 配置，默认 30 天，ADR-0013/B5-T6）。
         let now = crate::store::now_ms();
-        let retention_until = now + self.retention_days * 24 * 60 * 60 * 1000;
+        // S3 新产物默认永久保留（ADR-0026）；本地仍按全局天数。
+        let retention_until = match meta.backend {
+            ArtifactBackend::S3 => i64::MAX,
+            ArtifactBackend::Local => now + self.retention_days * 24 * 60 * 60 * 1000,
+        };
         sqlx::query(
             "INSERT INTO artifacts
                 (build_id, job_id, attempt, backend, state, name, path, size, sha256,
@@ -318,7 +341,7 @@ impl ArtifactMetaRepo for SqliteArtifactMetaRepo {
             "SELECT build_id, job_id, attempt, backend, state, name, path, size, sha256,
                     created_at
              FROM artifacts
-             WHERE build_id = ? AND name = ?",
+             WHERE build_id = ? AND name = ? AND state != 'pending'",
         )
         .bind(build_id)
         .bind(name)
@@ -332,7 +355,7 @@ impl ArtifactMetaRepo for SqliteArtifactMetaRepo {
             "SELECT build_id, job_id, attempt, backend, state, name, path, size, sha256,
                     created_at
              FROM artifacts
-             WHERE build_id = ? ORDER BY name",
+             WHERE build_id = ? AND state != 'pending' ORDER BY name",
         )
         .bind(build_id)
         .fetch_all(&self.pool)

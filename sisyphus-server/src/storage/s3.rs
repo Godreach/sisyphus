@@ -56,7 +56,7 @@ impl S3Client {
         let mut builder = reqwest::Client::builder()
             .tls_backend_rustls()
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30));
+            .timeout(Duration::from_secs(300));
         if let Some(path) = &cfg.ca_path {
             let pem = std::fs::read(path)
                 .map_err(|e| StorageError::Config(format!("读取 S3 CA 失败：{}", e)))?;
@@ -206,7 +206,37 @@ impl S3Client {
         }
     }
 
-    async fn put_object(&self, key: &str, body: &[u8]) -> Result<(), StorageError> {
+    /// 短期预签名 PUT（仅临时 key；查询串不含凭据明文 secret）。
+    pub fn presign_put(&self, key: &str, expires_secs: i64) -> Result<String, StorageError> {
+        self.presign("PUT", key, expires_secs)
+    }
+
+    /// 短期预签名 GET（仅最终 key）。
+    pub fn presign_get(&self, key: &str, expires_secs: i64) -> Result<String, StorageError> {
+        self.presign("GET", key, expires_secs)
+    }
+
+    /// 流式读取对象并计算 SHA-256（不整读入内存）。
+    pub async fn hash_object(&self, key: &str) -> Result<(u64, String), StorageError> {
+        let resp = self.send_response("GET", Some(key), &[], &[], b"").await?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let body = resp.bytes().await.map_err(StorageError::from_reqwest)?;
+            return Err(map_s3_status(status, &body, "GET"));
+        }
+        use futures::StreamExt;
+        let mut hasher = Sha256::new();
+        let mut size: u64 = 0;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(StorageError::from_reqwest)?;
+            hasher.update(&chunk);
+            size += chunk.len() as u64;
+        }
+        Ok((size, hex_encode(&hasher.finalize())))
+    }
+
+    pub(crate) async fn put_object(&self, key: &str, body: &[u8]) -> Result<(), StorageError> {
         let resp = self.send("PUT", Some(key), &[], &[], body).await?;
         if (200..300).contains(&resp.status) {
             Ok(())
@@ -215,7 +245,7 @@ impl S3Client {
         }
     }
 
-    async fn head_object(&self, key: &str) -> Result<u64, StorageError> {
+    pub(crate) async fn head_object(&self, key: &str) -> Result<u64, StorageError> {
         let resp = self.send("HEAD", Some(key), &[], &[], b"").await?;
         if !(200..300).contains(&resp.status) {
             return Err(map_s3_status(resp.status, &resp.body, "HEAD"));
@@ -240,7 +270,8 @@ impl S3Client {
         }
     }
 
-    async fn delete_object(&self, key: &str) -> Result<(), StorageError> {
+    /// 删除对象（404 视为已清理）。
+    pub async fn delete_object(&self, key: &str) -> Result<(), StorageError> {
         let resp = self.send("DELETE", Some(key), &[], &[], b"").await?;
         if (200..300).contains(&resp.status) || resp.status == 404 {
             Ok(())
@@ -249,7 +280,8 @@ impl S3Client {
         }
     }
 
-    async fn copy_object(&self, src: &str, dst: &str) -> Result<(), StorageError> {
+    /// 复制对象（临时 → 最终；最终 key 从不签发 PUT）。
+    pub async fn copy_object(&self, src: &str, dst: &str) -> Result<(), StorageError> {
         let source = format!("/{}/{}", self.bucket, src);
         let resp = self
             .send(
@@ -404,6 +436,31 @@ impl S3Client {
         extra_headers: &[(&str, &str)],
         body: &[u8],
     ) -> Result<S3HttpResponse, StorageError> {
+        let resp = self
+            .send_response(method, key, query, extra_headers, body)
+            .await?;
+        let status = resp.status().as_u16();
+        let headers = resp.headers().clone();
+        let body = resp
+            .bytes()
+            .await
+            .map_err(StorageError::from_reqwest)?
+            .to_vec();
+        Ok(S3HttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    async fn send_response(
+        &self,
+        method: &str,
+        key: Option<&str>,
+        query: &[(&str, &str)],
+        extra_headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<reqwest::Response, StorageError> {
         let signed = self.sign(method, key, query, extra_headers, body)?;
         let mut req = self.http.request(
             method
@@ -417,19 +474,42 @@ impl S3Client {
         if !body.is_empty() {
             req = req.body(body.to_vec());
         }
-        let resp = req.send().await.map_err(StorageError::from_reqwest)?;
-        let status = resp.status().as_u16();
-        let headers = resp.headers().clone();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(StorageError::from_reqwest)?
-            .to_vec();
-        Ok(S3HttpResponse {
-            status,
-            headers,
-            body,
-        })
+        req.send().await.map_err(StorageError::from_reqwest)
+    }
+
+    fn presign(&self, method: &str, key: &str, expires_secs: i64) -> Result<String, StorageError> {
+        let now = chrono::Utc::now();
+        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date_stamp = now.format("%Y%m%d").to_string();
+        let (url, canonical_uri, host) = self.endpoint_parts(Some(key));
+        let credential = format!(
+            "{}/{}/{}/s3/aws4_request",
+            self.access_key_id, date_stamp, self.region
+        );
+        let expires = expires_secs.max(1).to_string();
+        let query = [
+            ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"),
+            ("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD"),
+            ("X-Amz-Credential", credential.as_str()),
+            ("X-Amz-Date", amz_date.as_str()),
+            ("X-Amz-Expires", expires.as_str()),
+            ("X-Amz-SignedHeaders", "host"),
+        ];
+        let canonical_query = canonical_query(&query);
+        let canonical_headers = format!("host:{}\n", host.trim());
+        let canonical_request = format!(
+            "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\nhost\nUNSIGNED-PAYLOAD"
+        );
+        let scope = format!("{date_stamp}/{}/s3/aws4_request", self.region);
+        let string_to_sign = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+            hex_encode(&Sha256::digest(canonical_request.as_bytes()))
+        );
+        let signing_key = signing_key(&self.secret_access_key, &date_stamp, &self.region)?;
+        let signature = hex_encode(&hmac_sha256(&signing_key, string_to_sign.as_bytes())?);
+        Ok(format!(
+            "{url}?{canonical_query}&X-Amz-Signature={signature}"
+        ))
     }
 
     fn sign(

@@ -88,7 +88,11 @@ impl RealArtifactIo {
     /// 以 REST 基址与 token 构造。`api_url` 缺失时调用恒
     /// [`ArtifactError::Unconfigured`]（引导态明确报错，不静默）。
     pub fn new(api_url: Option<String>, token: Option<String>) -> Self {
-        Self::with_client(reqwest::Client::new(), api_url, token)
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("构造产物 HTTP 客户端");
+        Self::with_client(client, api_url, token)
     }
 
     /// 注入 client 形态（测试直接驱动；与 upgrader 的 `ReqwestDownloader`
@@ -142,31 +146,14 @@ impl RealArtifactIo {
             .unwrap_or_else(|| format!("HTTP {status_text}"));
         ArtifactError::Rejected { status, message }
     }
-}
 
-#[async_trait::async_trait]
-impl ArtifactIo for RealArtifactIo {
-    async fn upload(&self, job_id: &str, name: &str, path: &Path) -> Result<(), ArtifactError> {
-        // 引导态校验先行（未配置 api_url/token 时不必碰文件）。
-        self.config()?;
-        // 源文件流式读（64 KiB 块）→ reqwest Body（chunked 传输，大文件
-        // 不整读内存）。
-        let file = tokio::fs::File::open(path)
-            .await
-            .map_err(|e| ArtifactError::Io(format!("打开 {} 失败：{e}", path.display())))?;
-        let body =
-            reqwest::Body::wrap_stream(futures::stream::unfold(file, |mut file| async move {
-                use tokio::io::AsyncReadExt;
-                let mut buf = vec![0u8; 64 * 1024];
-                match file.read(&mut buf).await {
-                    Ok(0) => None,
-                    Ok(n) => {
-                        buf.truncate(n);
-                        Some((Ok(bytes::Bytes::from(buf)), file))
-                    }
-                    Err(e) => Some((Err(e), file)),
-                }
-            }));
+    async fn upload_via_server(
+        &self,
+        job_id: &str,
+        name: &str,
+        path: &Path,
+    ) -> Result<(), ArtifactError> {
+        let body = file_body(path).await?;
         let resp = self
             .request(
                 reqwest::Method::POST,
@@ -179,6 +166,71 @@ impl ArtifactIo for RealArtifactIo {
             .map_err(|e| ArtifactError::Network(e.to_string()))?;
         if !resp.status().is_success() {
             return Err(Self::rejection(resp).await);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ArtifactIo for RealArtifactIo {
+    async fn upload(&self, job_id: &str, name: &str, path: &Path) -> Result<(), ArtifactError> {
+        // 引导态校验先行（未配置 api_url/token 时不必碰文件）。
+        self.config()?;
+        let size = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| ArtifactError::Io(format!("读取 {} 失败：{e}", path.display())))?
+            .len();
+        let sha256 = sha256_file(path).await?;
+
+        let grant = self
+            .request(
+                reqwest::Method::POST,
+                &format!("{UPLOAD_ENDPOINT}/{job_id}/{name}/upload-url"),
+            )?
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body("{}")
+            .send()
+            .await
+            .map_err(|e| ArtifactError::Network(e.to_string()))?;
+        if grant.status().as_u16() == 409 {
+            return self.upload_via_server(job_id, name, path).await;
+        }
+        if !grant.status().is_success() {
+            return Err(Self::rejection(grant).await);
+        }
+        let grant_json: serde_json::Value = grant
+            .json()
+            .await
+            .map_err(|e| ArtifactError::Network(e.to_string()))?;
+        let url = grant_json
+            .get("url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ArtifactError::Network("签发响应缺少 url".into()))?;
+        let put = self
+            .client
+            .put(url)
+            .body(file_body(path).await?)
+            .send()
+            .await
+            .map_err(|e| ArtifactError::Network(e.to_string()))?;
+        if !put.status().is_success() {
+            return Err(ArtifactError::Network(format!(
+                "直传 PUT 失败：HTTP {}",
+                put.status()
+            )));
+        }
+        let complete = self
+            .request(
+                reqwest::Method::POST,
+                &format!("{UPLOAD_ENDPOINT}/{job_id}/{name}/complete"),
+            )?
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(format!(r#"{{"size":{size},"sha256":"{sha256}"}}"#))
+            .send()
+            .await
+            .map_err(|e| ArtifactError::Network(e.to_string()))?;
+        if !complete.status().is_success() {
+            return Err(Self::rejection(complete).await);
         }
         Ok(())
     }
@@ -198,6 +250,21 @@ impl ArtifactIo for RealArtifactIo {
             .send()
             .await
             .map_err(|e| ArtifactError::Network(e.to_string()))?;
+        let resp = if resp.status().is_redirection() {
+            let loc = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| ArtifactError::Network("下载重定向缺少 Location".into()))?
+                .to_string();
+            self.client
+                .get(loc)
+                .send()
+                .await
+                .map_err(|e| ArtifactError::Network(e.to_string()))?
+        } else {
+            resp
+        };
         if !resp.status().is_success() {
             return Err(Self::rejection(resp).await);
         }
@@ -241,6 +308,45 @@ impl ArtifactIo for RealArtifactIo {
 /// io::Error → [`ArtifactError::Io`]（闭包内多次用，收口一处）。
 fn io_err(e: std::io::Error) -> ArtifactError {
     ArtifactError::Io(e.to_string())
+}
+
+async fn sha256_file(path: &Path) -> Result<String, ArtifactError> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| ArtifactError::Io(e.to_string()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).await.map_err(io_err)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+async fn file_body(path: &Path) -> Result<reqwest::Body, ArtifactError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| ArtifactError::Io(format!("打开 {} 失败：{e}", path.display())))?;
+    Ok(reqwest::Body::wrap_stream(futures::stream::unfold(
+        file,
+        |mut file| async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0u8; 64 * 1024];
+            match file.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    Some((Ok(bytes::Bytes::from(buf)), file))
+                }
+                Err(e) => Some((Err(e), file)),
+            }
+        },
+    )))
 }
 
 /// workspace 相对路径安全拼接：拒绝根路径与 `..` 逃逸（声明经 Server

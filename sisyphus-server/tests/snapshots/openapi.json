@@ -52,10 +52,13 @@
         ],
         "responses": {
           "200": {
-            "description": "产物字节流（响应头 Content-Length + X-Sisyphus-Sha256）",
+            "description": "本地产物字节流（响应头 Content-Length + X-Sisyphus-Sha256）",
             "content": {
               "application/octet-stream": {}
             }
+          },
+          "302": {
+            "description": "S3 产物：Location 为短期 GET URL"
           },
           "401": {
             "description": "未认证（仅 Agent token `sisa_` 族可用）",
@@ -167,6 +170,190 @@
           },
           "422": {
             "description": "产物名非法（空/含路径分隔符/超长）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/artifacts/{job_id}/{name}/complete": {
+      "post": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "Agent 提交清单：流式核验临时对象 SHA-256，复制到最终 key 后 ready。",
+        "operationId": "agent_complete",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "上传任务自身行 id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "产物名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArtifactCompleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已 ready，幂等",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactUploadedResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "已固化为 ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactUploadedResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "任务行不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "未配置 S3",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/artifacts/{job_id}/{name}/upload-url": {
+      "post": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "Agent 申请单文件临时对象 PUT URL（票 #123）：仅任务上传声明内的名，\n不接触长期凭据；最终 key 从不签发写权限。",
+        "operationId": "agent_upload_url",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "上传任务自身行 id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "产物名（须在任务上传声明内）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "短期 PUT URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactUploadUrlResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "任务行不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "未配置 S3",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "产物名非法或不在上传声明内",
             "content": {
               "application/json": {
                 "schema": {
@@ -3004,10 +3191,13 @@
         ],
         "responses": {
           "200": {
-            "description": "产物字节流（Content-Length = 大小，X-Sisyphus-Sha256 = 校验和）",
+            "description": "本地产物字节流（Content-Length = 大小，X-Sisyphus-Sha256 = 校验和）",
             "content": {
               "application/octet-stream": {}
             }
+          },
+          "302": {
+            "description": "S3 产物：Location 为短期 GET URL"
           },
           "401": {
             "description": "未认证",
@@ -4811,6 +5001,26 @@
           "s3"
         ]
       },
+      "ArtifactCompleteRequest": {
+        "type": "object",
+        "description": "Agent 完成上传：声明的大小与 SHA-256。",
+        "required": [
+          "size",
+          "sha256"
+        ],
+        "properties": {
+          "sha256": {
+            "type": "string",
+            "description": "SHA-256 校验和（十六进制小写）。"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "字节数。",
+            "minimum": 0
+          }
+        }
+      },
       "ArtifactDto": {
         "type": "object",
         "description": "产物条目（构建产物列表）。",
@@ -4864,7 +5074,7 @@
           },
           "state": {
             "$ref": "#/components/schemas/ArtifactStateDto",
-            "description": "正文字节状态（`ready` / `missing`）。"
+            "description": "正文字节状态（`ready` / `missing` / `unavailable`；pending 不出现）。"
           }
         }
       },
@@ -4907,6 +5117,25 @@
           "missing",
           "unavailable"
         ]
+      },
+      "ArtifactUploadUrlResponse": {
+        "type": "object",
+        "description": "Agent 预签名上传 URL（仅临时对象，票 #123）。",
+        "required": [
+          "url",
+          "expires_in"
+        ],
+        "properties": {
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "有效秒数。"
+          },
+          "url": {
+            "type": "string",
+            "description": "短期 PUT URL（查询串签名，不含长期 secret）。"
+          }
+        }
       },
       "ArtifactUploadedResponse": {
         "type": "object",
