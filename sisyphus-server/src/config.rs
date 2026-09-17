@@ -88,6 +88,8 @@ pub struct Config {
     /// `/metrics` 端点鉴权开关（ADR-0019：默认开；config `[metrics] auth =
     /// false` 可关——仅限可信内网，文档注明）。
     pub metrics_auth: bool,
+    /// 可选自托管 S3 兼容后端（ADR-0026：未配置时制品库入口不可用）。
+    pub s3: Option<S3Config>,
 }
 
 /// 同一形态的覆盖层：CLI flag 与 `SISYPHUS_` 环境变量都归约为它。
@@ -110,6 +112,22 @@ pub struct Overrides {
     /// `/metrics` 鉴权开关覆盖（文本形态；布尔语义在 merge 缝收口，
     /// ADR-0019——开关类配置拼错必须启动失败）。
     pub metrics_auth: Option<String>,
+    /// S3 endpoint 覆盖。
+    pub s3_endpoint: Option<String>,
+    /// S3 region 覆盖。
+    pub s3_region: Option<String>,
+    /// S3 bucket 覆盖。
+    pub s3_bucket: Option<String>,
+    /// S3 根前缀覆盖。
+    pub s3_prefix: Option<String>,
+    /// S3 access key 覆盖。
+    pub s3_access_key_id: Option<String>,
+    /// S3 secret key 覆盖。
+    pub s3_secret_access_key: Option<String>,
+    /// S3 path-style 开关覆盖。
+    pub s3_path_style: Option<String>,
+    /// S3 TLS CA 路径覆盖。
+    pub s3_ca_path: Option<String>,
 }
 
 /// 覆盖层与文件层的保留期天数统一合并：CLI > env > 文件 > 默认（票 #78，
@@ -177,6 +195,9 @@ pub struct FileConfig {
     /// `[metrics]` 段（ADR-0019：/metrics 鉴权开关）。
     #[serde(default)]
     pub metrics: MetricsFile,
+    /// `[storage]` 段（ADR-0026：可选 S3 兼容后端）。
+    #[serde(default)]
+    pub storage: StorageFile,
 }
 
 /// `[server]` 段。
@@ -249,6 +270,73 @@ pub struct MetricsFile {
     pub auth: Option<bool>,
 }
 
+/// `[storage]` 段（ADR-0026：可选对象存储后端）。
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageFile {
+    /// `[storage.s3]` 段。缺省或全空 = 未配置。
+    #[serde(default)]
+    pub s3: Option<S3File>,
+}
+
+/// `[storage.s3]` 段：任一必填字段出现则必须配齐，否则启动失败。
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S3File {
+    /// S3 兼容 endpoint（http/https，须同时可达 Server / Agent / 浏览器）。
+    pub endpoint: Option<String>,
+    /// 签名用 region。
+    pub region: Option<String>,
+    /// bucket 名（不自动创建）。
+    pub bucket: Option<String>,
+    /// 可选根前缀。
+    pub prefix: Option<String>,
+    /// Access key。
+    pub access_key_id: Option<String>,
+    /// Secret key（不进普通 API / Debug / 日志）。
+    pub secret_access_key: Option<String>,
+    /// 是否使用 path-style（自托管默认 true）。
+    pub path_style: Option<bool>,
+    /// 可选 TLS CA 路径（相对路径按相对数据目录解析）。
+    pub ca_path: Option<PathBuf>,
+}
+
+/// 合并后的可选 S3 后端配置（凭据在 Debug 中脱敏）。
+#[derive(Clone, PartialEq, Eq)]
+pub struct S3Config {
+    /// S3 兼容 endpoint（无尾斜杠）。
+    pub endpoint: String,
+    /// 签名用 region。
+    pub region: String,
+    /// bucket 名。
+    pub bucket: String,
+    /// 规范化后的根前缀（可空，无首尾 `/`）。
+    pub prefix: String,
+    /// Access key。
+    pub access_key_id: String,
+    /// Secret key。
+    pub secret_access_key: String,
+    /// path-style 寻址。
+    pub path_style: bool,
+    /// 可选额外 CA。
+    pub ca_path: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for S3Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Config")
+            .field("endpoint", &self.endpoint)
+            .field("region", &self.region)
+            .field("bucket", &self.bucket)
+            .field("prefix", &self.prefix)
+            .field("access_key_id", &"***")
+            .field("secret_access_key", &"***")
+            .field("path_style", &self.path_style)
+            .field("ca_path", &self.ca_path)
+            .finish()
+    }
+}
+
 /// 配置加载/合并错误。
 #[derive(Debug)]
 pub enum ConfigError {
@@ -262,6 +350,8 @@ pub enum ConfigError {
     InvalidBool(String),
     /// 数据目录或配置文件 IO 失败。
     Io(std::io::Error),
+    /// 可选 S3 配置不完整或取值非法。
+    InvalidS3(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -274,6 +364,7 @@ impl std::fmt::Display for ConfigError {
                 write!(f, "布尔取值非法：{v}（期望 true/false）")
             }
             ConfigError::Io(e) => write!(f, "配置 IO 失败：{e}"),
+            ConfigError::InvalidS3(v) => write!(f, "S3 配置非法：{v}"),
         }
     }
 }
@@ -333,6 +424,19 @@ retention_days = 30
 # 登录角色，运维可为 Prometheus 专建 viewer 用户）；false = 公开。仅限可信
 # 内网关闭——该端点暴露调度队列深度等运行态，公网裸奔等同泄露运营信息。
 auth = true
+
+# 可选自托管 S3 兼容后端（ADR-0026）。整段注释 = 未配置：Server 与既有本地产物
+# 照常工作，一级制品库入口提示不可用。任一必填字段生效则必须配齐，错误配置
+# 启动失败。凭据不进普通 API 或日志。
+# [storage.s3]
+# endpoint = "https://s3.example.internal:9000"
+# region = "us-east-1"
+# bucket = "sisyphus"
+# prefix = "prod"
+# access_key_id = "minio"
+# secret_access_key = "change-me"
+# path_style = true
+# ca_path = "/etc/sisyphus/s3-ca.pem"
 "#
 }
 
@@ -377,6 +481,14 @@ impl Overrides {
             master_key_path: get("SISYPHUS_MASTER_KEY_PATH"),
             retention_days: get("SISYPHUS_RETENTION_DAYS"),
             metrics_auth: get("SISYPHUS_METRICS_AUTH"),
+            s3_endpoint: get("SISYPHUS_S3_ENDPOINT"),
+            s3_region: get("SISYPHUS_S3_REGION"),
+            s3_bucket: get("SISYPHUS_S3_BUCKET"),
+            s3_prefix: get("SISYPHUS_S3_PREFIX"),
+            s3_access_key_id: get("SISYPHUS_S3_ACCESS_KEY_ID"),
+            s3_secret_access_key: get("SISYPHUS_S3_SECRET_ACCESS_KEY"),
+            s3_path_style: get("SISYPHUS_S3_PATH_STYLE"),
+            s3_ca_path: get("SISYPHUS_S3_CA_PATH"),
         }
     }
 }
@@ -481,6 +593,7 @@ pub fn merge(
         Some(value) => parse_bool(&value)?,
         None => file.metrics.auth.unwrap_or(DEFAULT_METRICS_AUTH),
     };
+    let s3 = merge_s3(&data_dir, env, file)?;
 
     Ok(Config {
         data_dir,
@@ -494,6 +607,7 @@ pub fn merge(
         poll_interval_minutes,
         retention_days,
         metrics_auth,
+        s3,
     })
 }
 
@@ -517,6 +631,147 @@ fn parse_bool(value: &str) -> Result<bool, ConfigError> {
         "false" | "0" | "no" | "off" => Ok(false),
         other => Err(ConfigError::InvalidBool(other.to_string())),
     }
+}
+
+/// 合并可选 S3 配置：env 逐字段压过文件；全空 = 未配置；部分必填缺失 = 启动失败。
+fn merge_s3(
+    data_dir: &Path,
+    env: &Overrides,
+    file: &FileConfig,
+) -> Result<Option<S3Config>, ConfigError> {
+    let file_s3 = file.storage.s3.clone().unwrap_or_default();
+    let pick_text = |env_val: &Option<String>, file_val: Option<&str>| -> Option<String> {
+        env_val
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                file_val
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+    };
+
+    let endpoint = pick_text(&env.s3_endpoint, file_s3.endpoint.as_deref());
+    let region = pick_text(&env.s3_region, file_s3.region.as_deref());
+    let bucket = pick_text(&env.s3_bucket, file_s3.bucket.as_deref());
+    let prefix_raw = pick_text(&env.s3_prefix, file_s3.prefix.as_deref());
+    let access_key_id = pick_text(&env.s3_access_key_id, file_s3.access_key_id.as_deref());
+    let secret_access_key = pick_text(
+        &env.s3_secret_access_key,
+        file_s3.secret_access_key.as_deref(),
+    );
+    let path_style = match pick_text(&env.s3_path_style, None) {
+        Some(value) => Some(parse_bool(&value)?),
+        None => file_s3.path_style,
+    };
+    let ca_path = match pick_text(&env.s3_ca_path, None) {
+        Some(path) => Some(resolve_master_key_path(data_dir, &path)),
+        None => file_s3.ca_path.as_ref().map(|path| {
+            if path.is_absolute() {
+                path.clone()
+            } else {
+                data_dir.join(path)
+            }
+        }),
+    };
+
+    let any_set = endpoint.is_some()
+        || region.is_some()
+        || bucket.is_some()
+        || prefix_raw.is_some()
+        || access_key_id.is_some()
+        || secret_access_key.is_some()
+        || path_style.is_some()
+        || ca_path.is_some();
+    if !any_set {
+        return Ok(None);
+    }
+
+    let mut missing = Vec::new();
+    if endpoint.is_none() {
+        missing.push("endpoint");
+    }
+    if region.is_none() {
+        missing.push("region");
+    }
+    if bucket.is_none() {
+        missing.push("bucket");
+    }
+    if access_key_id.is_none() {
+        missing.push("access_key_id");
+    }
+    if secret_access_key.is_none() {
+        missing.push("secret_access_key");
+    }
+    if !missing.is_empty() {
+        return Err(ConfigError::InvalidS3(format!(
+            "已部分配置，缺：{}",
+            missing.join("、")
+        )));
+    }
+
+    let endpoint = normalize_s3_endpoint(endpoint.as_deref().expect("已校验"))?;
+    let bucket = bucket.expect("已校验");
+    validate_s3_bucket(&bucket)?;
+    let prefix = normalize_s3_prefix(prefix_raw.as_deref().unwrap_or(""))?;
+    if let Some(path) = &ca_path
+        && !path.is_file()
+    {
+        return Err(ConfigError::InvalidS3(format!(
+            "CA 文件不存在：{}",
+            path.display()
+        )));
+    }
+
+    Ok(Some(S3Config {
+        endpoint,
+        region: region.expect("已校验"),
+        bucket,
+        prefix,
+        access_key_id: access_key_id.expect("已校验"),
+        secret_access_key: secret_access_key.expect("已校验"),
+        path_style: path_style.unwrap_or(true),
+        ca_path,
+    }))
+}
+
+fn normalize_s3_endpoint(raw: &str) -> Result<String, ConfigError> {
+    let raw = raw.trim().trim_end_matches('/');
+    let Some(rest) = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))
+    else {
+        return Err(ConfigError::InvalidS3(format!(
+            "endpoint 须为 http(s) URL，得到：{raw}"
+        )));
+    };
+    if rest.is_empty() || rest.starts_with('/') || rest.contains(' ') {
+        return Err(ConfigError::InvalidS3(format!("endpoint 非法：{raw}")));
+    }
+    Ok(raw.to_string())
+}
+
+fn validate_s3_bucket(bucket: &str) -> Result<(), ConfigError> {
+    if bucket.is_empty()
+        || bucket.contains('/')
+        || bucket.contains('\\')
+        || bucket.contains(' ')
+        || bucket.contains("..")
+    {
+        return Err(ConfigError::InvalidS3(format!("bucket 非法：{bucket}")));
+    }
+    Ok(())
+}
+
+fn normalize_s3_prefix(raw: &str) -> Result<String, ConfigError> {
+    let prefix = raw.trim().trim_matches('/').to_string();
+    if prefix.contains('\\') || prefix.contains("..") {
+        return Err(ConfigError::InvalidS3(format!("prefix 非法：{raw}")));
+    }
+    Ok(prefix)
 }
 
 #[cfg(test)]
@@ -560,6 +815,7 @@ mod tests {
             cfg.metrics_auth, DEFAULT_METRICS_AUTH,
             "/metrics 鉴权默认开（ADR-0019）"
         );
+        assert!(cfg.s3.is_none(), "未配置 S3 时后端为空");
     }
 
     /// 票 #78：`[retention] retention_days` 文件层可配（与日志/产物共享
@@ -673,6 +929,7 @@ mod tests {
             triggers: TriggersFile::default(),
             retention: RetentionFile::default(),
             metrics: MetricsFile::default(),
+            storage: StorageFile::default(),
         };
 
         let cfg =
@@ -854,6 +1111,7 @@ mod tests {
             cfg.metrics_auth, DEFAULT_METRICS_AUTH,
             "样例值与内置默认一致（/metrics 鉴权）"
         );
+        assert!(cfg.s3.is_none(), "样例注释掉 S3，保持未配置");
 
         // 带注释：样例要能当作文档读。
         assert!(
@@ -1138,5 +1396,129 @@ mod tests {
 
         assert_eq!(cfg.grpc_addr, "127.0.0.1:60010");
         assert_eq!(cfg.rest_addr, DEFAULT_REST_ADDR);
+    }
+
+    fn complete_s3_file() -> S3File {
+        S3File {
+            endpoint: Some("https://s3.example.internal:9000/".into()),
+            region: Some("us-east-1".into()),
+            bucket: Some("sisyphus".into()),
+            prefix: Some("/prod/".into()),
+            access_key_id: Some("minio".into()),
+            secret_access_key: Some("super-secret-key".into()),
+            path_style: Some(true),
+            ca_path: None,
+        }
+    }
+
+    /// 票 #122：完整 S3 配置可加载，前缀/endpoint 规范化，凭据不进 Debug。
+    #[test]
+    fn complete_s3_config_loads_and_redacts_secret_in_debug() {
+        let file = FileConfig {
+            storage: StorageFile {
+                s3: Some(complete_s3_file()),
+            },
+            ..FileConfig::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file,
+        )
+        .expect("完整 S3 配置应成功");
+        let s3 = cfg.s3.as_ref().expect("应已配置");
+        assert_eq!(s3.endpoint, "https://s3.example.internal:9000");
+        assert_eq!(s3.region, "us-east-1");
+        assert_eq!(s3.bucket, "sisyphus");
+        assert_eq!(s3.prefix, "prod");
+        assert_eq!(s3.access_key_id, "minio");
+        assert_eq!(s3.secret_access_key, "super-secret-key");
+        assert!(s3.path_style);
+        let debug = format!("{cfg:?}");
+        assert!(
+            !debug.contains("super-secret-key"),
+            "凭据不得出现在 Debug：{debug}"
+        );
+        assert!(debug.contains("***"), "Debug 应以 *** 脱敏：{debug}");
+    }
+
+    /// 票 #122：部分配置必须启动失败，不能静默当未配置。
+    #[test]
+    fn partial_s3_config_is_rejected() {
+        let file = FileConfig {
+            storage: StorageFile {
+                s3: Some(S3File {
+                    endpoint: Some("https://s3.example.internal:9000".into()),
+                    ..S3File::default()
+                }),
+            },
+            ..FileConfig::default()
+        };
+        let err = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file,
+        )
+        .expect_err("缺必填项应失败");
+        assert!(
+            matches!(err, ConfigError::InvalidS3(_)),
+            "应为 InvalidS3：{err}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("access_key_id"), "{msg}");
+        assert!(msg.contains("bucket"), "{msg}");
+    }
+
+    /// 票 #122：env 压过文件；未知字段拒绝；非法 endpoint/bucket 拒绝。
+    #[test]
+    fn s3_env_overrides_file_and_rejects_invalid_values() {
+        let file = FileConfig {
+            storage: StorageFile {
+                s3: Some(complete_s3_file()),
+            },
+            ..FileConfig::default()
+        };
+        let env = Overrides {
+            s3_bucket: Some("from-env".into()),
+            s3_secret_access_key: Some("env-secret".into()),
+            ..Overrides::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &env,
+            &file,
+        )
+        .expect("env 覆盖应成功");
+        let s3 = cfg.s3.as_ref().expect("应已配置");
+        assert_eq!(s3.bucket, "from-env");
+        assert_eq!(s3.secret_access_key, "env-secret");
+        assert!(!format!("{cfg:?}").contains("env-secret"));
+
+        assert!(matches!(
+            parse_toml("[storage.s3]\nendpointx = \"https://x\"\n"),
+            Err(ConfigError::InvalidToml(_))
+        ));
+
+        let bad_ep = FileConfig {
+            storage: StorageFile {
+                s3: Some(S3File {
+                    endpoint: Some("s3.example.internal".into()),
+                    ..complete_s3_file()
+                }),
+            },
+            ..FileConfig::default()
+        };
+        assert!(matches!(
+            merge(
+                PathBuf::from("/tmp/data"),
+                &Overrides::default(),
+                &Overrides::default(),
+                &bad_ep
+            ),
+            Err(ConfigError::InvalidS3(_))
+        ));
     }
 }

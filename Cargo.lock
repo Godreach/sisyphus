@@ -2753,6 +2753,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "percent-encoding",
  "rand_core 0.6.4",
+ "reqwest",
  "rust-embed",
  "serde",
  "serde_json",

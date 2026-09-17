@@ -790,6 +790,27 @@ export function createHandlers(options: MockHandlerOptions) {
       },
     ),
 
+    // ----- 一级制品库 / S3 配置（票 #122，ADR-0026）-----
+    artifactRepository: http.get('/api/v1/artifact-repository', ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      return HttpResponse.json({ available: false, reason: 's3_unconfigured' })
+    }),
+    s3Config: http.get('/api/v1/config/s3', ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const adminDenied = globalAdminGuard(request)
+      if (adminDenied != null) return adminDenied
+      return HttpResponse.json({ configured: false })
+    }),
+    s3TestConnection: http.post('/api/v1/config/s3/test-connection', ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const adminDenied = globalAdminGuard(request)
+      if (adminDenied != null) return adminDenied
+      return jsonError(409, 'CONFLICT', '未配置 S3 后端，无法测试连接')
+    }),
+
     // ----- Agent 清单（后端 api/agents.rs；构建机页消费）-----
     agentsList: http.get('/api/v1/agents', async ({ request }) => {
       const denied = guard(options, request)

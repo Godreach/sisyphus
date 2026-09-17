@@ -48,6 +48,13 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'nav.machines' },
   },
   {
+    // 一级制品库（票 #122，ADR-0026）：未配置 S3 时入口仍在，明确不可用。
+    path: '/artifacts',
+    name: 'artifacts',
+    component: () => import('@/views/ArtifactRepositoryView.vue'),
+    meta: { title: 'nav.artifacts' },
+  },
+  {
     // 旧列表入口重定向（深链不断）。
     path: '/agents',
     redirect: { name: 'machines' },

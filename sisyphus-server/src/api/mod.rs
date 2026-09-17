@@ -22,6 +22,7 @@
 //!   sisyphus-web 产物 → SPA fallback 回 index.html，B2a-T5）。
 
 pub mod agents;
+pub mod artifact_repository;
 pub mod artifacts;
 pub mod audit;
 pub mod auth;
@@ -37,6 +38,7 @@ pub mod overview;
 pub mod pipelines;
 pub mod policy;
 pub mod projects;
+pub mod s3_config;
 pub mod scm;
 pub mod secrets;
 pub mod smtp_config;
@@ -66,6 +68,7 @@ use crate::engine::Engine;
 use crate::events::EventBus;
 use crate::grpc::SessionRegistry;
 use crate::secrets::MasterKey;
+use crate::storage::S3Client;
 use crate::store::SqliteLogStore;
 use crate::store::agents::AgentRepo;
 use crate::store::artifacts::{LocalDiskArtifactStore, SqliteArtifactMetaRepo};
@@ -162,6 +165,8 @@ pub struct AppState {
     /// true = 需认证（Bearer PAT 任意登录角色）；false = 公开（仅限可信
     /// 内网，config 文档注明）。
     pub metrics_auth: bool,
+    /// 可选 S3 客户端（票 #122：未配置为 None，制品库入口不可用）。
+    pub s3: Option<Arc<S3Client>>,
 }
 
 impl AppState {
@@ -217,7 +222,14 @@ impl AppState {
             poll_interval_minutes,
             retention_days,
             metrics_auth,
+            s3: None,
         })
+    }
+
+    /// 注入可选 S3 客户端（启动校验通过后由 main 调用）。
+    pub fn with_s3(mut self, s3: Option<S3Client>) -> Self {
+        self.s3 = s3.map(Arc::new);
+        self
     }
 }
 
@@ -343,6 +355,9 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         // 全局 SMTP 配置（票 B5-T5，ADR-0014/0015：全局 admin 档；读脱敏 / 写全量 +
         // 密码加密落库 + 变更入审计）。
         .route("/config/smtp", get(smtp_config::get).put(smtp_config::put))
+        .route("/config/s3", get(s3_config::get))
+        .route("/config/s3/test-connection", post(s3_config::test_connection))
+        .route("/artifact-repository", get(artifact_repository::status))
         .route("/upgrade-packages", get(upgrade_packages::list).post(upgrade_packages::upload))
         .route(
             "/upgrade-packages/{package_name}",

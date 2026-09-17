@@ -18,6 +18,7 @@ pub mod logs;
 pub mod members;
 pub mod pipelines;
 pub mod projects;
+pub mod s3_identity;
 pub mod scm_credentials;
 pub mod secrets;
 pub mod sessions;
@@ -38,6 +39,7 @@ pub use artifacts::{
 };
 pub use cleanup::{CLEANUP_INTERVAL, CleanupReport, delete_build_data, run_daily_cleanup, sweep};
 pub use logs::SqliteLogStore;
+pub use s3_identity::{S3BackendIdentity, S3IdentityRepo};
 pub use scm_credentials::ScmCredentialRepo;
 pub use smtp_config::{SmtpConfigRepo, SmtpTls};
 pub use traits::{
@@ -289,6 +291,7 @@ mod tests {
             "artifacts",
             "project_scm_credentials",
             "global_smtp_config",
+            "s3_backend_identity",
         ] {
             assert!(
                 tables.iter().any(|t| t == expected),
@@ -345,6 +348,7 @@ mod tests {
             "DROP TABLE upgrade_packages",
             "DROP TABLE project_scm_credentials",
             "DROP TABLE global_smtp_config",
+            "DROP TABLE s3_backend_identity",
         ] {
             sqlx::raw_sql(stmt)
                 .execute(&pool)

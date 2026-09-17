@@ -51,6 +51,9 @@ import type {
   UserResponse,
   WorkspaceCleanRequest,
   WorkspaceListResponse,
+  ArtifactRepositoryStatus,
+  S3ConfigState,
+  S3TestReportDto,
 } from './types'
 
 /** 认证端点（后端 `api/auth.rs`，ADR-0014）。 */
@@ -379,6 +382,17 @@ export const artifactsApi = {
    *  大小与校验和，浏览器原生下载）。 */
   downloadUrl: (project: string, pipeline: string, number: number, name: string) =>
     `api/v1/projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}/artifacts/${encodeURIComponent(name)}`,
+}
+
+/** 一级制品库入口状态（票 #122，ADR-0026）：任意登录角色。 */
+export const artifactRepositoryApi = {
+  status: () => http.get<ArtifactRepositoryStatus>('artifact-repository'),
+}
+
+/** 全局 S3 配置只读脱敏与连接自检（票 #122：全局 admin；无 PUT）。 */
+export const s3ConfigApi = {
+  get: () => http.get<S3ConfigState>('config/s3'),
+  testConnection: () => http.post<S3TestReportDto>('config/s3/test-connection'),
 }
 
 /** 升级包端点（后端 `api/upgrade_packages.rs`，票 #76 / B5-T4，ADR-0017）：

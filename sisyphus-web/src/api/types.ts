@@ -608,14 +608,49 @@ export interface ArtifactResponse {
   job_id: number | null
   /** 上传任务 attempt；旧数据未记录时为空。 */
   attempt: number | null
-  /** 正文字节可用状态。 */
-  state: 'ready' | 'missing'
+  /** 正文字节可用状态（S3 后端未配置时为 `unavailable`）。 */
+  state: 'ready' | 'missing' | 'unavailable'
 }
 
 /** 构建产物列表响应。 */
 export interface BuildArtifactsResponse {
   /** 构建全部产物（按名排序）。 */
   items: ArtifactResponse[]
+}
+
+/** 普通 API 可见的 S3 后端摘要（无凭据，票 #122）。 */
+export interface S3BackendDto {
+  endpoint: string
+  region: string
+  bucket: string
+  prefix: string
+  path_style: boolean
+}
+
+/** 一级制品库入口状态（后端 `GET /artifact-repository`）。 */
+export interface ArtifactRepositoryStatus {
+  available: boolean
+  reason?: string
+  backend?: S3BackendDto
+}
+
+/** 脱敏 S3 配置态（全局 admin，`GET /config/s3`）。 */
+export interface S3ConfigState {
+  configured: boolean
+  config?: S3BackendDto
+}
+
+/** 管理员连接自检单步结果。 */
+export interface S3TestCheckDto {
+  op: string
+  ok: boolean
+  detail?: string
+}
+
+/** 管理员连接自检报告。 */
+export interface S3TestReportDto {
+  ok: boolean
+  checks: S3TestCheckDto[]
 }
 
 // ---------------------------------------------------------------------------

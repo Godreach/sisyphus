@@ -301,7 +301,8 @@
     "workbench": "Dashboard",
     "projects": "Projects",
     "pipelines": "Pipelines",
-    "machines": "Build Machines"
+    "machines": "Build Machines",
+    "artifacts": "Artifacts"
   },
   "routes": {
     "overview": "Dashboard",
@@ -315,7 +316,8 @@
     "adminSecrets": "Secrets",
     "adminAudit": "Audit log",
     "adminUpgrade": "Build machine upgrade",
-    "adminUsers": "Users"
+    "adminUsers": "Users",
+    "artifacts": "Artifacts"
   },
   "buildStatus": {
     "queued": "Queued",
@@ -786,5 +788,23 @@
     "favoriteAdded": "Added to favorites",
     "favoriteRemoved": "Removed from favorites",
     "chipNever": "Never run"
+  },
+  "artifacts": {
+    "unavailableTitle": "Artifact repository unavailable",
+    "unavailableDesc": "No object-storage backend is configured. Existing local build artifacts remain available in build details.",
+    "availableTitle": "Artifact repository enabled",
+    "availableDesc": "Object storage is connected. Browsing will be added later.",
+    "endpoint": "Endpoint",
+    "region": "Region",
+    "bucket": "Bucket",
+    "prefix": "Prefix",
+    "prefixEmpty": "(none)",
+    "testConnection": "Test connection",
+    "testOk": "Connection test passed",
+    "testFail": "Connection test did not fully pass",
+    "checkOk": "ok",
+    "checkFail": "failed",
+    "loadError": "Could not load artifact repository status",
+    "retry": "Retry"
   }
 }

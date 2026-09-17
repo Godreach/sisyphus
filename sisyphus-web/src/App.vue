@@ -1,9 +1,9 @@
 <script setup lang="ts">
 // 应用壳（spec #99：prototype/ 设计稿 1:1 落地）：280px 主题自适应侧栏（Logo +
-// 工作台/项目库/流水线/构建机 四项导航 + 底部用户卡）+ 60px 白顶栏（页面标题 +
+// 工作台/项目库/流水线/构建机/制品库 五项导航 + 底部用户卡）+ 60px 白顶栏（页面标题 +
 // 搜索框/主按钮）+ #F5F5F7 内容区。
 //
-// - 导航严格四项（票 #117）；管理四页入口收编进用户卡下拉菜单，
+// - 导航五项（票 #117 四项 + 票 #122 制品库）；管理四页入口收编进用户卡下拉菜单，
 //   仅全局 admin 可见，直访 URL 由路由守卫兜底（guards.ts 不变）。
 // - 语言切换与三态主题收进用户卡菜单（票 #104 裁定 G3/G4，更替票 #99
 //   「语言切换在顶栏」决策）：语言（中文/English）+ 主题（跟随系统/浅色/
@@ -36,6 +36,7 @@ import {
   SpeedometerOutline,
   FolderOpenOutline,
   HardwareChipOutline,
+  CubeOutline,
 } from '@vicons/ionicons5'
 
 import { currentLocale, setLocale } from '@/i18n'
@@ -168,9 +169,9 @@ onBeforeUnmount(() => {
   document.body.classList.remove('sidebar-resizing')
 })
 
-// ===== 侧栏导航（四项；详情路由高亮所属主项） =====
+// ===== 侧栏导航（五项；详情路由高亮所属主项） =====
 
-type NavKey = 'workbench' | 'projects' | 'pipelines' | 'machines'
+type NavKey = 'workbench' | 'projects' | 'pipelines' | 'machines' | 'artifacts'
 
 /** n8n 风格网络图标：左侧入口节点经中间节点分叉到上下节点。 */
 const PipelineGraphIcon = defineComponent({
@@ -200,6 +201,7 @@ const NAV_ICONS: Record<NavKey, ReturnType<typeof import('vue').defineComponent>
   projects: FolderOpenOutline,
   pipelines: PipelineGraphIcon,
   machines: HardwareChipOutline,
+  artifacts: CubeOutline,
 }
 
 const navItems: { key: NavKey; routeName: string; labelKey: string }[] = [
@@ -207,6 +209,7 @@ const navItems: { key: NavKey; routeName: string; labelKey: string }[] = [
   { key: 'projects', routeName: 'projects', labelKey: 'nav.projects' },
   { key: 'pipelines', routeName: 'pipelines', labelKey: 'nav.pipelines' },
   { key: 'machines', routeName: 'machines', labelKey: 'nav.machines' },
+  { key: 'artifacts', routeName: 'artifacts', labelKey: 'nav.artifacts' },
 ]
 
 /** 当前路由 → 高亮主项（项目资源归项目库；流水线/构建/编辑器归流水线）。 */
@@ -225,6 +228,8 @@ const activeNav = computed<NavKey | ''>(() => {
     case 'machines':
     case 'agent-detail':
       return 'machines'
+    case 'artifacts':
+      return 'artifacts'
     default:
       return ''
   }

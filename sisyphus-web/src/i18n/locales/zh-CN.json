@@ -301,7 +301,8 @@
     "workbench": "工作台",
     "projects": "项目库",
     "pipelines": "流水线",
-    "machines": "构建机"
+    "machines": "构建机",
+    "artifacts": "制品库"
   },
   "routes": {
     "overview": "工作台",
@@ -315,7 +316,8 @@
     "adminSecrets": "机密",
     "adminAudit": "审计日志",
     "adminUpgrade": "构建机升级",
-    "adminUsers": "用户"
+    "adminUsers": "用户",
+    "artifacts": "制品库"
   },
   "buildStatus": {
     "queued": "排队中",
@@ -786,5 +788,23 @@
     "favoriteAdded": "已收藏，可在工作台查看",
     "favoriteRemoved": "已取消收藏",
     "chipNever": "未运行"
+  },
+  "artifacts": {
+    "unavailableTitle": "制品库不可用",
+    "unavailableDesc": "未配置对象存储后端。现有本地构建产物仍可在构建详情中查看。",
+    "availableTitle": "制品库已启用",
+    "availableDesc": "对象存储已连接。产物浏览将随后提供。",
+    "endpoint": "Endpoint",
+    "region": "Region",
+    "bucket": "Bucket",
+    "prefix": "前缀",
+    "prefixEmpty": "（无）",
+    "testConnection": "测试连接",
+    "testOk": "连接测试通过",
+    "testFail": "连接测试未全部通过",
+    "checkOk": "通过",
+    "checkFail": "失败",
+    "loadError": "无法加载制品库状态",
+    "retry": "重试"
   }
 }

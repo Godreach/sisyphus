@@ -1,5 +1,5 @@
 // 应用壳测试（spec #99 重构后的外壳行为）：
-// - 主题自适应侧栏严格四项导航（工作台/项目库/流水线/构建机）；未认证无壳。
+// - 主题自适应侧栏五项导航（工作台/项目库/流水线/构建机/制品库）；未认证无壳。
 // - 登出闭环：用户卡下拉 → 登出 → POST /auth/logout + 回登录页 + 清认证态。
 // - 管理四页入口收编进用户卡下拉：仅全局 admin 可见；非 admin 侧栏与
 //   下拉均无管理入口。直访 URL 由路由守卫兜底（guards.spec.ts 覆盖）。
@@ -16,7 +16,7 @@ import { i18n, setLocale } from '@/i18n'
 import { useAuthStore } from '@/stores/auth'
 import { useDarkMode } from '@/composables/useDarkMode'
 
-describe('App 壳（四项导航 + 登出闭环）', () => {
+describe('App 壳（五项导航 + 登出闭环）', () => {
   let pinia: Pinia
   let router: Router
   let wrapper: VueWrapper
@@ -35,6 +35,8 @@ describe('App 壳（四项导航 + 登出闭环）', () => {
         { path: '/login', name: 'login', component: { template: '<div />' } },
         { path: '/', name: 'overview', component: { template: '<div />' } },
         { path: '/pipelines', name: 'pipelines', component: { template: '<div />' } },
+        { path: '/machines', name: 'machines', component: { template: '<div />' } },
+        { path: '/artifacts', name: 'artifacts', component: { template: '<div />' }, meta: { title: 'nav.artifacts' } },
         { path: '/projects', name: 'projects', component: { template: '<div />' }, meta: { title: 'routes.projects' } },
         { path: '/projects/:name', name: 'project-detail', component: { template: '<div />' }, meta: { title: 'routes.projectDetail' } },
         {
@@ -74,18 +76,20 @@ describe('App 壳（四项导航 + 登出闭环）', () => {
     expect(wrapper.find('[data-testid="sidebar-user"]').exists()).toBe(false)
   })
 
-  it('已登录侧栏严格四项导航；项目库可直接进入项目列表', async () => {
+  it('已登录侧栏五项导航；项目库与制品库可进入', async () => {
     const auth = useAuthStore()
     auth.setAuthed({ username: 'alice', isAdmin: false })
     await wrapper.vm.$nextTick()
 
     const items = wrapper.findAll('.app-sidebar .nav-item')
-    expect(items.map((w) => w.text())).toEqual(['工作台', '项目库', '流水线', '构建机'])
+    expect(items.map((w) => w.text())).toEqual(['工作台', '项目库', '流水线', '构建机', '制品库'])
     expect(wrapper.find('.app-sidebar .sidebar-divider').exists()).toBe(true)
 
     const pushSpy = vi.spyOn(router, 'push')
     await items[1]?.trigger('click')
     expect(pushSpy).toHaveBeenCalledWith({ name: 'projects' })
+    await items[4]?.trigger('click')
+    expect(pushSpy).toHaveBeenCalledWith({ name: 'artifacts' })
   })
 
   it('流水线页顶栏新建按钮在当前页打开创建选择器并保留查询参数', async () => {
@@ -441,7 +445,7 @@ describe('App 壳（窄屏响应式 #87）', () => {
       expect(document.body.querySelector('.n-drawer')).not.toBeNull()
     })
     const items = [...document.body.querySelectorAll('.drawer-nav .drawer-nav-item')] as HTMLElement[]
-    expect(items.map((item) => item.textContent?.trim())).toEqual(['工作台', '项目库', '流水线', '构建机'])
+    expect(items.map((item) => item.textContent?.trim())).toEqual(['工作台', '项目库', '流水线', '构建机', '制品库'])
     items[1]?.click()
     await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('projects'))
     await vi.waitFor(() => expect(items[1]?.classList.contains('active')).toBe(true))

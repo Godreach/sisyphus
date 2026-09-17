@@ -21,5 +21,6 @@ pub mod sched;
 pub mod scm;
 pub mod secrets;
 pub mod snapshot;
+pub mod storage;
 pub mod store;
 pub mod trigger;

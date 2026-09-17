@@ -593,3 +593,34 @@ async fn agent_endpoints_reject_jobs_of_other_agents() {
     let resp = agent_upload(&h, h.job_a, "own.bin", b"ok").await;
     assert_eq!(resp.status(), 201);
 }
+
+/// 票 #122：S3 对象在未配置后端时列表为 unavailable，下载明确不可用。
+#[tokio::test]
+async fn s3_artifact_is_unavailable_when_backend_unconfigured() {
+    let h = harness().await;
+    sqlx::query(
+        "INSERT INTO artifacts
+            (build_id, name, path, size, sha256, created_at, retention_until, backend, state)
+         VALUES (?, 'remote.bin', 'objects/remote.bin', 3, 'abc', 0, 1, 's3', 'ready')",
+    )
+    .bind(h.build.id)
+    .execute(&h.app.state.pool)
+    .await
+    .expect("插 S3 产物行");
+
+    let list_path = format!(
+        "/api/v1/projects/demo/pipelines/release/builds/{}/artifacts",
+        h.build.number
+    );
+    let resp = viewer_get(&h, &list_path).await;
+    assert_eq!(resp.status(), 200);
+    let body = common::body_json(resp).await;
+    assert_eq!(body["items"][0]["backend"], "s3");
+    assert_eq!(body["items"][0]["state"], "unavailable");
+
+    let resp = viewer_get(&h, &format!("{list_path}/remote.bin")).await;
+    assert_eq!(resp.status(), 409);
+    let body = common::body_json(resp).await;
+    let msg = body["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("后端未配置"), "{msg}");
+}

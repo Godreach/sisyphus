@@ -113,6 +113,8 @@ pub enum ArtifactStateDto {
     Ready,
     /// 元数据存在但正文缺失。
     Missing,
+    /// S3 后端未配置，历史对象不可用。
+    Unavailable,
 }
 
 impl From<ArtifactState> for ArtifactStateDto {
@@ -322,6 +324,7 @@ pub async fn list(
                 entry.meta.state = observed;
             }
         }
+        let state_dto = dto_state(&state, &entry.meta);
         items.push(ArtifactDto {
             name: entry.meta.name,
             size: entry.meta.size,
@@ -330,7 +333,7 @@ pub async fn list(
             backend: entry.meta.backend.into(),
             job_id: entry.meta.job_id,
             attempt: entry.meta.attempt,
-            state: entry.meta.state.into(),
+            state: state_dto,
         });
     }
     Ok(Json(BuildArtifactsResponse { items }))
@@ -388,6 +391,14 @@ async fn load_own_job(
         .ok_or_else(|| ApiError::resource_not_found(format!("任务 {job_id} 不存在")))
 }
 
+fn dto_state(state: &AppState, meta: &ArtifactMeta) -> ArtifactStateDto {
+    if meta.backend == ArtifactBackend::S3 && state.s3.is_none() {
+        ArtifactStateDto::Unavailable
+    } else {
+        meta.state.into()
+    }
+}
+
 /// 产物名校验（与 store 层同规则）：非法 422（不静默放宽）。
 fn validate_name(name: &str) -> Result<(), ApiError> {
     crate::store::validate_artifact_name(name).map_err(|e| {
@@ -405,11 +416,16 @@ fn validate_name(name: &str) -> Result<(), ApiError> {
 /// Content-Length（大小）+ X-Sisyphus-Sha256（校验和）+ 附件文件名。
 async fn artifact_response(state: &AppState, meta: ArtifactMeta) -> Result<Response, ApiError> {
     if meta.backend != ArtifactBackend::Local {
-        return Err(ApiError::conflict(format!(
-            "产物 {} 位于 {} 后端，当前下载 adapter 尚不可用",
-            meta.name,
-            meta.backend.as_str()
-        )));
+        let msg = if state.s3.is_none() {
+            format!("产物 {} 的存储后端未配置", meta.name)
+        } else {
+            format!(
+                "产物 {} 位于 {} 后端，当前下载 adapter 尚不可用",
+                meta.name,
+                meta.backend.as_str()
+            )
+        };
+        return Err(ApiError::conflict(msg));
     }
     if meta.state == ArtifactState::Missing {
         return Err(ApiError::conflict(format!("产物 {} 的正文缺失", meta.name)));

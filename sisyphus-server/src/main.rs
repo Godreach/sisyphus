@@ -93,6 +93,14 @@ impl From<&Args> for Overrides {
             master_key_path: args.master_key_path.clone(),
             retention_days: args.retention_days.map(|n| n.to_string()),
             metrics_auth: args.metrics_auth.map(|b| b.to_string()),
+            s3_endpoint: None,
+            s3_region: None,
+            s3_bucket: None,
+            s3_prefix: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_path_style: None,
+            s3_ca_path: None,
         }
     }
 }
@@ -163,6 +171,25 @@ async fn main() {
         Ok(state) => state,
         Err(e) => {
             tracing::error!(error = %e, "组合根装配失败（日志读池）");
+            std::process::exit(2);
+        }
+    };
+    let state = match sisyphus_server::storage::prepare_s3(&pool, config.s3.as_ref()).await {
+        Ok(s3) => {
+            if let Some(client) = s3.as_ref() {
+                let view = client.public_view();
+                tracing::info!(
+                    endpoint = %view.endpoint,
+                    region = %view.region,
+                    bucket = %view.bucket,
+                    prefix = %view.prefix,
+                    "S3 后端已启用"
+                );
+            }
+            state.with_s3(s3)
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "S3 后端启动校验失败");
             std::process::exit(2);
         }
     };

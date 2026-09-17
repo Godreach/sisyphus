@@ -4,6 +4,7 @@
 use utoipa::OpenApi;
 
 use super::agents;
+use super::artifact_repository;
 use super::artifacts;
 use super::audit;
 use super::auth;
@@ -15,6 +16,7 @@ use super::members;
 use super::overview;
 use super::pipelines;
 use super::projects;
+use super::s3_config;
 use super::scm;
 use super::secrets;
 use super::smtp_config;
@@ -74,6 +76,7 @@ use super::users;
         artifacts::agent_download,
         artifacts::list,
         artifacts::download,
+        artifact_repository::status,
         triggers::list,
         triggers::create,
         triggers::get_one,
@@ -86,6 +89,8 @@ use super::users;
         audit::list,
         smtp_config::get,
         smtp_config::put,
+        s3_config::get,
+        s3_config::test_connection,
         agents::list,
         agents::create,
         agents::register,
@@ -152,6 +157,8 @@ use super::users;
         artifacts::ArtifactBackendDto,
         artifacts::ArtifactStateDto,
         artifacts::BuildArtifactsResponse,
+        artifact_repository::ArtifactRepositoryStatus,
+        artifact_repository::S3BackendDto,
         triggers::TriggerKindDto,
         triggers::CronSpecDto,
         triggers::PollSpecInputDto,
@@ -168,6 +175,9 @@ use super::users;
         smtp_config::SmtpConfigResponse,
         smtp_config::SmtpConfigRequest,
         crate::store::smtp_config::SmtpTls,
+        s3_config::S3ConfigState,
+        s3_config::S3TestReportDto,
+        s3_config::S3TestCheckDto,
         agents::CreateAgentRequest,
         agents::PatchAgentRequest,
         agents::AgentResponse,

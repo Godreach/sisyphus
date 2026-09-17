@@ -1027,6 +1027,37 @@
         }
       }
     },
+    "/api/v1/artifact-repository": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "一级制品库入口状态（任意登录角色）。",
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "制品库是否可用（未配置 S3 时 available=false）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactRepositoryStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/audit": {
       "get": {
         "tags": [
@@ -1594,6 +1625,98 @@
           },
           "404": {
             "description": "id 不存在或不属于当前用户（不暴露存在性）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/s3": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "读全局 S3 配置（脱敏，无凭据）。",
+        "operationId": "get",
+        "responses": {
+          "200": {
+            "description": "脱敏 S3 配置（凭据不回显）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S3ConfigState"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（需全局 admin）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/s3/test-connection": {
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "summary": "管理员显式测试 S3 契约（PUT/HEAD/Range GET/复制/multipart，并清理探针）。",
+        "operationId": "test_connection",
+        "responses": {
+          "200": {
+            "description": "逐步测试结果（失败不泄露凭据）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/S3TestReportDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "权限不足（需全局 admin）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "未配置 S3",
             "content": {
               "application/json": {
                 "schema": {
@@ -4745,12 +4868,44 @@
           }
         }
       },
+      "ArtifactRepositoryStatus": {
+        "type": "object",
+        "description": "一级制品库入口状态。",
+        "required": [
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "是否已配置且启动校验通过的 S3 后端。"
+          },
+          "backend": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/S3BackendDto",
+                "description": "非机密后端摘要（available=false 时省略）。"
+              }
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "不可用原因（available=true 时省略）。"
+          }
+        }
+      },
       "ArtifactStateDto": {
         "type": "string",
         "description": "产物正文可用状态。",
         "enum": [
           "ready",
-          "missing"
+          "missing",
+          "unavailable"
         ]
       },
       "ArtifactUploadedResponse": {
@@ -6084,6 +6239,109 @@
           "runner",
           "admin"
         ]
+      },
+      "S3BackendDto": {
+        "type": "object",
+        "description": "普通 API 可见的 S3 后端摘要（无凭据）。",
+        "required": [
+          "endpoint",
+          "region",
+          "bucket",
+          "prefix",
+          "path_style"
+        ],
+        "properties": {
+          "bucket": {
+            "type": "string",
+            "description": "Bucket。"
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "Endpoint。"
+          },
+          "path_style": {
+            "type": "boolean",
+            "description": "path-style。"
+          },
+          "prefix": {
+            "type": "string",
+            "description": "根前缀。"
+          },
+          "region": {
+            "type": "string",
+            "description": "Region。"
+          }
+        }
+      },
+      "S3ConfigState": {
+        "type": "object",
+        "description": "脱敏的 S3 配置态。",
+        "required": [
+          "configured"
+        ],
+        "properties": {
+          "config": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/S3BackendDto",
+                "description": "非机密字段（未配置时省略）。"
+              }
+            ]
+          },
+          "configured": {
+            "type": "boolean",
+            "description": "是否已在启动配置中启用并通过校验。"
+          }
+        }
+      },
+      "S3TestCheckDto": {
+        "type": "object",
+        "description": "单步自检结果。",
+        "required": [
+          "op",
+          "ok"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "失败说明（不含凭据）。"
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "是否成功。"
+          },
+          "op": {
+            "type": "string",
+            "description": "操作名。"
+          }
+        }
+      },
+      "S3TestReportDto": {
+        "type": "object",
+        "description": "管理员显式连接测试报告。",
+        "required": [
+          "ok",
+          "checks"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/S3TestCheckDto"
+            },
+            "description": "逐步结果。"
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "全部步骤成功。"
+          }
+        }
       },
       "SaveDefinitionResponse": {
         "type": "object",
