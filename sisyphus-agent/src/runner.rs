@@ -943,15 +943,22 @@ async fn upload_artifacts(
     spec: &JobSpec,
     ws_dir: &Path,
 ) -> Result<(), String> {
+    let mut sources = Vec::with_capacity(spec.uploads.len());
+    let mut files = Vec::with_capacity(spec.uploads.len());
     for u in &spec.uploads {
         let src =
             safe_join(ws_dir, &u.path).map_err(|e| format!("上传产物 {} 失败：{e}", u.name))?;
-        if !tokio::fs::try_exists(&src).await.unwrap_or(false) {
-            return Err(format!(
-                "上传产物 {} 失败：源路径不存在（{}）",
-                u.name, u.path
-            ));
-        }
+        let size = tokio::fs::metadata(&src)
+            .await
+            .map_err(|e| format!("上传产物 {} 失败：源路径不存在或无法读取（{e}）", u.name))?
+            .len();
+        files.push((u.name.clone(), size));
+        sources.push((u, src));
+    }
+    io.preflight(&spec.job_id, &files)
+        .await
+        .map_err(|e| format!("任务产物传输前限额校验失败：{e}"))?;
+    for (u, src) in sources {
         io.upload(&spec.job_id, &u.name, &src)
             .await
             .map_err(|e| format!("上传产物 {} 失败：{e}", u.name))?;

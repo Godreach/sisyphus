@@ -30,6 +30,50 @@ pub const DEFAULT_RETENTION_DAYS: i64 = 30;
 /// 运维可为 Prometheus 专建 viewer 用户；config `[metrics] auth = false` 可
 /// 关，文档注明仅限可信内网。与业务路由同端口，不单开）。
 pub const DEFAULT_METRICS_AUTH: bool = true;
+/// 单文件产物默认上限（GiB，票 #124）。
+pub const DEFAULT_ARTIFACT_SINGLE_FILE_LIMIT_GIB: u64 = 10;
+/// 单任务一次发布的产物合计默认上限（GiB，票 #124）。
+pub const DEFAULT_ARTIFACT_TASK_LIMIT_GIB: u64 = 20;
+/// 切换 multipart 上传的默认阈值（MiB）。
+pub const DEFAULT_S3_MULTIPART_THRESHOLD_MIB: u64 = 100;
+/// multipart 上传默认分片大小（MiB）。
+pub const DEFAULT_S3_MULTIPART_PART_SIZE_MIB: u64 = 64;
+/// CopyObject 默认单次复制边界（MiB；S3 规范为 5 GiB）。
+pub const DEFAULT_S3_COPY_OBJECT_LIMIT_MIB: u64 = 5 * 1024;
+/// multipart copy 默认分片大小（MiB）。
+pub const DEFAULT_S3_COPY_PART_SIZE_MIB: u64 = 512;
+
+/// 合并后的产物传输限额与分段参数（统一使用字节）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactTransferLimits {
+    /// 单文件字节上限。
+    pub single_file_limit: u64,
+    /// 单任务一次发布合计字节上限。
+    pub task_limit: u64,
+    /// multipart 上传阈值。
+    pub multipart_threshold: u64,
+    /// multipart 上传分片大小。
+    pub multipart_part_size: u64,
+    /// CopyObject 单次复制边界。
+    pub copy_object_limit: u64,
+    /// multipart copy 分片大小。
+    pub copy_part_size: u64,
+}
+
+impl Default for ArtifactTransferLimits {
+    fn default() -> Self {
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * MIB;
+        Self {
+            single_file_limit: DEFAULT_ARTIFACT_SINGLE_FILE_LIMIT_GIB * GIB,
+            task_limit: DEFAULT_ARTIFACT_TASK_LIMIT_GIB * GIB,
+            multipart_threshold: DEFAULT_S3_MULTIPART_THRESHOLD_MIB * MIB,
+            multipart_part_size: DEFAULT_S3_MULTIPART_PART_SIZE_MIB * MIB,
+            copy_object_limit: DEFAULT_S3_COPY_OBJECT_LIMIT_MIB * MIB,
+            copy_part_size: DEFAULT_S3_COPY_PART_SIZE_MIB * MIB,
+        }
+    }
+}
 
 /// 数据目录内的配置文件名。
 pub const CONFIG_FILE_NAME: &str = "config.toml";
@@ -90,6 +134,8 @@ pub struct Config {
     pub metrics_auth: bool,
     /// 可选自托管 S3 兼容后端（ADR-0026：未配置时制品库入口不可用）。
     pub s3: Option<S3Config>,
+    /// 产物大文件传输限额与分段参数。
+    pub artifact_transfer_limits: ArtifactTransferLimits,
 }
 
 /// 同一形态的覆盖层：CLI flag 与 `SISYPHUS_` 环境变量都归约为它。
@@ -274,6 +320,18 @@ pub struct MetricsFile {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorageFile {
+    /// 单文件产物上限（GiB）。
+    pub artifact_single_file_limit_gib: Option<u64>,
+    /// 单任务一次发布合计上限（GiB）。
+    pub artifact_task_limit_gib: Option<u64>,
+    /// multipart 上传阈值（MiB）。
+    pub multipart_threshold_mib: Option<u64>,
+    /// multipart 上传分片大小（MiB）。
+    pub multipart_part_size_mib: Option<u64>,
+    /// CopyObject 单次复制边界（MiB）。
+    pub copy_object_limit_mib: Option<u64>,
+    /// multipart copy 分片大小（MiB）。
+    pub copy_part_size_mib: Option<u64>,
     /// `[storage.s3]` 段。缺省或全空 = 未配置。
     #[serde(default)]
     pub s3: Option<S3File>,
@@ -424,6 +482,17 @@ retention_days = 30
 # 登录角色，运维可为 Prometheus 专建 viewer 用户）；false = 公开。仅限可信
 # 内网关闭——该端点暴露调度队列深度等运行态，公网裸奔等同泄露运营信息。
 auth = true
+
+[storage]
+# 产物部署级限额：单文件默认 10 GiB、单任务一次发布合计默认 20 GiB。
+artifact_single_file_limit_gib = 10
+artifact_task_limit_gib = 20
+# 大文件传输参数：100 MiB 起 multipart 上传，64 MiB 分片；超过 S3 的
+# 5 GiB CopyObject 边界后使用 512 MiB 分片做 multipart copy。
+multipart_threshold_mib = 100
+multipart_part_size_mib = 64
+copy_object_limit_mib = 5120
+copy_part_size_mib = 512
 
 # 可选自托管 S3 兼容后端（ADR-0026）。整段注释 = 未配置：Server 与既有本地产物
 # 照常工作，一级制品库入口提示不可用。任一必填字段生效则必须配齐，错误配置
@@ -594,6 +663,7 @@ pub fn merge(
         None => file.metrics.auth.unwrap_or(DEFAULT_METRICS_AUTH),
     };
     let s3 = merge_s3(&data_dir, env, file)?;
+    let artifact_transfer_limits = merge_artifact_transfer_limits(&file.storage)?;
 
     Ok(Config {
         data_dir,
@@ -608,7 +678,103 @@ pub fn merge(
         retention_days,
         metrics_auth,
         s3,
+        artifact_transfer_limits,
     })
+}
+
+fn merge_artifact_transfer_limits(
+    storage: &StorageFile,
+) -> Result<ArtifactTransferLimits, ConfigError> {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    let positive = |name: &str, value: u64| -> Result<u64, ConfigError> {
+        if value == 0 {
+            Err(ConfigError::InvalidS3(format!("{name} 须大于 0")))
+        } else {
+            Ok(value)
+        }
+    };
+    let single_gib = positive(
+        "artifact_single_file_limit_gib",
+        storage
+            .artifact_single_file_limit_gib
+            .unwrap_or(DEFAULT_ARTIFACT_SINGLE_FILE_LIMIT_GIB),
+    )?;
+    let task_gib = positive(
+        "artifact_task_limit_gib",
+        storage
+            .artifact_task_limit_gib
+            .unwrap_or(DEFAULT_ARTIFACT_TASK_LIMIT_GIB),
+    )?;
+    if single_gib > task_gib {
+        return Err(ConfigError::InvalidS3(
+            "artifact_single_file_limit_gib 不得大于 artifact_task_limit_gib".into(),
+        ));
+    }
+    let multipart_part_mib = positive(
+        "multipart_part_size_mib",
+        storage
+            .multipart_part_size_mib
+            .unwrap_or(DEFAULT_S3_MULTIPART_PART_SIZE_MIB),
+    )?;
+    let copy_part_mib = positive(
+        "copy_part_size_mib",
+        storage
+            .copy_part_size_mib
+            .unwrap_or(DEFAULT_S3_COPY_PART_SIZE_MIB),
+    )?;
+    if multipart_part_mib < 5 || copy_part_mib < 5 {
+        return Err(ConfigError::InvalidS3(
+            "multipart_part_size_mib 与 copy_part_size_mib 须至少为 5 MiB".into(),
+        ));
+    }
+    let gib = |name: &str, value: u64| {
+        value
+            .checked_mul(GIB)
+            .ok_or_else(|| ConfigError::InvalidS3(format!("{name} 数值过大")))
+    };
+    let mib = |name: &str, value: u64| {
+        value
+            .checked_mul(MIB)
+            .ok_or_else(|| ConfigError::InvalidS3(format!("{name} 数值过大")))
+    };
+    let limits = ArtifactTransferLimits {
+        single_file_limit: gib("artifact_single_file_limit_gib", single_gib)?,
+        task_limit: gib("artifact_task_limit_gib", task_gib)?,
+        multipart_threshold: mib(
+            "multipart_threshold_mib",
+            positive(
+                "multipart_threshold_mib",
+                storage
+                    .multipart_threshold_mib
+                    .unwrap_or(DEFAULT_S3_MULTIPART_THRESHOLD_MIB),
+            )?,
+        )?,
+        multipart_part_size: mib("multipart_part_size_mib", multipart_part_mib)?,
+        copy_object_limit: mib(
+            "copy_object_limit_mib",
+            positive(
+                "copy_object_limit_mib",
+                storage
+                    .copy_object_limit_mib
+                    .unwrap_or(DEFAULT_S3_COPY_OBJECT_LIMIT_MIB),
+            )?,
+        )?,
+        copy_part_size: mib("copy_part_size_mib", copy_part_mib)?,
+    };
+    const S3_SINGLE_REQUEST_MAX: u64 = 5 * GIB;
+    const S3_OBJECT_MAX: u64 = 5 * 1024 * GIB;
+    if limits.multipart_threshold > S3_SINGLE_REQUEST_MAX
+        || limits.multipart_part_size > S3_SINGLE_REQUEST_MAX
+        || limits.copy_object_limit > S3_SINGLE_REQUEST_MAX
+        || limits.copy_part_size > S3_SINGLE_REQUEST_MAX
+        || limits.single_file_limit > S3_OBJECT_MAX
+    {
+        return Err(ConfigError::InvalidS3(
+            "S3 单请求/分片不得超过 5 GiB，单文件不得超过 5 TiB".into(),
+        ));
+    }
+    Ok(limits)
 }
 
 /// 覆盖层与文件层的主密钥路径统一解析：绝对路径原样用，相对路径按相对
@@ -816,6 +982,77 @@ mod tests {
             "/metrics 鉴权默认开（ADR-0019）"
         );
         assert!(cfg.s3.is_none(), "未配置 S3 时后端为空");
+        assert_eq!(
+            cfg.artifact_transfer_limits,
+            ArtifactTransferLimits::default(),
+            "#124 默认单文件 10 GiB、单任务 20 GiB，并使用默认分段参数"
+        );
+    }
+
+    #[test]
+    fn artifact_transfer_limits_are_configurable_and_validated() {
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * MIB;
+        let file = FileConfig {
+            storage: StorageFile {
+                artifact_single_file_limit_gib: Some(3),
+                artifact_task_limit_gib: Some(7),
+                multipart_threshold_mib: Some(8),
+                multipart_part_size_mib: Some(6),
+                copy_object_limit_mib: Some(9),
+                copy_part_size_mib: Some(5),
+                ..StorageFile::default()
+            },
+            ..FileConfig::default()
+        };
+        let cfg = merge(
+            PathBuf::from("/tmp/data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file,
+        )
+        .expect("自定义产物限额");
+        assert_eq!(cfg.artifact_transfer_limits.single_file_limit, 3 * GIB);
+        assert_eq!(cfg.artifact_transfer_limits.task_limit, 7 * GIB);
+        assert_eq!(cfg.artifact_transfer_limits.multipart_threshold, 8 * MIB);
+        assert_eq!(cfg.artifact_transfer_limits.multipart_part_size, 6 * MIB);
+        assert_eq!(cfg.artifact_transfer_limits.copy_object_limit, 9 * MIB);
+        assert_eq!(cfg.artifact_transfer_limits.copy_part_size, 5 * MIB);
+
+        let invalid = FileConfig {
+            storage: StorageFile {
+                artifact_single_file_limit_gib: Some(8),
+                artifact_task_limit_gib: Some(7),
+                ..StorageFile::default()
+            },
+            ..FileConfig::default()
+        };
+        assert!(matches!(
+            merge(
+                PathBuf::from("/tmp/data"),
+                &Overrides::default(),
+                &Overrides::default(),
+                &invalid,
+            ),
+            Err(ConfigError::InvalidS3(_))
+        ));
+
+        let unsafe_single_request = FileConfig {
+            storage: StorageFile {
+                multipart_threshold_mib: Some(5121),
+                ..StorageFile::default()
+            },
+            ..FileConfig::default()
+        };
+        assert!(matches!(
+            merge(
+                PathBuf::from("/tmp/data"),
+                &Overrides::default(),
+                &Overrides::default(),
+                &unsafe_single_request,
+            ),
+            Err(ConfigError::InvalidS3(_))
+        ));
     }
 
     /// 票 #78：`[retention] retention_days` 文件层可配（与日志/产物共享
@@ -1417,6 +1654,7 @@ mod tests {
         let file = FileConfig {
             storage: StorageFile {
                 s3: Some(complete_s3_file()),
+                ..StorageFile::default()
             },
             ..FileConfig::default()
         };
@@ -1452,6 +1690,7 @@ mod tests {
                     endpoint: Some("https://s3.example.internal:9000".into()),
                     ..S3File::default()
                 }),
+                ..StorageFile::default()
             },
             ..FileConfig::default()
         };
@@ -1477,6 +1716,7 @@ mod tests {
         let file = FileConfig {
             storage: StorageFile {
                 s3: Some(complete_s3_file()),
+                ..StorageFile::default()
             },
             ..FileConfig::default()
         };
@@ -1508,6 +1748,7 @@ mod tests {
                     endpoint: Some("s3.example.internal".into()),
                     ..complete_s3_file()
                 }),
+                ..StorageFile::default()
             },
             ..FileConfig::default()
         };

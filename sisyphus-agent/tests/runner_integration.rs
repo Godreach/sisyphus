@@ -205,11 +205,7 @@ async fn spawn_fake(
 fn runner_state(token: Option<&str>) -> Arc<RunnerState> {
     Arc::new(RunnerState {
         expect_token: token.map(str::to_string),
-        server_version: Version {
-            major: 1,
-            minor: 0,
-            patch: 0,
-        },
+        server_version: sisyphus_agent::channel::agent_version(),
         acks: Mutex::new(Vec::new()),
         statuses: Mutex::new(Vec::new()),
         log_batches: Mutex::new(Vec::new()),
@@ -2051,6 +2047,10 @@ async fn backend_switches_per_job_host_runs_and_container_routes_to_pull() {
 /// 可编排的 fake 产物传输缝：记录上传/下载调用；上传可挂起（watch 门闩），
 /// 下载可配结果（写字节 / 拒绝）。
 struct FakeArtifactIo {
+    /// 整任务传输前预检记录。
+    preflights: Mutex<Vec<(String, Vec<(String, u64)>)>>,
+    /// 预检失败脚本。
+    preflight_error: Mutex<Option<String>>,
     /// 上传调用记录：(job_id, name, path)。
     uploads: Mutex<Vec<(String, String, PathBuf)>>,
     /// 下载调用记录：(job_id, source_job, name, dest)。
@@ -2065,6 +2065,8 @@ struct FakeArtifactIo {
 impl FakeArtifactIo {
     fn new() -> Arc<Self> {
         Arc::new(Self {
+            preflights: Mutex::new(Vec::new()),
+            preflight_error: Mutex::new(None),
             uploads: Mutex::new(Vec::new()),
             downloads: Mutex::new(Vec::new()),
             gate: None,
@@ -2075,6 +2077,8 @@ impl FakeArtifactIo {
     /// 挂起式上传：`tx` 置 true 前每次上传等待。
     fn gated(gate: watch::Receiver<bool>) -> Arc<Self> {
         Arc::new(Self {
+            preflights: Mutex::new(Vec::new()),
+            preflight_error: Mutex::new(None),
             uploads: Mutex::new(Vec::new()),
             downloads: Mutex::new(Vec::new()),
             gate: Some(gate),
@@ -2085,6 +2089,24 @@ impl FakeArtifactIo {
 
 #[async_trait::async_trait]
 impl sisyphus_agent::artifacts::ArtifactIo for FakeArtifactIo {
+    async fn preflight(
+        &self,
+        job_id: &str,
+        files: &[(String, u64)],
+    ) -> Result<(), sisyphus_agent::artifacts::ArtifactError> {
+        self.preflights
+            .lock()
+            .expect("锁")
+            .push((job_id.into(), files.to_vec()));
+        if let Some(message) = self.preflight_error.lock().expect("锁").as_ref() {
+            return Err(sisyphus_agent::artifacts::ArtifactError::Rejected {
+                status: 422,
+                message: message.clone(),
+            });
+        }
+        Ok(())
+    }
+
     async fn upload(
         &self,
         job_id: &str,
@@ -2264,7 +2286,48 @@ async fn artifact_upload_holds_slot_until_upload_completes() {
     assert_eq!(recorded.len(), 1, "按声明上传一次");
     assert_eq!(recorded[0].1, "dist.bin");
     assert_eq!(recorded[0].2, ws_dir.join("out/dist.bin"));
+    assert_eq!(
+        io.preflights.lock().unwrap().as_slice(),
+        &[("job-up".into(), vec![("dist.bin".into(), 10)])],
+        "上传前须提交完整大小清单"
+    );
 
+    shutdown_tx.send(true).expect("关闭");
+    agent_task.await.expect("agent 退出");
+    server_task.abort();
+}
+
+/// #124：部署限额预检拒绝时，Agent 不传任何文件并上报明确失败。
+#[tokio::test]
+async fn artifact_preflight_rejection_prevents_transfer() {
+    let dir = tempfile::tempdir().expect("临时数据目录");
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let io = FakeArtifactIo::new();
+    *io.preflight_error.lock().unwrap() = Some("单任务合计超过 20 GiB".into());
+    let (shutdown_tx, ws, agent_task) =
+        spawn_agent_artifacts(dir.path(), format!("http://{addr}"), io.clone());
+    let ws_dir = ws.resolve("pipe", "job").expect("工作区");
+    std::fs::create_dir_all(ws_dir.join("out")).expect("建目录");
+    std::fs::write(ws_dir.join("out/dist.bin"), b"dist-bytes").expect("写产物");
+    send_downlink(
+        &state,
+        artifact_spec(
+            "job-limit",
+            "echo built",
+            vec![sisyphus_proto::agent::ArtifactUpload {
+                name: "dist.bin".into(),
+                path: "out/dist.bin".into(),
+            }],
+            vec![],
+        ),
+    )
+    .await;
+    let terminal = await_terminal(&state, "job-limit").await;
+    assert_eq!(terminal.phase(), JobPhase::JobFailed);
+    assert!(terminal.detail.contains("单任务合计超过 20 GiB"));
+    assert!(io.uploads.lock().unwrap().is_empty());
+    assert_eq!(io.preflights.lock().unwrap().len(), 1);
     shutdown_tx.send(true).expect("关闭");
     agent_task.await.expect("agent 退出");
     server_task.abort();

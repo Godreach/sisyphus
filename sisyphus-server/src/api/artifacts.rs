@@ -43,6 +43,7 @@ use super::error::{ApiError, ErrorBody, ValidationIssue, parse_body};
 use super::policy::RequireViewer;
 use crate::auth::{TokenFamily, token_family, token_hash};
 use crate::storage::{ObjectClass, ObjectPhase, artifact_blob_name, object_key};
+use crate::store::artifacts::MultipartUploadRow;
 use crate::store::builds::BuildRepo;
 use crate::store::jobs::JobRepo;
 use crate::store::{ArtifactBackend, ArtifactMeta, ArtifactMetaRepo, ArtifactState, ArtifactStore};
@@ -72,10 +73,72 @@ pub struct ArtifactUploadedResponse {
 /// Agent 预签名上传 URL（仅临时对象，票 #123）。
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ArtifactUploadUrlResponse {
-    /// 短期 PUT URL（查询串签名，不含长期 secret）。
-    pub url: String,
+    /// `single` 或 `multipart`。
+    pub mode: ArtifactUploadMode,
+    /// 单 PUT URL；multipart 时为空。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// multipart upload id；单 PUT 时为空。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upload_id: Option<String>,
+    /// multipart 分片大小；单 PUT 时为空。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part_size: Option<u64>,
+    /// multipart 分片写 URL；单 PUT时为空数组。
+    pub parts: Vec<ArtifactUploadPart>,
     /// 有效秒数。
     pub expires_in: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+/// Agent 应采用的直传模式。
+pub enum ArtifactUploadMode {
+    /// 单个预签名 PUT。
+    Single,
+    /// S3 multipart 分片上传。
+    Multipart,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+/// 一个 multipart 分片的写许可。
+pub struct ArtifactUploadPart {
+    /// 从 1 开始的分片号。
+    pub part_number: u32,
+    /// 该分片专用的短期预签名 PUT URL。
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+/// Agent 申请上传许可时报告的文件信息。
+pub struct ArtifactUploadGrantRequest {
+    /// Agent 在传输前报告的文件大小（空文件为 0）。
+    pub size: u64,
+}
+
+/// 任务产物在传输前提交的完整文件大小清单。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ArtifactPreflightRequest {
+    /// 本次任务将上传的全部单文件声明。
+    pub files: Vec<ArtifactPreflightFile>,
+}
+
+/// 一条待传输的单文件产物。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ArtifactPreflightFile {
+    /// 任务上传声明中的名称。
+    pub name: String,
+    /// 文件大小（字节）。
+    pub size: u64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+/// Agent 已上传分片的完成凭据。
+pub struct ArtifactCompletedPart {
+    /// 从 1 开始的分片号。
+    pub part_number: u32,
+    /// S3 UploadPart 响应的 ETag。
+    pub etag: String,
 }
 
 /// Agent 完成上传：声明的大小与 SHA-256。
@@ -85,10 +148,19 @@ pub struct ArtifactCompleteRequest {
     pub size: u64,
     /// SHA-256 校验和（十六进制小写）。
     pub sha256: String,
+    /// multipart grant 返回的 upload id。
+    #[serde(default)]
+    pub upload_id: Option<String>,
+    /// Agent 上传成功的有序分片 ETag。
+    #[serde(default)]
+    pub parts: Vec<ArtifactCompletedPart>,
 }
 
 /// 预签名有效期（秒）：上传 PUT 与用户 GET 同为 5 分钟。
 const PRESIGN_SECS: i64 = 5 * 60;
+/// multipart 会话需容纳数 GiB 的实际传输时间；写 URL 仍只签发 5 分钟，
+/// Agent 重试申请时可在此窗口内复用会话并取得新的分片 URL。
+const MULTIPART_SESSION_SECS: i64 = 24 * 60 * 60;
 
 /// 产物条目（构建产物列表）。
 #[derive(Debug, Serialize, ToSchema)]
@@ -194,6 +266,74 @@ pub async fn require_agent_auth(
 // Agent 面端点
 // ---------------------------------------------------------------------------
 
+/// 在开始传输任务的第一件产物前，校验完整清单的单文件与合计限额。
+#[utoipa::path(
+    post,
+    path = "/api/v1/agent/artifacts/{job_id}/preflight",
+    tag = "artifacts",
+    request_body = ArtifactPreflightRequest,
+    params(("job_id" = i64, Path, description = "上传任务自身行 id")),
+    responses(
+        (status = 204, description = "整任务清单已通过限额校验"),
+        (status = 401, description = "未认证", body = ErrorBody),
+        (status = 404, description = "任务行不存在", body = ErrorBody),
+        (status = 422, description = "未声明产物或传输限额超出", body = ErrorBody),
+    )
+)]
+pub async fn agent_preflight(
+    State(state): State<AppState>,
+    Extension(agent): Extension<AgentAuth>,
+    Path(job_id): Path<i64>,
+    body: axum::body::Bytes,
+) -> Result<StatusCode, ApiError> {
+    let job = load_own_job(&state, &agent, job_id).await?;
+    if state.s3.is_none() {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let request: ArtifactPreflightRequest = parse_body(&body)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0_u64;
+    for file in &request.files {
+        validate_name(&file.name)?;
+        ensure_declared_upload(&state, &job, &file.name).await?;
+        if !seen.insert(&file.name) {
+            return Err(ApiError::validation(
+                "上传清单含重复产物名",
+                vec![ValidationIssue {
+                    path: "files".into(),
+                    message: format!("重复的产物名：{}", file.name),
+                }],
+            ));
+        }
+        if file.size > state.artifact_transfer_limits.single_file_limit {
+            return Err(ApiError::validation(
+                "产物超过单文件限额",
+                vec![ValidationIssue {
+                    path: "files".into(),
+                    message: format!(
+                        "{} 为 {} 字节，限额 {} 字节",
+                        file.name, file.size, state.artifact_transfer_limits.single_file_limit
+                    ),
+                }],
+            ));
+        }
+        total = total.saturating_add(file.size);
+    }
+    if total > state.artifact_transfer_limits.task_limit {
+        return Err(ApiError::validation(
+            "产物超过单任务限额",
+            vec![ValidationIssue {
+                path: "files".into(),
+                message: format!(
+                    "任务合计 {total} 字节，限额 {} 字节",
+                    state.artifact_transfer_limits.task_limit
+                ),
+            }],
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Agent 产物上传（agent token 鉴权，票 #74 / ADR-0007）：请求体即产物
 /// 字节（流式写盘，不整读内存），落定后记元数据行，返回大小 + 校验和。
 #[utoipa::path(
@@ -261,6 +401,7 @@ pub async fn agent_upload(
     post,
     path = "/api/v1/agent/artifacts/{job_id}/{name}/upload-url",
     tag = "artifacts",
+    request_body = ArtifactUploadGrantRequest,
     params(
         ("job_id" = i64, Path, description = "上传任务自身行 id"),
         ("name" = String, Path, description = "产物名（须在任务上传声明内）"),
@@ -277,6 +418,7 @@ pub async fn agent_upload_url(
     State(state): State<AppState>,
     Extension(agent): Extension<AgentAuth>,
     Path((job_id, name)): Path<(i64, String)>,
+    body: axum::body::Bytes,
 ) -> Result<Json<ArtifactUploadUrlResponse>, ApiError> {
     validate_name(&name)?;
     let job = load_own_job(&state, &agent, job_id).await?;
@@ -284,7 +426,10 @@ pub async fn agent_upload_url(
         .s3
         .as_ref()
         .ok_or_else(|| ApiError::conflict("未配置 S3，无法签发直传 URL"))?;
+    cleanup_expired_multipart_uploads(&state).await?;
     ensure_declared_upload(&state, &job, &name).await?;
+    let request: ArtifactUploadGrantRequest = parse_body(&body)?;
+    enforce_transfer_limits(&state, &job, &name, request.size).await?;
 
     let (tmp_key, final_key) = artifact_object_keys(s3.prefix(), &job, &name);
     let existing = state
@@ -309,16 +454,117 @@ pub async fn agent_upload_url(
             state: ArtifactState::Pending,
             name: name.clone(),
             path: final_key,
-            size: 0,
+            size: request.size,
             sha256: String::new(),
         })
         .await
         .map_err(|e| ApiError::internal("产物 pending 落库", &e))?;
+    let limits = state.artifact_transfer_limits;
+    if request.size >= limits.multipart_threshold && request.size > 0 {
+        let part_size =
+            crate::storage::s3::multipart_part_size(request.size, limits.multipart_part_size);
+        let part_count = request.size.div_ceil(part_size);
+        let now = crate::store::now_ms();
+        let upload_id = match state
+            .artifact_meta
+            .find_multipart(job.build_id, &name)
+            .await?
+        {
+            Some(existing)
+                if existing.job_id == job.id
+                    && existing.attempt == job.attempt
+                    && existing.object_key == tmp_key
+                    && existing.size == request.size
+                    && existing.part_size == part_size
+                    && existing.expires_at > now =>
+            {
+                existing.upload_id
+            }
+            existing => {
+                if let Some(existing) = existing {
+                    if !existing.completed {
+                        s3.abort_multipart_upload(&existing.object_key, &existing.upload_id)
+                            .await
+                            .map_err(|e| ApiError::internal("中止旧 multipart 上传", &e))?;
+                    }
+                    s3.delete_object(&existing.object_key)
+                        .await
+                        .map_err(|e| ApiError::internal("清理旧临时对象", &e))?;
+                    state
+                        .artifact_meta
+                        .delete_multipart(job.build_id, &name)
+                        .await?;
+                }
+                let upload_id = s3
+                    .create_multipart_upload(&tmp_key)
+                    .await
+                    .map_err(|e| ApiError::internal("创建 multipart 上传", &e))?;
+                state
+                    .artifact_meta
+                    .record_multipart(&MultipartUploadRow {
+                        build_id: job.build_id,
+                        name: name.clone(),
+                        job_id: job.id,
+                        attempt: job.attempt,
+                        object_key: tmp_key.clone(),
+                        upload_id: upload_id.clone(),
+                        size: request.size,
+                        part_size,
+                        completed: false,
+                        expires_at: now + MULTIPART_SESSION_SECS * 1000,
+                    })
+                    .await?;
+                upload_id
+            }
+        };
+        let mut parts = Vec::with_capacity(part_count as usize);
+        for part_number in 1..=part_count as u32 {
+            let url = match s3.presign_upload_part(&tmp_key, &upload_id, part_number, PRESIGN_SECS)
+            {
+                Ok(url) => url,
+                Err(error) => {
+                    let _ = s3.abort_multipart_upload(&tmp_key, &upload_id).await;
+                    return Err(ApiError::internal("签发 multipart 分片 URL", &error));
+                }
+            };
+            parts.push(ArtifactUploadPart { part_number, url });
+        }
+        return Ok(Json(ArtifactUploadUrlResponse {
+            mode: ArtifactUploadMode::Multipart,
+            url: None,
+            upload_id: Some(upload_id),
+            part_size: Some(part_size),
+            parts,
+            expires_in: PRESIGN_SECS,
+        }));
+    }
+    if let Some(existing) = state
+        .artifact_meta
+        .find_multipart(job.build_id, &name)
+        .await?
+    {
+        if !existing.completed {
+            s3.abort_multipart_upload(&existing.object_key, &existing.upload_id)
+                .await
+                .map_err(|e| ApiError::internal("中止旧 multipart 上传", &e))?;
+        }
+        s3.delete_object(&existing.object_key)
+            .await
+            .map_err(|e| ApiError::internal("清理旧临时对象", &e))?;
+        state
+            .artifact_meta
+            .delete_multipart(job.build_id, &name)
+            .await?;
+    }
     let url = s3
         .presign_put(&tmp_key, PRESIGN_SECS)
         .map_err(|e| ApiError::internal("签发上传 URL", &e))?;
     Ok(Json(ArtifactUploadUrlResponse {
-        url,
+        mode: ArtifactUploadMode::Single,
+        url: Some(url),
+        upload_id: None,
+        part_size: None,
+        parts: Vec::new(),
         expires_in: PRESIGN_SECS,
     }))
 }
@@ -354,6 +600,7 @@ pub async fn agent_complete(
         .s3
         .as_ref()
         .ok_or_else(|| ApiError::conflict("未配置 S3，无法完成直传"))?;
+    cleanup_expired_multipart_uploads(&state).await?;
     ensure_declared_upload(&state, &job, &name).await?;
     let req: ArtifactCompleteRequest = parse_body(&body)?;
     let sha = req.sha256.to_ascii_lowercase();
@@ -380,7 +627,94 @@ pub async fn agent_complete(
         )));
     }
 
+    enforce_transfer_limits(&state, &job, &name, req.size).await?;
+    let pending = state
+        .artifact_meta
+        .find_including_pending(job.build_id, &name)
+        .await?
+        .filter(|meta| {
+            meta.state == ArtifactState::Pending
+                && meta.backend == ArtifactBackend::S3
+                && meta.job_id == Some(job.id)
+                && meta.attempt == Some(job.attempt)
+                && meta.size == req.size
+        })
+        .ok_or_else(|| {
+            ApiError::validation(
+                "上传许可与完成请求不一致",
+                vec![ValidationIssue {
+                    path: "size".into(),
+                    message: "请按已签发许可的文件大小重新申请上传".into(),
+                }],
+            )
+        })?;
+
     let (tmp_key, final_key) = artifact_object_keys(s3.prefix(), &job, &name);
+    if pending.path != final_key {
+        return Err(ApiError::conflict("上传许可的最终对象不一致"));
+    }
+
+    if let Some(upload_id) = req.upload_id.as_deref() {
+        if req.parts.is_empty() {
+            return Err(ApiError::validation(
+                "multipart 完成清单为空",
+                vec![ValidationIssue {
+                    path: "parts".into(),
+                    message: "至少需要一个分片 ETag".into(),
+                }],
+            ));
+        }
+        let session = state
+            .artifact_meta
+            .find_multipart(job.build_id, &name)
+            .await?
+            .filter(|session| {
+                session.upload_id == upload_id
+                    && session.job_id == job.id
+                    && session.attempt == job.attempt
+                    && session.object_key == tmp_key
+                    && session.size == req.size
+            })
+            .ok_or_else(|| {
+                ApiError::validation(
+                    "multipart 上传会话不存在或已过期",
+                    vec![ValidationIssue {
+                        path: "upload_id".into(),
+                        message: "请重新申请上传许可".into(),
+                    }],
+                )
+            })?;
+        let mut parts = req
+            .parts
+            .iter()
+            .map(|part| (part.part_number, part.etag.clone()))
+            .collect::<Vec<_>>();
+        parts.sort_by_key(|(number, _)| *number);
+        if !session.completed {
+            if let Err(error) = s3
+                .complete_multipart_upload(&tmp_key, upload_id, &parts)
+                .await
+            {
+                // S3 可能完成了对象但响应丢失；仅当完整哈希符合本次请求
+                // 时才把它视作已完成，否则保留会话供再次重试。
+                if s3.hash_object(&tmp_key).await.ok() != Some((req.size, sha.clone())) {
+                    return Err(ApiError::internal("完成 multipart 上传", &error));
+                }
+            }
+            state
+                .artifact_meta
+                .mark_multipart_completed(session.build_id, &session.name)
+                .await?;
+        }
+    } else if !req.parts.is_empty() {
+        return Err(ApiError::validation(
+            "multipart upload id 缺失",
+            vec![ValidationIssue {
+                path: "upload_id".into(),
+                message: "提交分片清单时必须提供 upload_id".into(),
+            }],
+        ));
+    }
 
     let (size, digest) = match s3.hash_object(&tmp_key).await {
         Ok(v) => v,
@@ -407,9 +741,15 @@ pub async fn agent_complete(
             }],
         ));
     }
-    s3.copy_object(&tmp_key, &final_key)
-        .await
-        .map_err(|e| ApiError::internal("复制最终对象", &e))?;
+    s3.copy_object_adaptive(
+        &tmp_key,
+        &final_key,
+        size,
+        state.artifact_transfer_limits.copy_object_limit,
+        state.artifact_transfer_limits.copy_part_size,
+    )
+    .await
+    .map_err(|e| ApiError::internal("复制最终对象", &e))?;
     let (final_size, final_digest) = match s3.hash_object(&final_key).await {
         Ok(v) => v,
         Err(e) => {
@@ -446,6 +786,12 @@ pub async fn agent_complete(
         .record(&meta)
         .await
         .map_err(|e| ApiError::internal("产物元数据落库", &e))?;
+    if req.upload_id.is_some() {
+        state
+            .artifact_meta
+            .delete_multipart(job.build_id, &name)
+            .await?;
+    }
     Ok((
         StatusCode::CREATED,
         Json(ArtifactUploadedResponse {
@@ -454,6 +800,31 @@ pub async fn agent_complete(
             sha256: meta.sha256,
         }),
     ))
+}
+
+/// abort 并删除全部已过期 multipart 会话。失败行保留，供后台/下次请求重试。
+pub(crate) async fn cleanup_expired_multipart_uploads(state: &AppState) -> Result<(), ApiError> {
+    let Some(s3) = state.s3.as_ref() else {
+        return Ok(());
+    };
+    let expired = state
+        .artifact_meta
+        .list_expired_multipart(crate::store::now_ms())
+        .await?;
+    for upload in expired {
+        let aborted = upload.completed
+            || s3
+                .abort_multipart_upload(&upload.object_key, &upload.upload_id)
+                .await
+                .is_ok();
+        if aborted && s3.delete_object(&upload.object_key).await.is_ok() {
+            state
+                .artifact_meta
+                .cleanup_expired_multipart(&upload)
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 /// Agent 依赖产物下载（agent token 鉴权，票 #74）：拉取本次构建内其它
@@ -700,6 +1071,40 @@ fn declared_uploads(job: &crate::store::jobs::JobRow) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+async fn enforce_transfer_limits(
+    state: &AppState,
+    job: &crate::store::jobs::JobRow,
+    name: &str,
+    size: u64,
+) -> Result<(), ApiError> {
+    let limits = state.artifact_transfer_limits;
+    if size > limits.single_file_limit {
+        return Err(ApiError::validation(
+            "产物超过单文件限额",
+            vec![ValidationIssue {
+                path: "size".into(),
+                message: format!("文件 {size} 字节，限额 {} 字节", limits.single_file_limit),
+            }],
+        ));
+    }
+    let existing = state
+        .artifact_meta
+        .other_upload_bytes(job.id, job.attempt, name)
+        .await
+        .map_err(|e| ApiError::internal("计算任务产物大小", &e))?;
+    let total = existing.saturating_add(size);
+    if total > limits.task_limit {
+        return Err(ApiError::validation(
+            "产物超过单任务限额",
+            vec![ValidationIssue {
+                path: "size".into(),
+                message: format!("任务合计 {total} 字节，限额 {} 字节", limits.task_limit),
+            }],
+        ));
+    }
+    Ok(())
 }
 
 fn dto_state(state: &AppState, meta: &ArtifactMeta) -> ArtifactStateDto {

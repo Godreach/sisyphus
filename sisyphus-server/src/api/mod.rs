@@ -64,6 +64,7 @@ pub use docs::ApiDoc;
 
 use crate::api::error::ApiError;
 use crate::auth::LoginRateLimiter;
+pub use crate::config::ArtifactTransferLimits;
 use crate::engine::Engine;
 use crate::events::EventBus;
 use crate::grpc::SessionRegistry;
@@ -167,6 +168,8 @@ pub struct AppState {
     pub metrics_auth: bool,
     /// 可选 S3 客户端（票 #122：未配置为 None，制品库入口不可用）。
     pub s3: Option<Arc<S3Client>>,
+    /// 产物大文件传输阈值与部署级限额（票 #124）。
+    pub artifact_transfer_limits: ArtifactTransferLimits,
 }
 
 impl AppState {
@@ -223,12 +226,39 @@ impl AppState {
             retention_days,
             metrics_auth,
             s3: None,
+            artifact_transfer_limits: ArtifactTransferLimits::default(),
         })
     }
 
     /// 注入可选 S3 客户端（启动校验通过后由 main 调用）。
     pub fn with_s3(mut self, s3: Option<S3Client>) -> Self {
         self.s3 = s3.map(Arc::new);
+        self
+    }
+
+    /// 启动 S3 multipart 过期会话清理循环。由生产组合根显式调用；测试
+    /// 只注入客户端时不会意外生成常驻后台任务。
+    pub fn start_multipart_cleanup(&self) {
+        if self.s3.is_some() && tokio::runtime::Handle::try_current().is_ok() {
+            let cleanup_state = self.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    if let Err(error) =
+                        artifacts::cleanup_expired_multipart_uploads(&cleanup_state).await
+                    {
+                        tracing::warn!(error = ?error, "清理过期 multipart 上传失败，稍后重试");
+                    }
+                }
+            });
+        }
+    }
+
+    /// 覆盖产物传输限额/阈值（组合根配置注入；测试亦使用此缝）。
+    pub fn with_artifact_transfer_limits(mut self, limits: ArtifactTransferLimits) -> Self {
+        self.artifact_transfer_limits = limits;
         self
     }
 }
@@ -256,6 +286,10 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
     // （Bearer sisa_ 族；PAT/会话 401）——不与用户面认证/CSRF 中间件叠加
     // （Bearer 天然免疫 CSRF，且 Agent 无 cookie 语义）。
     let v1_agent_artifacts = Router::new()
+        .route(
+            "/agent/artifacts/{job_id}/preflight",
+            post(artifacts::agent_preflight),
+        )
         .route(
             "/agent/artifacts/{job_id}/{name}",
             post(artifacts::agent_upload),

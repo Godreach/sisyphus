@@ -168,7 +168,7 @@ impl S3Client {
         match self.create_multipart(&mp_copy).await {
             Ok(id) => {
                 copy_upload_id = Some(id.clone());
-                match self.upload_part_copy(&mp_copy, &id, 1, &blob).await {
+                match self.upload_part_copy(&mp_copy, &id, 1, &blob, None).await {
                     Ok(etag) => {
                         push_check(
                             &mut checks,
@@ -208,12 +208,58 @@ impl S3Client {
 
     /// 短期预签名 PUT（仅临时 key；查询串不含凭据明文 secret）。
     pub fn presign_put(&self, key: &str, expires_secs: i64) -> Result<String, StorageError> {
-        self.presign("PUT", key, expires_secs)
+        self.presign("PUT", key, expires_secs, &[])
+    }
+
+    /// 短期预签名 UploadPart URL。upload id 与 part number 进入 SigV4 查询串，
+    /// Agent 只能写该临时 multipart 会话的指定分片。
+    pub fn presign_upload_part(
+        &self,
+        key: &str,
+        upload_id: &str,
+        part_number: u32,
+        expires_secs: i64,
+    ) -> Result<String, StorageError> {
+        let part = part_number.to_string();
+        self.presign(
+            "PUT",
+            key,
+            expires_secs,
+            &[("partNumber", part.as_str()), ("uploadId", upload_id)],
+        )
     }
 
     /// 短期预签名 GET（仅最终 key）。
     pub fn presign_get(&self, key: &str, expires_secs: i64) -> Result<String, StorageError> {
-        self.presign("GET", key, expires_secs)
+        self.presign("GET", key, expires_secs, &[])
+    }
+
+    /// 创建临时对象的 multipart 上传会话。
+    pub async fn create_multipart_upload(&self, key: &str) -> Result<String, StorageError> {
+        self.create_multipart(key).await
+    }
+
+    /// 由 Agent 回传的 ETag 清单完成临时对象 multipart 上传。
+    pub async fn complete_multipart_upload(
+        &self,
+        key: &str,
+        upload_id: &str,
+        parts: &[(u32, String)],
+    ) -> Result<(), StorageError> {
+        let parts = parts
+            .iter()
+            .map(|(number, etag)| (*number as i32, etag.clone()))
+            .collect::<Vec<_>>();
+        self.complete_multipart(key, upload_id, &parts).await
+    }
+
+    /// 中止临时对象的 multipart 上传会话。
+    pub async fn abort_multipart_upload(
+        &self,
+        key: &str,
+        upload_id: &str,
+    ) -> Result<(), StorageError> {
+        self.abort_multipart(key, upload_id).await
     }
 
     /// 流式读取对象并计算 SHA-256（不整读入内存）。
@@ -282,7 +328,7 @@ impl S3Client {
 
     /// 复制对象（临时 → 最终；最终 key 从不签发 PUT）。
     pub async fn copy_object(&self, src: &str, dst: &str) -> Result<(), StorageError> {
-        let source = format!("/{}/{}", self.bucket, src);
+        let source = format!("/{}/{}", self.bucket, uri_encode_path(src));
         let resp = self
             .send(
                 "PUT",
@@ -297,6 +343,58 @@ impl S3Client {
         } else {
             Err(map_s3_status(resp.status, &resp.body, "CopyObject"))
         }
+    }
+
+    /// 小对象走 CopyObject；超过单次复制限制时按 range 做 multipart copy。
+    /// 任一分片最多重试三次，失败会中止目标 multipart 会话。
+    pub async fn copy_object_adaptive(
+        &self,
+        src: &str,
+        dst: &str,
+        size: u64,
+        single_copy_limit: u64,
+        part_size: u64,
+    ) -> Result<(), StorageError> {
+        if size <= single_copy_limit {
+            return self.copy_object(src, dst).await;
+        }
+        let part_size = multipart_part_size(size, part_size);
+        let upload_id = self.create_multipart(dst).await?;
+        let result = async {
+            let mut parts = Vec::new();
+            let mut start = 0_u64;
+            let mut number = 1_i32;
+            while start < size {
+                let end = (start + part_size - 1).min(size - 1);
+                let mut last_error = None;
+                let mut etag = None;
+                for _attempt in 1..=3 {
+                    match self
+                        .upload_part_copy(dst, &upload_id, number, src, Some((start, end)))
+                        .await
+                    {
+                        Ok(value) => {
+                            etag = Some(value);
+                            break;
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
+                }
+                let etag = etag.ok_or_else(|| {
+                    last_error
+                        .unwrap_or_else(|| StorageError::Protocol("UploadPartCopy 重试耗尽".into()))
+                })?;
+                parts.push((number, etag));
+                start = end + 1;
+                number += 1;
+            }
+            self.complete_multipart(dst, &upload_id, &parts).await
+        }
+        .await;
+        if result.is_err() {
+            let _ = self.abort_multipart(dst, &upload_id).await;
+        }
+        result
     }
 
     async fn create_multipart(&self, key: &str) -> Result<String, StorageError> {
@@ -341,15 +439,21 @@ impl S3Client {
         upload_id: &str,
         part: i32,
         src: &str,
+        range: Option<(u64, u64)>,
     ) -> Result<String, StorageError> {
         let part_s = part.to_string();
-        let source = format!("/{}/{}", self.bucket, src);
+        let source = format!("/{}/{}", self.bucket, uri_encode_path(src));
+        let range_value = range.map(|(start, end)| format!("bytes={start}-{end}"));
+        let mut headers = vec![("x-amz-copy-source", source.as_str())];
+        if let Some(value) = range_value.as_deref() {
+            headers.push(("x-amz-copy-source-range", value));
+        }
         let resp = self
             .send(
                 "PUT",
                 Some(key),
                 &[("partNumber", &part_s), ("uploadId", upload_id)],
-                &[("x-amz-copy-source", &source)],
+                &headers,
                 b"",
             )
             .await?;
@@ -385,7 +489,9 @@ impl S3Client {
                 xml.as_bytes(),
             )
             .await?;
-        if (200..300).contains(&resp.status) {
+        if (200..300).contains(&resp.status)
+            && xml_tag(&String::from_utf8_lossy(&resp.body), "Code").is_none()
+        {
             Ok(())
         } else {
             Err(map_s3_status(resp.status, &resp.body, "CompleteMultipart"))
@@ -477,7 +583,13 @@ impl S3Client {
         req.send().await.map_err(StorageError::from_reqwest)
     }
 
-    fn presign(&self, method: &str, key: &str, expires_secs: i64) -> Result<String, StorageError> {
+    fn presign(
+        &self,
+        method: &str,
+        key: &str,
+        expires_secs: i64,
+        extra_query: &[(&str, &str)],
+    ) -> Result<String, StorageError> {
         let now = chrono::Utc::now();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date_stamp = now.format("%Y%m%d").to_string();
@@ -487,7 +599,7 @@ impl S3Client {
             self.access_key_id, date_stamp, self.region
         );
         let expires = expires_secs.max(1).to_string();
-        let query = [
+        let mut query = vec![
             ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"),
             ("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD"),
             ("X-Amz-Credential", credential.as_str()),
@@ -495,6 +607,7 @@ impl S3Client {
             ("X-Amz-Expires", expires.as_str()),
             ("X-Amz-SignedHeaders", "host"),
         ];
+        query.extend_from_slice(extra_query);
         let canonical_query = canonical_query(&query);
         let canonical_headers = format!("host:{}\n", host.trim());
         let canonical_request = format!(
@@ -678,7 +791,7 @@ fn xml_tag(body: &str, tag: &str) -> Option<String> {
     let i = body.find(&start)?;
     let rest = &body[i + start.len()..];
     let j = rest.find(&end)?;
-    Some(rest[..j].trim().trim_matches('"').to_string())
+    Some(rest[..j].trim().to_string())
 }
 
 fn xml_escape(s: &str) -> String {
@@ -691,7 +804,7 @@ fn etag_of(headers: &reqwest::header::HeaderMap) -> Option<String> {
     headers
         .get("etag")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().trim_matches('"').to_string())
+        .map(|s| s.trim().to_string())
 }
 
 fn host_of(endpoint: &str) -> String {
@@ -708,6 +821,12 @@ fn uri_encode_path(path: &str) -> String {
         .map(|seg| aws_encode(seg, true))
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// S3 multipart 最多 10,000 分片；对超大对象自动抬高分片大小，避免合法的
+/// 单文件上限与较小配置组合出无法完成的上传/复制。
+pub(crate) fn multipart_part_size(total_size: u64, configured: u64) -> u64 {
+    configured.max(total_size.div_ceil(10_000)).max(1)
 }
 
 fn canonical_query(query: &[(&str, &str)]) -> String {
@@ -741,6 +860,18 @@ fn aws_encode(input: &str, encode_slash: bool) -> String {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::multipart_part_size;
+
+    #[test]
+    fn multipart_part_size_caps_part_count_at_ten_thousand() {
+        assert_eq!(multipart_part_size(10, 4), 4);
+        assert_eq!(multipart_part_size(40_001, 4), 5);
+        assert_eq!(40_001_u64.div_ceil(multipart_part_size(40_001, 4)), 8_001);
+    }
 }
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, StorageError> {

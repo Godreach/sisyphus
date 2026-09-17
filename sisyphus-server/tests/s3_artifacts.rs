@@ -7,6 +7,7 @@ mod common;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -33,6 +34,8 @@ struct Mock {
     access_key: String,
     bucket: String,
     objects: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    uploads: Arc<Mutex<HashMap<String, (String, HashMap<u32, Vec<u8>>)>>>,
+    next_upload: Arc<AtomicUsize>,
 }
 
 async fn handle(State(mock): State<Mock>, req: Request<axum::body::Body>) -> Response {
@@ -72,6 +75,97 @@ async fn handle(State(mock): State<Mock>, req: Request<axum::body::Body>) -> Res
 
     if key.is_empty() && (method == axum::http::Method::HEAD || method == axum::http::Method::GET) {
         return StatusCode::OK.into_response();
+    }
+
+    if query == "uploads=" && method == axum::http::Method::POST {
+        let id = format!(
+            "upload-{}",
+            mock.next_upload.fetch_add(1, Ordering::Relaxed)
+        );
+        mock.uploads
+            .lock()
+            .unwrap()
+            .insert(id.clone(), (key.to_string(), HashMap::new()));
+        return (
+            StatusCode::OK,
+            format!("<InitiateMultipartUploadResult><UploadId>{id}</UploadId></InitiateMultipartUploadResult>"),
+        )
+            .into_response();
+    }
+    let upload_id = query_val(&query, "uploadId");
+    let part_number = query_val(&query, "partNumber").and_then(|v| v.parse::<u32>().ok());
+    if let Some(upload_id) = upload_id {
+        if method == axum::http::Method::DELETE {
+            let removed = mock.uploads.lock().unwrap().remove(&upload_id);
+            return if removed.is_some() {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                (
+                    StatusCode::NOT_FOUND,
+                    "<Error><Code>NoSuchUpload</Code></Error>",
+                )
+                    .into_response()
+            };
+        }
+        if method == axum::http::Method::PUT {
+            let Some(part_number) = part_number else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            let mut uploads = mock.uploads.lock().unwrap();
+            let Some((_key, parts)) = uploads.get_mut(&upload_id) else {
+                return (
+                    StatusCode::NOT_FOUND,
+                    "<Error><Code>NoSuchUpload</Code></Error>",
+                )
+                    .into_response();
+            };
+            let data = if let Some(src) = headers
+                .get("x-amz-copy-source")
+                .and_then(|v| v.to_str().ok())
+            {
+                let src_key = copy_source_key(src, &mock.bucket);
+                let source = mock
+                    .objects
+                    .lock()
+                    .unwrap()
+                    .get(&src_key)
+                    .cloned()
+                    .unwrap_or_default();
+                headers
+                    .get("x-amz-copy-source-range")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(parse_range)
+                    .and_then(|(start, end)| source.get(start..=end.min(source.len() - 1)))
+                    .unwrap_or(&source)
+                    .to_vec()
+            } else {
+                body.to_vec()
+            };
+            parts.insert(part_number, data);
+            return (
+                StatusCode::OK,
+                [("etag", format!("\"etag-{part_number}\""))],
+                format!("<CopyPartResult><ETag>etag-{part_number}</ETag></CopyPartResult>"),
+            )
+                .into_response();
+        }
+        if method == axum::http::Method::POST {
+            let Some((object_key, parts)) = mock.uploads.lock().unwrap().remove(&upload_id) else {
+                return (
+                    StatusCode::NOT_FOUND,
+                    "<Error><Code>NoSuchUpload</Code></Error>",
+                )
+                    .into_response();
+            };
+            let mut ordered: Vec<_> = parts.into_iter().collect();
+            ordered.sort_by_key(|(number, _)| *number);
+            let data = ordered
+                .into_iter()
+                .flat_map(|(_, bytes)| bytes)
+                .collect::<Vec<_>>();
+            mock.objects.lock().unwrap().insert(object_key, data);
+            return StatusCode::OK.into_response();
+        }
     }
 
     match method {
@@ -142,11 +236,26 @@ fn copy_source_key(src: &str, bucket: &str) -> String {
     src.strip_prefix(&prefix).unwrap_or(src).to_string()
 }
 
+fn query_val(query: &str, name: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let mut parts = pair.splitn(2, '=');
+        (parts.next()? == name).then(|| parts.next().unwrap_or_default().to_string())
+    })
+}
+
+fn parse_range(value: &str) -> Option<(usize, usize)> {
+    let value = value.strip_prefix("bytes=")?;
+    let (start, end) = value.split_once('-')?;
+    Some((start.parse().ok()?, end.parse().ok()?))
+}
+
 async fn spawn_mock(access_key: &str, bucket: &str) -> (SocketAddr, Mock) {
     let mock = Mock {
         access_key: access_key.into(),
         bucket: bucket.into(),
         objects: Arc::new(Mutex::new(HashMap::new())),
+        uploads: Arc::new(Mutex::new(HashMap::new())),
+        next_upload: Arc::new(AtomicUsize::new(1)),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -184,6 +293,10 @@ struct Harness {
 }
 
 async fn harness() -> Harness {
+    harness_with_limits(sisyphus_server::api::ArtifactTransferLimits::default()).await
+}
+
+async fn harness_with_limits(limits: sisyphus_server::api::ArtifactTransferLimits) -> Harness {
     let dir = tempfile::tempdir().expect("临时数据目录");
     let pool = store::bootstrap(dir.path()).await.expect("bootstrap");
     let master_key = sisyphus_server::secrets::ensure_master_key(
@@ -208,6 +321,7 @@ async fn harness() -> Harness {
     )
     .await
     .expect("装配 AppState")
+    .with_artifact_transfer_limits(limits)
     .with_s3(Some(client));
     let app = common::test_app_from_state(state.clone(), dir.path());
 
@@ -267,7 +381,14 @@ async fn harness() -> Harness {
                 name: "main".into(),
                 when: None,
                 jobs: vec![
-                    job_def("build", vec![("dist.bin", "dist.bin")]),
+                    job_def(
+                        "build",
+                        vec![
+                            ("dist.bin", "dist.bin"),
+                            ("dist file.bin", "dist file.bin"),
+                            ("other.bin", "other.bin"),
+                        ],
+                    ),
                     job_def("package", vec![]),
                 ],
             }],
@@ -289,7 +410,7 @@ async fn harness() -> Harness {
         })
         .await
         .expect("建构建");
-    let spec_a = r#"{"artifact_uploads":[{"name":"dist.bin","path":"dist.bin"}]}"#;
+    let spec_a = r#"{"artifact_uploads":[{"name":"dist.bin","path":"dist.bin"},{"name":"dist file.bin","path":"dist file.bin"},{"name":"other.bin","path":"other.bin"}]}"#;
     let job_a = JobRepo::new(pool.clone())
         .insert(NewJob {
             build_id: build.id,
@@ -372,7 +493,7 @@ async fn s3_single_file_is_ready_only_after_temp_copy() {
     let digest = sha256_hex(bytes);
     let grant_path = format!("/api/v1/agent/artifacts/{}/dist.bin/upload-url", h.job_a);
 
-    let resp = agent_post_json(&h, &grant_path, "{}").await;
+    let resp = agent_post_json(&h, &grant_path, &format!(r#"{{"size":{}}}"#, bytes.len())).await;
     assert_eq!(resp.status(), 200, "签发上传 URL 应 200");
     let body = common::body_json(resp).await;
     let url = body["url"].as_str().expect("url");
@@ -486,7 +607,27 @@ async fn s3_single_file_is_ready_only_after_temp_copy() {
     .await;
     assert_eq!(resp.status(), 200, "ready 后 complete 幂等");
 
-    let resp = agent_post_json(&h, &grant_path, "{}").await;
+    // 旧预签名 URL 即使在有效期内被重放，也只会改写已脱离发布链的临时 key；
+    // 最终 key 从未签发写权限，下载内容保持不变。
+    let replay = http_client()
+        .put(url)
+        .body(b"replayed-evil-bytes".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(replay.status().is_success(), "mock 接受仍有效的旧 URL");
+    let final_bytes = h
+        .mock
+        .objects
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(key, _)| key.contains("/artifacts/final/"))
+        .map(|(_, value)| value.clone())
+        .expect("最终对象");
+    assert_eq!(final_bytes, bytes, "旧临时写 URL 不得改写 ready 对象");
+
+    let resp = agent_post_json(&h, &grant_path, &format!(r#"{{"size":{}}}"#, bytes.len())).await;
     assert_eq!(resp.status(), 409, "ready 后不得再签发写 URL");
     let resp = agent_post_json(
         &h,
@@ -502,6 +643,259 @@ async fn s3_single_file_is_ready_only_after_temp_copy() {
 
     let resp = agent_download(&h, h.job_b, "build", "dist.bin").await;
     assert_eq!(resp.status(), 302, "依赖拉取同样签发最终对象 GET");
+}
+
+/// #124：超过阈值后 multipart 上传，且超过单次复制边界后 multipart copy；
+/// ready 后旧分片 URL 已失效，不能改写最终对象。
+#[tokio::test]
+async fn large_file_uses_multipart_upload_and_copy_and_rejects_replay() {
+    let h = harness_with_limits(sisyphus_server::api::ArtifactTransferLimits {
+        single_file_limit: 100,
+        task_limit: 200,
+        multipart_threshold: 5,
+        multipart_part_size: 4,
+        copy_object_limit: 6,
+        copy_part_size: 4,
+    })
+    .await;
+    let bytes = b"abcdefghij";
+    let digest = sha256_hex(bytes);
+    let grant = agent_post_json(
+        &h,
+        &format!(
+            "/api/v1/agent/artifacts/{}/dist%20file.bin/upload-url",
+            h.job_a
+        ),
+        &format!(r#"{{"size":{}}}"#, bytes.len()),
+    )
+    .await;
+    assert_eq!(grant.status(), 200);
+    let grant = common::body_json(grant).await;
+    assert_eq!(grant["mode"], "multipart");
+    assert_eq!(grant["part_size"], 4);
+    let upload_id = grant["upload_id"].as_str().unwrap().to_string();
+    let parts = grant["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 3);
+    let old_url = parts[0]["url"].as_str().unwrap().to_string();
+    let mut completed = Vec::new();
+    for (index, chunk) in bytes.chunks(4).enumerate() {
+        let response = http_client()
+            .put(parts[index]["url"].as_str().unwrap())
+            .body(chunk.to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let etag = response
+            .headers()
+            .get("etag")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        completed.push(serde_json::json!({
+            "part_number": index + 1,
+            "etag": etag,
+        }));
+    }
+    let complete = agent_post_json(
+        &h,
+        &format!(
+            "/api/v1/agent/artifacts/{}/dist%20file.bin/complete",
+            h.job_a
+        ),
+        &serde_json::json!({
+            "size": bytes.len(),
+            "sha256": digest,
+            "upload_id": upload_id,
+            "parts": completed,
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(
+        complete.status(),
+        201,
+        "{}",
+        common::body_text(complete).await
+    );
+
+    let replay = http_client()
+        .put(old_url)
+        .body(b"evil".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        !replay.status().is_success(),
+        "已完成 upload 的旧 URL 应失效"
+    );
+    let final_bytes = h
+        .mock
+        .objects
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(key, _)| key.contains("/artifacts/final/"))
+        .map(|(_, value)| value.clone())
+        .expect("最终对象");
+    assert_eq!(final_bytes, bytes);
+}
+
+/// 过期 pending 会话在再次申请前被 abort；旧分片 URL 随即失效，新会话可重试。
+#[tokio::test]
+async fn expired_multipart_upload_is_aborted_before_retry() {
+    let h = harness_with_limits(sisyphus_server::api::ArtifactTransferLimits {
+        single_file_limit: 100,
+        task_limit: 200,
+        multipart_threshold: 5,
+        multipart_part_size: 4,
+        copy_object_limit: 100,
+        copy_part_size: 4,
+    })
+    .await;
+    let grant_path = format!("/api/v1/agent/artifacts/{}/dist.bin/upload-url", h.job_a);
+    let first = agent_post_json(&h, &grant_path, r#"{"size":10}"#).await;
+    assert_eq!(first.status(), 200);
+    let first = common::body_json(first).await;
+    let first_id = first["upload_id"].as_str().unwrap().to_string();
+    let old_url = first["parts"][0]["url"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE artifact_multipart_uploads SET expires_at = 0")
+        .execute(&h.app.pool)
+        .await
+        .expect("模拟过期");
+
+    let second = agent_post_json(&h, &grant_path, r#"{"size":10}"#).await;
+    assert_eq!(second.status(), 200);
+    let second = common::body_json(second).await;
+    assert_ne!(second["upload_id"].as_str().unwrap(), first_id);
+    let replay = http_client()
+        .put(old_url)
+        .body(b"old".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(!replay.status().is_success(), "过期会话必须已 abort");
+    assert_eq!(h.mock.uploads.lock().unwrap().len(), 1, "只保留新会话");
+}
+
+/// 单文件与单任务限额都在签发任何 S3 写 URL 前拒绝。
+#[tokio::test]
+async fn transfer_limits_reject_before_upload_grant() {
+    let h = harness_with_limits(sisyphus_server::api::ArtifactTransferLimits {
+        single_file_limit: 10,
+        task_limit: 12,
+        multipart_threshold: 5,
+        multipart_part_size: 4,
+        copy_object_limit: 6,
+        copy_part_size: 4,
+    })
+    .await;
+    let path = format!("/api/v1/agent/artifacts/{}/dist.bin/upload-url", h.job_a);
+    let too_large = agent_post_json(&h, &path, r#"{"size":11}"#).await;
+    assert_eq!(too_large.status(), 422);
+    assert!(h.mock.uploads.lock().unwrap().is_empty());
+
+    sqlx::query(
+        "INSERT INTO artifacts
+            (build_id, name, path, size, sha256, created_at, retention_until,
+             backend, job_id, attempt, state)
+         VALUES (?, 'other.bin', 'other', 8, '', 0, ?, 's3', ?, 1, 'ready')",
+    )
+    .bind(h.build.id)
+    .bind(i64::MAX)
+    .bind(h.job_a)
+    .execute(&h.app.pool)
+    .await
+    .expect("已有任务产物");
+    let task_too_large = agent_post_json(&h, &path, r#"{"size":5}"#).await;
+    assert_eq!(task_too_large.status(), 422);
+    let body = common::body_json(task_too_large).await;
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("单任务"),
+        "{body}"
+    );
+    assert!(h.mock.uploads.lock().unwrap().is_empty());
+}
+
+/// 完整清单的合计限额在第一个写 URL 签发之前拒绝。
+#[tokio::test]
+async fn preflight_rejects_task_total_before_any_transfer() {
+    let h = harness_with_limits(sisyphus_server::api::ArtifactTransferLimits {
+        single_file_limit: 10,
+        task_limit: 12,
+        multipart_threshold: 5,
+        multipart_part_size: 4,
+        copy_object_limit: 6,
+        copy_part_size: 4,
+    })
+    .await;
+    let resp = agent_post_json(
+        &h,
+        &format!("/api/v1/agent/artifacts/{}/preflight", h.job_a),
+        r#"{"files":[{"name":"dist.bin","size":8},{"name":"other.bin","size":5}]}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), 422);
+    let body = common::body_json(resp).await;
+    assert!(body["message"].as_str().unwrap().contains("单任务"));
+    assert!(h.mock.objects.lock().unwrap().is_empty());
+    assert!(h.mock.uploads.lock().unwrap().is_empty());
+}
+
+/// 不能先申请较小的写许可，再在 complete 声明超限大小绕过限额。
+#[tokio::test]
+async fn complete_rejects_size_changed_after_grant() {
+    let h = harness_with_limits(sisyphus_server::api::ArtifactTransferLimits {
+        single_file_limit: 10,
+        task_limit: 12,
+        multipart_threshold: 5,
+        multipart_part_size: 4,
+        copy_object_limit: 6,
+        copy_part_size: 4,
+    })
+    .await;
+    let grant = agent_post_json(
+        &h,
+        &format!("/api/v1/agent/artifacts/{}/dist.bin/upload-url", h.job_a),
+        r#"{"size":4}"#,
+    )
+    .await;
+    assert_eq!(grant.status(), 200);
+    let url = common::body_json(grant).await["url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    http_client()
+        .put(url)
+        .body(b"12345678901".to_vec())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let complete = agent_post_json(
+        &h,
+        &format!("/api/v1/agent/artifacts/{}/dist.bin/complete", h.job_a),
+        &serde_json::json!({
+            "size": 11,
+            "sha256": sha256_hex(b"12345678901"),
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(complete.status(), 422);
+    assert!(
+        h.mock
+            .objects
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|key| !key.contains("/artifacts/final/"))
+    );
 }
 
 async fn agent_download(
@@ -530,7 +924,7 @@ async fn complete_rejects_hash_mismatch_and_cleans_tmp() {
     let grant = agent_post_json(
         &h,
         &format!("/api/v1/agent/artifacts/{}/dist.bin/upload-url", h.job_a),
-        "{}",
+        &format!(r#"{{"size":{}}}"#, bytes.len()),
     )
     .await;
     let url = common::body_json(grant).await["url"]
@@ -582,7 +976,7 @@ async fn undeclared_upload_is_rejected() {
     let resp = agent_post_json(
         &h,
         &format!("/api/v1/agent/artifacts/{}/secret.bin/upload-url", h.job_a),
-        "{}",
+        r#"{"size":1}"#,
     )
     .await;
     assert_eq!(resp.status(), 422);
@@ -600,7 +994,7 @@ async fn unauthorized_cannot_list_or_download() {
     let grant = agent_post_json(
         &h,
         &format!("/api/v1/agent/artifacts/{}/dist.bin/upload-url", h.job_a),
-        "{}",
+        &format!(r#"{{"size":{}}}"#, bytes.len()),
     )
     .await;
     let url = common::body_json(grant).await["url"]
@@ -709,7 +1103,7 @@ async fn s3_artifact_survives_local_retention_sweep() {
     let grant = agent_post_json(
         &h,
         &format!("/api/v1/agent/artifacts/{}/dist.bin/upload-url", h.job_a),
-        "{}",
+        &format!(r#"{{"size":{}}}"#, bytes.len()),
     )
     .await;
     let url = common::body_json(grant).await["url"]

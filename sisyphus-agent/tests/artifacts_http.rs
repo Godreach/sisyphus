@@ -36,6 +36,10 @@ async fn spawn_stub(
     let upload_state = uploads.clone();
     let app = Router::new()
         .route(
+            "/api/v1/agent/artifacts/{job_id}/preflight",
+            post(|| async { StatusCode::NO_CONTENT }),
+        )
+        .route(
             "/api/v1/agent/artifacts/{job_id}/{name}/upload-url",
             post(|| async {
                 (
@@ -243,6 +247,10 @@ async fn upload_uses_presigned_put_then_complete() {
     let grant_url = put_url.clone();
     let app = Router::new()
         .route(
+            "/api/v1/agent/artifacts/{job_id}/preflight",
+            post(|| async { StatusCode::NO_CONTENT }),
+        )
+        .route(
             "/api/v1/agent/artifacts/{job_id}/{name}/upload-url",
             post(move || {
                 let grant_url = grant_url.clone();
@@ -296,6 +304,122 @@ async fn upload_uses_presigned_put_then_complete() {
     let complete = complete_seen.lock().expect("锁").clone();
     assert_eq!(complete.len(), 1);
     assert!(complete[0].contains("\"size\":3"), "{}", complete[0]);
+}
+
+/// 大文件：单分片失败只重试该分片；短期 URL 过期后重新申请同一会话的
+/// 分片 URL，complete 收到全部有序 ETag。
+#[tokio::test]
+async fn multipart_upload_retries_failed_part_and_completes() {
+    let attempts = Arc::new(Mutex::new(std::collections::HashMap::<u32, usize>::new()));
+    let uploaded = Arc::new(Mutex::new(std::collections::HashMap::<u32, Vec<u8>>::new()));
+    let complete_seen = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let grants = Arc::new(Mutex::new(0usize));
+    let attempts_state = attempts.clone();
+    let uploaded_state = uploaded.clone();
+    let complete_state = complete_seen.clone();
+    let grants_state = grants.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let app = Router::new()
+        .route(
+            "/api/v1/agent/artifacts/{job_id}/{name}/upload-url",
+            post(move |body: axum::body::Bytes| {
+                let grants = grants_state.clone();
+                async move {
+                    let request: serde_json::Value =
+                        serde_json::from_slice(&body).expect("grant json");
+                    assert_eq!(request["size"], 18);
+                    let mut count = grants.lock().expect("锁");
+                    *count += 1;
+                    let generation = *count;
+                    axum::Json(serde_json::json!({
+                        "mode": "multipart",
+                        "upload_id": "upload-1",
+                        "part_size": 4,
+                        "expires_in": 0,
+                        "parts": (1..=5).map(|part| serde_json::json!({
+                            "part_number": part,
+                            "url": format!("http://{addr}/s3/tmp/{generation}/{part}")
+                        })).collect::<Vec<_>>()
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/s3/tmp/{generation}/{part}",
+            axum::routing::put(
+                move |AxumPath((generation, part)): AxumPath<(usize, u32)>,
+                      body: axum::body::Bytes| {
+                    let attempts = attempts_state.clone();
+                    let uploaded = uploaded_state.clone();
+                    async move {
+                        if part == 5 && generation == 1 {
+                            return StatusCode::FORBIDDEN.into_response();
+                        }
+                        let attempt = {
+                            let mut attempts = attempts.lock().expect("锁");
+                            let attempt = attempts.entry(part).or_default();
+                            *attempt += 1;
+                            *attempt
+                        };
+                        if part == 2 && attempt == 1 {
+                            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                        }
+                        uploaded.lock().expect("锁").insert(part, body.to_vec());
+                        (StatusCode::OK, [("etag", format!("\"etag-{part}\""))]).into_response()
+                    }
+                },
+            ),
+        )
+        .route(
+            "/api/v1/agent/artifacts/{job_id}/{name}/complete",
+            post(move |body: axum::body::Bytes| {
+                let complete = complete_state.clone();
+                async move {
+                    complete
+                        .lock()
+                        .expect("锁")
+                        .push(serde_json::from_slice(&body).expect("complete json"));
+                    (
+                        StatusCode::CREATED,
+                        axum::Json(serde_json::json!({
+                            "name": "dist.bin", "size": 18, "sha256": "x"
+                        })),
+                    )
+                        .into_response()
+                }
+            }),
+        );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let dir = tempfile::tempdir().expect("临时目录");
+    let src = dir.path().join("dist.bin");
+    tokio::fs::write(&src, b"abcdefghijklmnopqr")
+        .await
+        .expect("写");
+    io(&format!("http://{addr}"))
+        .upload("42", "dist.bin", &src)
+        .await
+        .expect("multipart 上传应成功");
+
+    assert_eq!(attempts.lock().expect("锁").get(&2), Some(&2));
+    assert_eq!(*grants.lock().expect("锁"), 2, "后续分片应使用刷新后的 URL");
+    let uploaded = uploaded.lock().expect("锁");
+    assert_eq!(uploaded.get(&1).map(Vec::as_slice), Some(&b"abcd"[..]));
+    assert_eq!(uploaded.get(&2).map(Vec::as_slice), Some(&b"efgh"[..]));
+    assert_eq!(uploaded.get(&3).map(Vec::as_slice), Some(&b"ijkl"[..]));
+    assert_eq!(uploaded.get(&4).map(Vec::as_slice), Some(&b"mnop"[..]));
+    assert_eq!(uploaded.get(&5).map(Vec::as_slice), Some(&b"qr"[..]));
+    let complete = complete_seen.lock().expect("锁");
+    assert_eq!(complete.len(), 1);
+    assert_eq!(complete[0]["upload_id"], "upload-1");
+    assert_eq!(complete[0]["parts"][0]["part_number"], 1);
+    assert_eq!(complete[0]["parts"][2]["etag"], "\"etag-3\"");
+    assert_eq!(complete[0]["parts"][4]["part_number"], 5);
 }
 
 /// 契约常量与端点 URL 拼接（纯函数，同票 #57 的 url 单测纪律）。

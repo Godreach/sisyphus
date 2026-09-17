@@ -349,6 +349,7 @@ mod tests {
             "DROP TABLE project_scm_credentials",
             "DROP TABLE global_smtp_config",
             "DROP TABLE s3_backend_identity",
+            "DROP TABLE artifact_multipart_uploads",
         ] {
             sqlx::raw_sql(stmt)
                 .execute(&pool)

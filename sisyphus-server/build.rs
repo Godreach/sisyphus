@@ -7,8 +7,7 @@
 use std::{env, fs, path::PathBuf};
 
 fn main() {
-    let dist = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-        .join("../sisyphus-web/dist");
+    let dist = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../sisyphus-web/dist");
 
     if !dist.is_dir() {
         fs::create_dir_all(&dist).expect("创建 sisyphus-web/dist 失败");

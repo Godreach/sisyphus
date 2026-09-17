@@ -168,7 +168,7 @@ async fn main() {
     )
     .await
     {
-        Ok(state) => state,
+        Ok(state) => state.with_artifact_transfer_limits(config.artifact_transfer_limits),
         Err(e) => {
             tracing::error!(error = %e, "组合根装配失败（日志读池）");
             std::process::exit(2);
@@ -193,6 +193,7 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    state.start_multipart_cleanup();
     // 静态资源本地覆盖目录（B2a-T5）：数据目录 web/ 子目录，不存在即纯内嵌。
     let web_override_dir = config.data_dir.join(sisyphus_server::config::WEB_DIR);
 

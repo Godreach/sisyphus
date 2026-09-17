@@ -209,6 +209,31 @@ pub struct ArtifactMetaEntry {
     pub created_at: i64,
 }
 
+/// 尚未完成的 S3 multipart 上传会话。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultipartUploadRow {
+    /// 构建 id。
+    pub build_id: i64,
+    /// 产物名。
+    pub name: String,
+    /// 上传任务行 id。
+    pub job_id: i64,
+    /// 任务 attempt。
+    pub attempt: i32,
+    /// S3 临时对象 key。
+    pub object_key: String,
+    /// S3 upload id。
+    pub upload_id: String,
+    /// 预声明字节数。
+    pub size: u64,
+    /// 分片字节数。
+    pub part_size: u64,
+    /// S3 完成 multipart 后已形成临时对象，尚未发布 ready。
+    pub completed: bool,
+    /// URL/会话过期时刻（Unix 毫秒）。
+    pub expires_at: i64,
+}
+
 /// 数据库行的具名形态；统一查询 `created_at`，避免多套长元组依赖列序。
 #[derive(sqlx::FromRow)]
 struct ArtifactRow {
@@ -295,6 +320,181 @@ impl SqliteArtifactMetaRepo {
         .fetch_optional(&self.pool)
         .await?;
         row.map(ArtifactRow::into_meta).transpose()
+    }
+
+    /// 查询本次任务 attempt 已签发/发布的其它产物大小之和。
+    pub async fn other_upload_bytes(
+        &self,
+        job_id: i64,
+        attempt: i32,
+        name: &str,
+    ) -> Result<u64, StoreError> {
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(size), 0) FROM artifacts
+             WHERE job_id = ? AND attempt = ? AND name != ?",
+        )
+        .bind(job_id)
+        .bind(attempt)
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(total.max(0) as u64)
+    }
+
+    /// 记录或替换 multipart 会话（同 build/name 的重试复用一个槽位）。
+    pub async fn record_multipart(&self, row: &MultipartUploadRow) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO artifact_multipart_uploads
+                (build_id, name, job_id, attempt, object_key, upload_id, size,
+                 part_size, completed, expires_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (build_id, name) DO UPDATE SET
+               job_id = excluded.job_id, attempt = excluded.attempt,
+               object_key = excluded.object_key, upload_id = excluded.upload_id,
+               size = excluded.size, part_size = excluded.part_size,
+               completed = excluded.completed,
+               expires_at = excluded.expires_at, created_at = excluded.created_at",
+        )
+        .bind(row.build_id)
+        .bind(&row.name)
+        .bind(row.job_id)
+        .bind(row.attempt)
+        .bind(&row.object_key)
+        .bind(&row.upload_id)
+        .bind(row.size as i64)
+        .bind(row.part_size as i64)
+        .bind(row.completed)
+        .bind(row.expires_at)
+        .bind(crate::store::now_ms())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 查询一个产物当前的 multipart 会话。
+    pub async fn find_multipart(
+        &self,
+        build_id: i64,
+        name: &str,
+    ) -> Result<Option<MultipartUploadRow>, StoreError> {
+        let row = sqlx::query_as::<_, MultipartUploadDbRow>(
+            "SELECT build_id, name, job_id, attempt, object_key, upload_id, size,
+                    part_size, completed, expires_at
+             FROM artifact_multipart_uploads WHERE build_id = ? AND name = ?",
+        )
+        .bind(build_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Into::into))
+    }
+
+    /// 列出已过期会话，供后台与请求路径 abort。
+    pub async fn list_expired_multipart(
+        &self,
+        now: i64,
+    ) -> Result<Vec<MultipartUploadRow>, StoreError> {
+        let rows = sqlx::query_as::<_, MultipartUploadDbRow>(
+            "SELECT build_id, name, job_id, attempt, object_key, upload_id, size,
+                    part_size, completed, expires_at
+             FROM artifact_multipart_uploads WHERE expires_at <= ? ORDER BY expires_at",
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    /// 删除已完成/已 abort 的 multipart 会话。
+    pub async fn delete_multipart(&self, build_id: i64, name: &str) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM artifact_multipart_uploads WHERE build_id = ? AND name = ?")
+            .bind(build_id)
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 只清理仍匹配这个过期 upload id 的会话与 pending 行；事务保证二者
+    /// 同步移除，避免后台扫描误删并发重新签发的新会话。
+    pub async fn cleanup_expired_multipart(
+        &self,
+        row: &MultipartUploadRow,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let removed = sqlx::query(
+            "DELETE FROM artifact_multipart_uploads
+             WHERE build_id = ? AND name = ? AND upload_id = ? AND expires_at <= ?",
+        )
+        .bind(row.build_id)
+        .bind(&row.name)
+        .bind(&row.upload_id)
+        .bind(crate::store::now_ms())
+        .execute(&mut *tx)
+        .await?;
+        if removed.rows_affected() == 1 {
+            sqlx::query(
+                "DELETE FROM artifacts
+                 WHERE build_id = ? AND name = ? AND job_id = ? AND attempt = ?
+                   AND state = 'pending'",
+            )
+            .bind(row.build_id)
+            .bind(&row.name)
+            .bind(row.job_id)
+            .bind(row.attempt)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 标记临时 multipart 对象已完成，允许 complete 请求重试复制与校验。
+    pub async fn mark_multipart_completed(
+        &self,
+        build_id: i64,
+        name: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE artifact_multipart_uploads SET completed = 1
+             WHERE build_id = ? AND name = ?",
+        )
+        .bind(build_id)
+        .bind(name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct MultipartUploadDbRow {
+    build_id: i64,
+    name: String,
+    job_id: i64,
+    attempt: i32,
+    object_key: String,
+    upload_id: String,
+    size: i64,
+    part_size: i64,
+    completed: bool,
+    expires_at: i64,
+}
+
+impl From<MultipartUploadDbRow> for MultipartUploadRow {
+    fn from(row: MultipartUploadDbRow) -> Self {
+        Self {
+            build_id: row.build_id,
+            name: row.name,
+            job_id: row.job_id,
+            attempt: row.attempt,
+            object_key: row.object_key,
+            upload_id: row.upload_id,
+            size: row.size.max(0) as u64,
+            part_size: row.part_size.max(0) as u64,
+            completed: row.completed,
+            expires_at: row.expires_at,
+        }
     }
 }
 

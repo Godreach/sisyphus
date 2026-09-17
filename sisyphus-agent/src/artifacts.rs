@@ -18,6 +18,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
+
 /// Agent 面上传端点路径前缀（挂 `/api/v1/` 下；与 Server 侧
 /// `api::artifacts::agent_upload` 契约）。
 pub const UPLOAD_ENDPOINT: &str = "/api/v1/agent/artifacts";
@@ -62,6 +65,15 @@ impl std::error::Error for ArtifactError {}
 /// 断言面，不发真请求）。与 upgrader 的 `Downloader` 缝同款。
 #[async_trait::async_trait]
 pub trait ArtifactIo: Send + Sync {
+    /// 整任务传输前提交完整文件大小清单；S3 模式下预检部署级限额。
+    async fn preflight(
+        &self,
+        _job_id: &str,
+        _files: &[(String, u64)],
+    ) -> Result<(), ArtifactError> {
+        Ok(())
+    }
+
     /// 上传：`job_id` 为本任务行 id、`name` 为产物名、`path` 为工作区内
     /// 源文件（已存在）。
     async fn upload(&self, job_id: &str, name: &str, path: &Path) -> Result<(), ArtifactError>;
@@ -84,7 +96,70 @@ pub struct RealArtifactIo {
     token: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct UploadGrant {
+    #[serde(default)]
+    mode: Option<UploadMode>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    upload_id: Option<String>,
+    #[serde(default)]
+    part_size: Option<u64>,
+    #[serde(default)]
+    parts: Vec<UploadPartGrant>,
+    #[serde(default)]
+    expires_in: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UploadPartGrant {
+    part_number: u32,
+    url: String,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum UploadMode {
+    Single,
+    Multipart,
+}
+
+#[derive(Debug, Serialize)]
+struct CompletedPart {
+    part_number: u32,
+    etag: String,
+}
+
 impl RealArtifactIo {
+    async fn request_upload_grant(
+        &self,
+        job_id: &str,
+        name: &str,
+        size: u64,
+    ) -> Result<Option<UploadGrant>, ArtifactError> {
+        let response = self
+            .request(
+                reqwest::Method::POST,
+                &format!("{UPLOAD_ENDPOINT}/{job_id}/{name}/upload-url"),
+            )?
+            .json(&serde_json::json!({ "size": size }))
+            .send()
+            .await
+            .map_err(|e| ArtifactError::Network(e.to_string()))?;
+        if response.status().as_u16() == 409 {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(Self::rejection(response).await);
+        }
+        response
+            .json()
+            .await
+            .map(Some)
+            .map_err(|e| ArtifactError::Network(e.to_string()))
+    }
+
     /// 以 REST 基址与 token 构造。`api_url` 缺失时调用恒
     /// [`ArtifactError::Unconfigured`]（引导态明确报错，不静默）。
     pub fn new(api_url: Option<String>, token: Option<String>) -> Self {
@@ -169,10 +244,156 @@ impl RealArtifactIo {
         }
         Ok(())
     }
+
+    async fn upload_part_with_retry(
+        &self,
+        path: &Path,
+        part_size: u64,
+        total_size: u64,
+        part: UploadPartGrant,
+    ) -> Result<CompletedPart, ArtifactError> {
+        let offset = u64::from(part.part_number.saturating_sub(1)) * part_size;
+        let len = total_size.saturating_sub(offset).min(part_size);
+        let mut last_error = String::new();
+        for _attempt in 1..=3 {
+            let body = file_body_range(path, offset, len).await?;
+            match self
+                .client
+                .put(&part.url)
+                .header(reqwest::header::CONTENT_LENGTH, len)
+                .body(body)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let etag = resp
+                        .headers()
+                        .get(reqwest::header::ETAG)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .ok_or_else(|| {
+                            ArtifactError::Network(format!(
+                                "multipart 分片 {} 响应缺少 ETag",
+                                part.part_number
+                            ))
+                        })?;
+                    return Ok(CompletedPart {
+                        part_number: part.part_number,
+                        etag,
+                    });
+                }
+                Ok(resp) => {
+                    last_error = format!("HTTP {}", resp.status());
+                }
+                Err(e) => {
+                    last_error = e.to_string();
+                }
+            }
+        }
+        Err(ArtifactError::Network(format!(
+            "multipart 分片 {} 重试耗尽：{last_error}",
+            part.part_number
+        )))
+    }
+
+    async fn upload_multipart(
+        &self,
+        job_id: &str,
+        name: &str,
+        path: &Path,
+        size: u64,
+        grant: &mut UploadGrant,
+    ) -> Result<Vec<CompletedPart>, ArtifactError> {
+        let part_size = grant
+            .part_size
+            .filter(|v| *v > 0)
+            .ok_or_else(|| ArtifactError::Network("multipart grant 缺少 part_size".into()))?;
+        if grant.parts.is_empty() {
+            return Err(ArtifactError::Network(
+                "multipart grant 缺少分片 URL".into(),
+            ));
+        }
+        let part_numbers = grant
+            .parts
+            .iter()
+            .map(|part| part.part_number)
+            .collect::<Vec<_>>();
+        let mut completed = Vec::with_capacity(part_numbers.len());
+        let mut refresh_at = std::time::Instant::now()
+            + std::time::Duration::from_secs(grant.expires_in.saturating_sub(30).max(0) as u64);
+        for (index, batch) in part_numbers.chunks(4).enumerate() {
+            if index > 0 && std::time::Instant::now() >= refresh_at {
+                let fresh = self
+                    .request_upload_grant(job_id, name, size)
+                    .await?
+                    .ok_or_else(|| ArtifactError::Network("multipart 会话已结束".into()))?;
+                if fresh.mode != Some(UploadMode::Multipart)
+                    || fresh.upload_id != grant.upload_id
+                    || fresh.part_size != Some(part_size)
+                    || fresh.parts.len() != part_numbers.len()
+                {
+                    return Err(ArtifactError::Network(
+                        "multipart 会话已改变，请重新上传".into(),
+                    ));
+                }
+                *grant = fresh;
+                refresh_at = std::time::Instant::now()
+                    + std::time::Duration::from_secs(
+                        grant.expires_in.saturating_sub(30).max(0) as u64
+                    );
+            }
+            let parts = batch
+                .iter()
+                .map(|number| {
+                    grant
+                        .parts
+                        .iter()
+                        .find(|part| part.part_number == *number)
+                        .cloned()
+                        .ok_or_else(|| {
+                            ArtifactError::Network(format!("multipart grant 缺少分片 {number}"))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let results = futures::stream::iter(parts.into_iter().map(|part| async move {
+                self.upload_part_with_retry(path, part_size, size, part)
+                    .await
+            }))
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await;
+            for result in results {
+                completed.push(result?);
+            }
+        }
+        completed.sort_by_key(|part| part.part_number);
+        Ok(completed)
+    }
 }
 
 #[async_trait::async_trait]
 impl ArtifactIo for RealArtifactIo {
+    async fn preflight(&self, job_id: &str, files: &[(String, u64)]) -> Result<(), ArtifactError> {
+        let files = files
+            .iter()
+            .map(|(name, size)| serde_json::json!({ "name": name, "size": size }))
+            .collect::<Vec<_>>();
+        let resp = self
+            .request(
+                reqwest::Method::POST,
+                &format!("{UPLOAD_ENDPOINT}/{job_id}/preflight"),
+            )?
+            .json(&serde_json::json!({ "files": files }))
+            .send()
+            .await
+            .map_err(|e| ArtifactError::Network(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(Self::rejection(resp).await);
+        }
+        Ok(())
+    }
+
     async fn upload(&self, job_id: &str, name: &str, path: &Path) -> Result<(), ArtifactError> {
         // 引导态校验先行（未配置 api_url/token 时不必碰文件）。
         self.config()?;
@@ -182,50 +403,52 @@ impl ArtifactIo for RealArtifactIo {
             .len();
         let sha256 = sha256_file(path).await?;
 
-        let grant = self
-            .request(
-                reqwest::Method::POST,
-                &format!("{UPLOAD_ENDPOINT}/{job_id}/{name}/upload-url"),
-            )?
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body("{}")
-            .send()
-            .await
-            .map_err(|e| ArtifactError::Network(e.to_string()))?;
-        if grant.status().as_u16() == 409 {
+        let Some(mut grant) = self.request_upload_grant(job_id, name, size).await? else {
             return self.upload_via_server(job_id, name, path).await;
-        }
-        if !grant.status().is_success() {
-            return Err(Self::rejection(grant).await);
-        }
-        let grant_json: serde_json::Value = grant
-            .json()
-            .await
-            .map_err(|e| ArtifactError::Network(e.to_string()))?;
-        let url = grant_json
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ArtifactError::Network("签发响应缺少 url".into()))?;
-        let put = self
-            .client
-            .put(url)
-            .body(file_body(path).await?)
-            .send()
-            .await
-            .map_err(|e| ArtifactError::Network(e.to_string()))?;
-        if !put.status().is_success() {
-            return Err(ArtifactError::Network(format!(
-                "直传 PUT 失败：HTTP {}",
-                put.status()
-            )));
-        }
+        };
+        let multipart = grant.mode == Some(UploadMode::Multipart);
+        let completed_parts = if multipart {
+            self.upload_multipart(job_id, name, path, size, &mut grant)
+                .await?
+        } else {
+            let url = grant
+                .url
+                .as_deref()
+                .ok_or_else(|| ArtifactError::Network("签发响应缺少 url".into()))?;
+            let put = self
+                .client
+                .put(url)
+                .header(reqwest::header::CONTENT_LENGTH, size)
+                .body(file_body(path).await?)
+                .send()
+                .await
+                .map_err(|e| ArtifactError::Network(e.to_string()))?;
+            if !put.status().is_success() {
+                return Err(ArtifactError::Network(format!(
+                    "直传 PUT 失败：HTTP {}",
+                    put.status()
+                )));
+            }
+            Vec::new()
+        };
+        let complete_body = if multipart {
+            serde_json::json!({
+                "size": size,
+                "sha256": sha256,
+                "upload_id": grant.upload_id,
+                "parts": completed_parts,
+            })
+            .to_string()
+        } else {
+            serde_json::json!({ "size": size, "sha256": sha256 }).to_string()
+        };
         let complete = self
             .request(
                 reqwest::Method::POST,
                 &format!("{UPLOAD_ENDPOINT}/{job_id}/{name}/complete"),
             )?
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(format!(r#"{{"size":{size},"sha256":"{sha256}"}}"#))
+            .body(complete_body)
             .send()
             .await
             .map_err(|e| ArtifactError::Network(e.to_string()))?;
@@ -344,6 +567,41 @@ async fn file_body(path: &Path) -> Result<reqwest::Body, ArtifactError> {
                     Some((Ok(bytes::Bytes::from(buf)), file))
                 }
                 Err(e) => Some((Err(e), file)),
+            }
+        },
+    )))
+}
+
+async fn file_body_range(
+    path: &Path,
+    offset: u64,
+    len: u64,
+) -> Result<reqwest::Body, ArtifactError> {
+    use tokio::io::AsyncSeekExt;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| ArtifactError::Io(format!("打开 {} 失败：{e}", path.display())))?;
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(io_err)?;
+    Ok(reqwest::Body::wrap_stream(futures::stream::unfold(
+        (file, len),
+        |(mut file, remaining)| async move {
+            use tokio::io::AsyncReadExt;
+            if remaining == 0 {
+                return None;
+            }
+            let mut buf = vec![0u8; remaining.min(64 * 1024) as usize];
+            match file.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    Some((
+                        Ok(bytes::Bytes::from(buf)),
+                        (file, remaining.saturating_sub(n as u64)),
+                    ))
+                }
+                Err(e) => Some((Err(e), (file, 0))),
             }
         },
     )))

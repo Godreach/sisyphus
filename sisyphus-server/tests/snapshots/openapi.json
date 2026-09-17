@@ -93,6 +93,72 @@
         }
       }
     },
+    "/api/v1/agent/artifacts/{job_id}/preflight": {
+      "post": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "在开始传输任务的第一件产物前，校验完整清单的单文件与合计限额。",
+        "operationId": "agent_preflight",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "上传任务自身行 id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArtifactPreflightRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "整任务清单已通过限额校验"
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "任务行不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "未声明产物或传输限额超出",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agent/artifacts/{job_id}/{name}": {
       "post": {
         "tags": [
@@ -311,6 +377,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArtifactUploadGrantRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "短期 PUT URL",
@@ -5009,6 +5085,13 @@
           "sha256"
         ],
         "properties": {
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtifactCompletedPart"
+            },
+            "description": "Agent 上传成功的有序分片 ETag。"
+          },
           "sha256": {
             "type": "string",
             "description": "SHA-256 校验和（十六进制小写）。"
@@ -5017,6 +5100,33 @@
             "type": "integer",
             "format": "int64",
             "description": "字节数。",
+            "minimum": 0
+          },
+          "upload_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "multipart grant 返回的 upload id。"
+          }
+        }
+      },
+      "ArtifactCompletedPart": {
+        "type": "object",
+        "description": "Agent 已上传分片的完成凭据。",
+        "required": [
+          "part_number",
+          "etag"
+        ],
+        "properties": {
+          "etag": {
+            "type": "string",
+            "description": "S3 UploadPart 响应的 ETag。"
+          },
+          "part_number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "从 1 开始的分片号。",
             "minimum": 0
           }
         }
@@ -5078,6 +5188,42 @@
           }
         }
       },
+      "ArtifactPreflightFile": {
+        "type": "object",
+        "description": "一条待传输的单文件产物。",
+        "required": [
+          "name",
+          "size"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "任务上传声明中的名称。"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "文件大小（字节）。",
+            "minimum": 0
+          }
+        }
+      },
+      "ArtifactPreflightRequest": {
+        "type": "object",
+        "description": "任务产物在传输前提交的完整文件大小清单。",
+        "required": [
+          "files"
+        ],
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtifactPreflightFile"
+            },
+            "description": "本次任务将上传的全部单文件声明。"
+          }
+        }
+      },
       "ArtifactRepositoryStatus": {
         "type": "object",
         "description": "一级制品库入口状态。",
@@ -5118,11 +5264,55 @@
           "unavailable"
         ]
       },
+      "ArtifactUploadGrantRequest": {
+        "type": "object",
+        "description": "Agent 申请上传许可时报告的文件信息。",
+        "required": [
+          "size"
+        ],
+        "properties": {
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Agent 在传输前报告的文件大小（空文件为 0）。",
+            "minimum": 0
+          }
+        }
+      },
+      "ArtifactUploadMode": {
+        "type": "string",
+        "description": "Agent 应采用的直传模式。",
+        "enum": [
+          "single",
+          "multipart"
+        ]
+      },
+      "ArtifactUploadPart": {
+        "type": "object",
+        "description": "一个 multipart 分片的写许可。",
+        "required": [
+          "part_number",
+          "url"
+        ],
+        "properties": {
+          "part_number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "从 1 开始的分片号。",
+            "minimum": 0
+          },
+          "url": {
+            "type": "string",
+            "description": "该分片专用的短期预签名 PUT URL。"
+          }
+        }
+      },
       "ArtifactUploadUrlResponse": {
         "type": "object",
         "description": "Agent 预签名上传 URL（仅临时对象，票 #123）。",
         "required": [
-          "url",
+          "mode",
+          "parts",
           "expires_in"
         ],
         "properties": {
@@ -5131,9 +5321,39 @@
             "format": "int64",
             "description": "有效秒数。"
           },
+          "mode": {
+            "$ref": "#/components/schemas/ArtifactUploadMode",
+            "description": "`single` 或 `multipart`。"
+          },
+          "part_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "multipart 分片大小；单 PUT 时为空。",
+            "minimum": 0
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtifactUploadPart"
+            },
+            "description": "multipart 分片写 URL；单 PUT时为空数组。"
+          },
+          "upload_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "multipart upload id；单 PUT 时为空。"
+          },
           "url": {
-            "type": "string",
-            "description": "短期 PUT URL（查询串签名，不含长期 secret）。"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "单 PUT URL；multipart 时为空。"
           }
         }
       },
