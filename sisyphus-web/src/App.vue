@@ -19,7 +19,7 @@
 import { computed, defineComponent, h, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { NButton, NDropdown, NIcon, zhCN, enUS, dateZhCN, dateEnUS } from 'naive-ui'
+import { NAlert, NButton, NDropdown, NIcon, zhCN, enUS, dateZhCN, dateEnUS } from 'naive-ui'
 import type { DropdownOption } from 'naive-ui'
 import {
   LogOutOutline,
@@ -42,6 +42,7 @@ import { currentLocale, setLocale } from '@/i18n'
 import { useAuthStore } from '@/stores/auth'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { useBreakpoint } from '@/composables/useBreakpoint'
+import { useManageableProjects } from '@/composables/useManageableProjects'
 import { applyUserMenuKey, buildUserMenuOptions } from '@/utils/userMenu'
 
 const { t } = useI18n()
@@ -71,6 +72,8 @@ const isBareRoute = computed(() => route.name === 'login' || route.name === 'set
 const showShell = computed(() => isAuthed.value && !isBareRoute.value)
 const isAdmin = computed(() => auth.user?.isAdmin === true)
 const username = computed(() => auth.user?.username ?? '')
+const creationPermission = useManageableProjects(() => showShell.value && route.name === 'pipelines' ? 'global' : '')
+const canCreatePipeline = computed(() => creationPermission.status.value === 'ready' && (isAdmin.value || creationPermission.projects.value.length > 0))
 /** 用户名首字符 → 头像（原型形态：渐变圆底 + 首字）。 */
 const avatarChar = computed(() => (username.value ? username.value.charAt(0).toUpperCase() : '?'))
 
@@ -330,14 +333,14 @@ watch(
 /** 主按钮：流水线页 → 原地打开新建流水线选择器；构建机页 → 接入构建机
  *  （Agent 管理面全局 admin 专属，非 admin 不渲染）。 */
 const ctaLabel = computed(() => {
-  if (route.name === 'pipelines') return t('plines.newPipeline')
+  if (route.name === 'pipelines' && canCreatePipeline.value) return t('plines.newPipeline')
   if (route.name === 'projects' && isAdmin.value) return t('projects.newProject')
   if (route.name === 'machines' && isAdmin.value) return t('agents.accessMachine')
   return ''
 })
 
 function onCta(): void {
-  if (route.name === 'pipelines') {
+  if (route.name === 'pipelines' && canCreatePipeline.value) {
     void router.push({ query: { ...route.query, create: '1' } })
     return
   }
@@ -524,6 +527,16 @@ function onCta(): void {
             </n-drawer>
 
             <main class="app-main">
+              <template v-if="route.name === 'pipelines'">
+                <n-alert v-if="creationPermission.status.value === 'error'" type="error" role="alert" data-testid="pipeline-create-permission-error" :title="creationPermission.error.value">
+                  <n-button data-testid="pipeline-create-permission-retry" @click="creationPermission.reload">
+                    {{ t('plines.retry') }}
+                  </n-button>
+                </n-alert>
+                <n-alert v-else-if="creationPermission.status.value === 'ready' && !canCreatePipeline" type="info" data-testid="pipeline-create-unavailable" :title="t('plines.createProjectsEmpty')">
+                  {{ t('plines.createProjectsEmptyHint') }}
+                </n-alert>
+              </template>
               <RouterView />
             </main>
           </div>

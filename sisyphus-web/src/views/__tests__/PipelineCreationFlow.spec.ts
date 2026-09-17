@@ -36,10 +36,10 @@ describe('新建流水线真实页面闭环（#120）', () => {
   })
   afterAll(() => server.close())
 
-  async function mountAt(source: string): Promise<void> {
+  async function mountAt(source: string, isAdmin = true): Promise<void> {
     const pinia = createPinia()
     setActivePinia(pinia)
-    useAuthStore().setAuthed({ username: 'admin', isAdmin: true })
+    useAuthStore().setAuthed({ username: isAdmin ? 'admin' : 'alice', isAdmin })
     router = createRouter({
       history: createMemoryHistory(),
       routes: [
@@ -73,6 +73,7 @@ describe('新建流水线真实页面闭环（#120）', () => {
     const input = document.querySelector('input[name="new-pipeline-name"]') as HTMLInputElement
     input.value = name
     input.dispatchEvent(new Event('input', { bubbles: true }))
+    await wrapper.vm.$nextTick()
     ;(document.querySelector('[data-testid="new-pipeline-create"]') as HTMLElement).click()
     await vi.waitFor(() => expect(wrapper.find('[data-testid="editor-new-badge"]').exists()).toBe(true))
     expect(router.currentRoute.value.query.create).toBe('1')
@@ -125,6 +126,169 @@ describe('新建流水线真实页面闭环（#120）', () => {
     await vi.waitFor(() => expect(document.querySelector('[data-testid="unsaved-discard"]')).toBeTruthy())
     ;(document.querySelector('[data-testid="unsaved-discard"]') as HTMLElement).click()
     await vi.waitFor(() => expect(router.currentRoute.value.fullPath).toBe('/pipelines?group=flat'))
+  })
+
+  it('同名预检留在对话框，只有主动打开才进入已有流水线且不写入', async () => {
+    await mountAt('/pipelines?group=flat&q=main')
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="topbar-cta"]').exists()).toBe(true))
+    await wrapper.get('[data-testid="topbar-cta"]').trigger('click')
+    await vi.waitFor(() => expect(document.querySelector('input[name="new-pipeline-name"]')).toBeTruthy())
+    const select = wrapper.findAllComponents(NSelect).find(c => c.attributes('data-testid') === 'new-pipeline-project')!
+    await select.vm.$emit('update:value', 'web-app')
+    const input = document.querySelector('input[name="new-pipeline-name"]') as HTMLInputElement
+    input.value = 'main'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await wrapper.vm.$nextTick()
+    ;(document.querySelector('[data-testid="new-pipeline-create"]') as HTMLElement).click()
+    await vi.waitFor(() => expect(document.querySelector('[data-testid="new-pipeline-name-error"]')?.textContent).toContain('同名'))
+    expect(router.currentRoute.value.name).toBe('pipelines')
+    const open = document.querySelector('[data-testid="new-pipeline-open-existing"]') as HTMLButtonElement
+    expect(open).toBeTruthy()
+    open.click()
+    await vi.waitFor(() => expect(wrapper.find('[name="editor-save"]').exists()).toBe(true))
+    expect(router.currentRoute.value.params.pipeline).toBe('main')
+    expect(router.currentRoute.value.query.create).toBeUndefined()
+    expect(wrapper.find('[data-testid="editor-new-badge"]').exists()).toBe(false)
+    expect(writes).toHaveLength(0)
+    router.back()
+    await vi.waitFor(() => expect(router.currentRoute.value.fullPath).toBe('/pipelines?group=flat&q=main'))
+  })
+
+  it('创建主操作要求明确选择项目和非空名称，Enter 仍显示就地校验', async () => {
+    await mountAt('/pipelines?create=1')
+    await vi.waitFor(() => expect(document.querySelector('input[name="new-pipeline-name"]')).toBeTruthy())
+    const create = document.querySelector('[data-testid="new-pipeline-create"]') as HTMLButtonElement
+    const input = document.querySelector('input[name="new-pipeline-name"]') as HTMLInputElement
+    expect(create.disabled).toBe(true)
+    input.value = ' 中文流水线 '
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await wrapper.vm.$nextTick()
+    expect(create.disabled).toBe(true)
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }))
+    await vi.waitFor(() => expect(document.querySelector('[data-testid="new-pipeline-project-error"]')).toBeTruthy())
+    const select = wrapper.findAllComponents(NSelect).find(c => c.attributes('data-testid') === 'new-pipeline-project')!
+    await select.vm.$emit('update:value', 'web-app')
+    await vi.waitFor(() => expect(create.disabled).toBe(false))
+    input.value = '   '
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await wrapper.vm.$nextTick()
+    expect(create.disabled).toBe(true)
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }))
+    await vi.waitFor(() => expect(document.querySelector('[data-testid="new-pipeline-name-error"]')?.textContent).toContain('请输入流水线名'))
+    expect(writes).toHaveLength(0)
+  })
+
+  it('预检期间浏览器后退关闭对话框，迟到响应不能跳进编辑器', async () => {
+    let finishCheck!: () => void
+    let checkStarted = false
+    let checkFinished = false
+    server.use(http.get('/api/v1/projects/web-app/pipelines/flow-cancel-check', async () => {
+      checkStarted = true
+      await new Promise<void>(resolve => { finishCheck = resolve })
+      return HttpResponse.json({ code: 'NOT_FOUND' }, { status: 404 })
+    }))
+    server.events.on('request:end', ({ request }) => {
+      if (request.url.endsWith('/pipelines/flow-cancel-check')) checkFinished = true
+    })
+    await mountAt('/pipelines?group=flat')
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="topbar-cta"]').exists()).toBe(true))
+    await wrapper.get('[data-testid="topbar-cta"]').trigger('click')
+    await vi.waitFor(() => expect(document.querySelector('input[name="new-pipeline-name"]')).toBeTruthy())
+    const select = wrapper.findAllComponents(NSelect).find(c => c.attributes('data-testid') === 'new-pipeline-project')!
+    await select.vm.$emit('update:value', 'web-app')
+    const input = document.querySelector('input[name="new-pipeline-name"]') as HTMLInputElement
+    input.value = 'flow-cancel-check'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await wrapper.vm.$nextTick()
+    ;(document.querySelector('[data-testid="new-pipeline-create"]') as HTMLElement).click()
+    await vi.waitFor(() => expect(checkStarted).toBe(true))
+    router.back()
+    await vi.waitFor(() => expect(router.currentRoute.value.fullPath).toBe('/pipelines?group=flat'))
+    finishCheck()
+    await vi.waitFor(() => expect(checkFinished).toBe(true))
+    // Wait through the full HTTP/router turn, not merely handler completion.
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(router.currentRoute.value.fullPath).toBe('/pipelines?group=flat')
+    expect(writes).toHaveLength(0)
+  })
+
+  it.each(['explicit', 'browser'])('草稿 %s 返回恢复状态筛选和列表视图，不重开对话框', async action => {
+    await mountAt('/pipelines?group=flat')
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="chip-success"]').exists()).toBe(true))
+    await wrapper.get('[data-testid="chip-success"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.query.status).toBe('success'))
+    await wrapper.get('[data-testid="view-list-btn"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.query.view).toBe('list'))
+    const source = router.currentRoute.value.fullPath
+    await enterDraft('[data-testid="topbar-cta"]', `flow-return-${action}`)
+    if (action === 'explicit') await wrapper.get('[data-testid="editor-back"]').trigger('click')
+    else router.back()
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="chip-success"]').exists()).toBe(true))
+    expect(wrapper.get('[data-testid="chip-success"]').classes()).toContain('active')
+    expect(wrapper.get('[data-testid="view-list-btn"]').classes()).toContain('active')
+    expect(router.currentRoute.value.fullPath).toBe(source)
+    expect(router.currentRoute.value.query.create).toBeUndefined()
+  })
+
+  it.each(['conflict', 'load-error'])('新建链接 %s 状态仍有显式来源返回入口', async state => {
+    if (state === 'load-error') {
+      server.use(http.get('/api/v1/projects/web-app/pipelines/main', () => HttpResponse.json({ code: 'INTERNAL', message: '暂不可用' }, { status: 500 })))
+    }
+    await mountAt('/projects/web-app/pipelines/main?create=1&from=/pipelines?group=flat')
+    await vi.waitFor(() => expect(wrapper.find('[role="alert"]').exists()).toBe(true))
+    expect(wrapper.find('[data-testid="editor-back"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="editor-back"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.fullPath).toBe('/pipelines?group=flat'))
+    expect(writes).toHaveLength(0)
+  })
+
+  it('普通用户无可管理项目时隐藏全局入口并明确提示联系管理员', async () => {
+    server.use(http.get('/api/v1/projects', () => HttpResponse.json([])))
+    await mountAt('/pipelines', false)
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="pipeline-create-unavailable"]').exists()).toBe(true))
+    expect(wrapper.find('[data-testid="topbar-cta"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="pipeline-create-unavailable"]').text()).toContain('请联系项目管理员')
+  })
+
+  it('项目内入口使用管理清单，成员接口失败不剥夺创建权限', async () => {
+    server.use(http.get('/api/v1/projects/web-app/members', () => HttpResponse.json({ code: 'INTERNAL' }, { status: 500 })))
+    await mountAt('/projects/web-app', false)
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="project-title"]').exists()).toBe(true))
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="new-pipeline-btn"]').exists()).toBe(true))
+    await enterDraft('[data-testid="new-pipeline-btn"]', 'flow-independent-permission')
+    expect(router.currentRoute.value.params.name).toBe('web-app')
+  })
+
+  it.each(['/pipelines', '/projects/web-app'])('%s 创建权限加载失败不误报无权限，原地重试恢复入口', async source => {
+    let recover = false
+    const queries: string[] = []
+    server.use(http.get('/api/v1/projects', ({ request }) => {
+      queries.push(new URL(request.url).searchParams.get('permission') ?? '')
+      return recover
+        ? HttpResponse.json([{ id: 1, name: 'web-app', scm_type: 'git', scm_url: '', default_branch: 'main', created_at: 1, updated_at: 1, pipeline_count: 5 }])
+        : HttpResponse.json({ code: 'INTERNAL', message: '暂不可用' }, { status: 500 })
+    }))
+    await mountAt(source, false)
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="pipeline-create-permission-error"]').exists()).toBe(true))
+    expect(wrapper.find('[data-testid="pipeline-create-unavailable"]').exists()).toBe(false)
+    const selector = source === '/pipelines' ? '[data-testid="topbar-cta"]' : '[data-testid="new-pipeline-btn"]'
+    expect(wrapper.find(selector).exists()).toBe(false)
+    recover = true
+    await wrapper.get('[data-testid="pipeline-create-permission-retry"]').trigger('click')
+    await vi.waitFor(() => expect(wrapper.find(selector).exists()).toBe(true))
+    expect(queries).toEqual(['admin', 'admin'])
+  })
+
+  it('项目未出现在管理清单时，两个项目内入口都不可见', async () => {
+    server.use(
+      http.get('/api/v1/projects', () => HttpResponse.json([])),
+      http.get('/api/v1/pipelines', () => HttpResponse.json({ items: [], total: 0 })),
+      http.get('/api/v1/projects/web-app/members', () => HttpResponse.json({ code: 'FORBIDDEN' }, { status: 403 })),
+    )
+    await mountAt('/projects/web-app', false)
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="pipelines-empty"]').exists()).toBe(true))
+    expect(wrapper.find('[data-testid="new-pipeline-btn"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="pipeline-empty-create-btn"]').exists()).toBe(false)
   })
 
   it('412 后可原地改名，保留编排内容并用条件请求创建新名称', async () => {

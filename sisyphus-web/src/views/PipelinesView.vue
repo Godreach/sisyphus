@@ -86,11 +86,20 @@ const loadError = ref('')
 const actingKey = ref('')
 
 type ChipKey = 'all' | 'active' | 'success' | 'failed' | 'ended' | 'never'
-const activeChip = ref<ChipKey>('all')
+const activeChip = computed<ChipKey>({
+  get: () => {
+    const status = route.query.status
+    return status === 'active' || status === 'success' || status === 'failed' || status === 'ended' || status === 'never' ? status : 'all'
+  },
+  set: status => { void router.replace({ query: { ...route.query, status: status === 'all' ? undefined : status } }) },
+})
 type SortKey = 'recent' | 'name'
-const sortKey = ref<SortKey>('recent')
-/** P6 裁定：默认卡片视图；切换偏好仅会话内保持（不落 localStorage）。 */
-const viewMode = ref<'list' | 'cards'>('cards')
+const sortKey = computed<SortKey>(() => route.query.sort === 'name' ? 'name' : 'recent')
+/** 来源 URL 携带列表状态，创建返回不丢筛选/视图；不落 localStorage。 */
+const viewMode = computed<'list' | 'cards'>({
+  get: () => route.query.view === 'list' ? 'list' : 'cards',
+  set: view => { void router.replace({ query: { ...route.query, view: view === 'cards' ? undefined : view } }) },
+})
 type OrganizationMode = 'grouped' | 'flat'
 
 function queryProjectValues(value: string | (string | null)[] | null | undefined): string[] {
@@ -288,8 +297,7 @@ function sortRows(list: PipelineRow[]): PipelineRow[] {
 }
 
 function changeSort(key: SortKey): void {
-  sortKey.value = key
-  rows.value = sortRows(rows.value)
+  void router.replace({ query: { ...route.query, sort: key === 'recent' ? undefined : key } })
 }
 
 function updateProjectFilter(projects: string[] | null): void {
@@ -373,14 +381,14 @@ const chipDefs = computed<{ key: ChipKey; label: string }[]>(() => [
 const visibleRows = computed(() => {
   const q = searchQuery.value.toLowerCase()
   const projects = new Set(selectedProjects.value)
-  return rows.value.filter((row) => {
+  return sortRows(rows.value.filter((row) => {
     if (!chipHit(row, activeChip.value)) return false
     if (projects.size > 0 && !projects.has(row.project)) return false
     if (q === '') return true
     return (
       row.pipeline.toLowerCase().includes(q) || row.project.toLowerCase().includes(q)
     )
-  })
+  }))
 })
 
 interface PipelineGroup {

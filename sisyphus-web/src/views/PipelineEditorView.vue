@@ -449,6 +449,9 @@ const showConflict = computed({
 
   <!-- 整页报错可重试（事实态纪律）。 -->
   <div v-else-if="status === 'error'" class="editor-page">
+    <n-button data-testid="editor-back" @click="requestReturnToSource">
+      {{ t('editor.back') }}
+    </n-button>
     <n-alert type="error" :title="loadError || t('editor.loadError')" role="alert">
       <button type="button" class="btn-outline blue" data-testid="editor-retry" @click="load">
         {{ t('plines.retry') }}
@@ -457,6 +460,9 @@ const showConflict = computed({
   </div>
 
   <div v-else-if="existingDuringCreate" class="editor-page" data-testid="create-name-conflict">
+    <n-button data-testid="editor-back" @click="requestReturnToSource">
+      {{ t('editor.back') }}
+    </n-button>
     <nav class="breadcrumb" aria-label="Breadcrumb">
       <router-link :to="{ name: 'projects' }">{{ t('routes.projects') }}</router-link>
       <span class="breadcrumb-sep">/</span>

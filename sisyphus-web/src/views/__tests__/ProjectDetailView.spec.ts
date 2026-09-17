@@ -73,6 +73,7 @@ function mockStats(pipeline: string, latestStatus: string | null): void {
 /** members/directory 403 退化覆盖（非项目 admin 视角）。 */
 function mockMembersForbidden(): void {
   server.use(
+    http.get('/api/v1/projects', () => HttpResponse.json([])),
     http.get(`${BASE}/members`, () =>
       HttpResponse.json({ code: 'FORBIDDEN', message: '项目权限不足' }, { status: 403 }),
     ),

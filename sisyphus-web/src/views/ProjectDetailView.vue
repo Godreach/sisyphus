@@ -61,6 +61,7 @@ import type {
   ProjectResponse,
 } from '@/api/types'
 import PipelineCreateDialog from '@/components/PipelineCreateDialog.vue'
+import { useManageableProjects } from '@/composables/useManageableProjects'
 import { returnSourceQuery } from '@/utils/returnSource'
 
 const { t } = useI18n()
@@ -69,6 +70,8 @@ const router = useRouter()
 const message = useMessage()
 
 const projectName = computed(() => String(route.params.name ?? ''))
+const creationPermission = useManageableProjects(() => projectName.value)
+const canCreatePipeline = computed(() => creationPermission.status.value === 'ready' && creationPermission.projects.value.some(p => p.name === projectName.value))
 
 /** 组件卸载后异步续跑不得再发请求/写状态——卸载后的 route 被 vue-router
  *  复位（测试环境实测回 '/'），projectName 不再可采信。 */
@@ -95,7 +98,9 @@ async function loadProject(): Promise<void> {
   loadError.value = ''
   notFound.value = false
   try {
-    project.value = await projectsApi.get(projectName.value)
+    const result = await projectsApi.get(projectName.value)
+    if (disposed) return
+    project.value = result
     void loadPipelines()
     void loadMembers()
   } catch (err) {
@@ -539,7 +544,7 @@ function openNewPipeline(): void {
           {{ t('projects.editProject') }}
         </button>
         <button
-          v-if="isProjectAdmin"
+          v-if="canCreatePipeline"
           type="button"
           class="btn-outline blue"
           data-testid="new-pipeline-btn"
@@ -549,6 +554,12 @@ function openNewPipeline(): void {
         </button>
       </div>
     </header>
+
+    <n-alert v-if="creationPermission.status.value === 'error'" type="error" role="alert" data-testid="pipeline-create-permission-error" :title="creationPermission.error.value">
+      <n-button data-testid="pipeline-create-permission-retry" @click="creationPermission.reload">
+        {{ t('plines.retry') }}
+      </n-button>
+    </n-alert>
 
     <!-- 项目信息卡（viewer 档元数据）。 -->
     <section class="sisy-card project-info-card" aria-label="project info">
@@ -596,7 +607,7 @@ function openNewPipeline(): void {
           <template #extra>
             <p class="form-hint">{{ t('projects.pipelinesEmptyHint') }}</p>
             <n-button
-              v-if="isProjectAdmin"
+              v-if="canCreatePipeline"
               type="primary"
               size="small"
               class="ppl-empty-btn"

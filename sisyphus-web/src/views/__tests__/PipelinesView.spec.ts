@@ -352,16 +352,19 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
 
     // 筛选生效：点「进行中」只剩 running 行。
     await w.find('[data-testid="chip-active"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.query.status).toBe('active'))
     expect(w.findAll('.p-card')).toHaveLength(1)
     expect(w.findAll('.p-card')[0]!.text()).toContain('main')
 
     // 点「超时/取消」只剩 cancelled 行。
     await w.find('[data-testid="chip-ended"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.query.status).toBe('ended'))
     expect(w.findAll('.p-card')).toHaveLength(1)
     expect(w.findAll('.p-card')[0]!.text()).toContain('cron')
 
     // 点「未运行」只剩 latest 空行。
     await w.find('[data-testid="chip-never"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.query.status).toBe('never'))
     expect(w.findAll('.p-card')).toHaveLength(1)
     expect(w.findAll('.p-card')[0]!.text()).toContain('fresh')
   })
@@ -394,6 +397,7 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
 
     // 列表视图：进度列运行中显示进度条，其余行显示「—」。
     await w.find('[data-testid="view-list-btn"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.query.view).toBe('list'))
     const rows = w.findAll('.pipe-row')
     expect(rows).toHaveLength(2)
     const mainRow = rows.find((r) => r.text().includes('main'))
@@ -487,6 +491,7 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     await vi.waitFor(() => expect(w.findAll('.p-card')).toHaveLength(3))
 
     await w.find('[data-testid="view-list-btn"]').trigger('click')
+    await vi.waitFor(() => expect(router.currentRoute.value.query.view).toBe('list'))
     expect(w.find('.pipe-table').exists()).toBe(true)
     const rows = w.findAll('.pipe-row')
     expect(rows.find((r) => r.text().includes('ci'))!.find('.btn-outline.blue').text()).toBe('运行')
@@ -663,6 +668,7 @@ describe('PipelinesView 流水线页（#105 定稿）', () => {
     ) as HTMLInputElement
     input.value = '  release  '
     input.dispatchEvent(new Event('input'))
+    await w.vm.$nextTick()
 
     const create = document.querySelector(
       '.n-modal [data-testid="new-pipeline-create"]',

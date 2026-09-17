@@ -40,6 +40,14 @@ const projectError = ref('')
 const nameError = ref('')
 const submitError = ref('')
 const submitting = ref(false)
+const existingPipeline = ref<{ project: string; name: string } | null>(null)
+// Opening/closing starts a new session: a previous request must never change
+// a reopened form or navigate after the user has gone back.
+let dialogSession = 0
+
+function isCurrentSession(session: number): boolean {
+  return props.show && session === dialogSession
+}
 
 const projectOptions = computed(() =>
   manageableProjects.value.map((project) => ({ label: project.name, value: project.name })),
@@ -67,15 +75,20 @@ function resetForm(): void {
   nameError.value = ''
   submitError.value = ''
   submitting.value = false
+  existingPipeline.value = null
 }
 
 async function loadManageableProjects(): Promise<void> {
+  const session = dialogSession
   status.value = 'loading'
   submitError.value = ''
   try {
-    manageableProjects.value = await projectsApi.list({ permission: 'admin' })
+    const projects = await projectsApi.list({ permission: 'admin' })
+    if (!isCurrentSession(session)) return
+    manageableProjects.value = projects
     status.value = 'ready'
   } catch (err) {
+    if (!isCurrentSession(session)) return
     manageableProjects.value = []
     submitError.value = describeSubmitError(err)
     status.value = 'error'
@@ -117,25 +130,31 @@ function validateName(name: string): string {
 }
 
 async function createAndEdit(): Promise<void> {
-  if (submitting.value) return
+  if (!props.show || status.value !== 'ready' || submitting.value) return
   const project = selectedProject.value
   const name = pipelineName.value.trim()
   projectError.value = project == null ? t('plines.createProjectRequired') : ''
   nameError.value = validateName(name)
   submitError.value = ''
+  existingPipeline.value = null
   if (projectError.value || nameError.value || project == null) return
 
   submitting.value = true
+  const session = dialogSession
   try {
     try {
       await pipelinesApi.getDefinition(project, name)
+      if (!isCurrentSession(session)) return
       nameError.value = t('plines.createNameExists')
+      existingPipeline.value = { project, name }
       return
     } catch (err) {
+      if (!isCurrentSession(session)) return
       if (!(err instanceof ApiError) || err.status !== 404) throw err
     }
 
     const refreshed = await projectsApi.list({ permission: 'admin' })
+    if (!isCurrentSession(session)) return
     manageableProjects.value = refreshed
     if (!refreshed.some((candidate) => candidate.name === project)) {
       projectError.value = t('plines.createProjectUnavailable')
@@ -148,15 +167,29 @@ async function createAndEdit(): Promise<void> {
       query: { create: '1', ...returnSourceQuery(route, router, ['create']) },
     })
   } catch (err) {
+    if (!isCurrentSession(session)) return
     submitError.value = describeSubmitError(err)
   } finally {
-    submitting.value = false
+    if (session === dialogSession) submitting.value = false
   }
 }
+
+async function openExistingPipeline(): Promise<void> {
+  if (submitting.value || existingPipeline.value == null) return
+  const { project, name } = existingPipeline.value
+  await router.replace({
+    name: 'pipeline-edit',
+    params: { name: project, pipeline: name },
+    query: returnSourceQuery(route, router, ['create']),
+  })
+}
+
+watch([selectedProject, pipelineName], () => { existingPipeline.value = null })
 
 watch(
   () => props.show,
   async (show, previous) => {
+    ++dialogSession
     if (show) {
       resetForm()
       await loadManageableProjects()
@@ -171,7 +204,10 @@ watch(
 )
 
 onMounted(() => document.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
+onBeforeUnmount(() => {
+  ++dialogSession
+  document.removeEventListener('keydown', onKeydown)
+})
 </script>
 
 <template>
@@ -247,6 +283,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
             :filter="filterProjectOption"
             filterable
             clearable
+            :disabled="submitting"
             data-testid="new-pipeline-project"
             :placeholder="t('plines.createProjectPlaceholder')"
             @update:value="(value: string | null) => { selectedProject = value; projectError = '' }"
@@ -267,6 +304,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
         >
           <n-input
             v-model:value="pipelineName"
+            :disabled="submitting"
             :input-props="{ name: 'new-pipeline-name', autocomplete: 'off' }"
             :placeholder="t('projects.newPipelinePlaceholder')"
             @update:value="nameError = ''"
@@ -289,6 +327,14 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
           role="alert"
           data-testid="new-pipeline-submit-error"
         />
+        <n-button
+          v-if="existingPipeline"
+          :disabled="submitting"
+          data-testid="new-pipeline-open-existing"
+          @click="openExistingPipeline"
+        >
+          {{ t('editor.openExisting') }}
+        </n-button>
       </template>
 
       <div class="create-pipeline-actions">
@@ -303,7 +349,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
           v-if="status === 'ready' && manageableProjects.length > 0"
           type="primary"
           :loading="submitting"
-          :disabled="submitting"
+          :disabled="submitting || selectedProject == null || pipelineName.trim() === ''"
           data-testid="new-pipeline-create"
           @click="createAndEdit"
         >

@@ -5821,7 +5821,8 @@
           "scm_type",
           "scm_url",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "pipeline_count"
         ],
         "properties": {
           "created_at": {
@@ -5844,6 +5845,11 @@
           "name": {
             "type": "string",
             "description": "项目名（唯一）。"
+          },
+          "pipeline_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "项目下的流水线定义数量。"
           },
           "scm_type": {
             "$ref": "#/components/schemas/ScmTypeDto",

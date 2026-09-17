@@ -318,12 +318,20 @@ async fn visibility_filtering_and_no_existence_leak() {
 async fn project_list_can_filter_to_admin_projects_without_changing_default_visibility() {
     let (app, admin, alice, _bob, _carol, _dave) = fixture_with_roles("viewer-project").await;
     create_project(&app, &admin, "admin-project").await;
+    create_project(&app, &admin, "runner-project").await;
     create_project(&app, &admin, "unrelated-project").await;
     assign_members(
         &app,
         &admin,
         "admin-project",
         r#"[{ "username": "alice", "role": "admin" }]"#,
+    )
+    .await;
+    assign_members(
+        &app,
+        &admin,
+        "runner-project",
+        r#"[{ "username": "alice", "role": "runner" }]"#,
     )
     .await;
 
@@ -338,7 +346,7 @@ async fn project_list_can_filter_to_admin_projects_without_changing_default_visi
         .collect();
     assert_eq!(
         visible,
-        ["admin-project", "viewer-project"],
+        ["admin-project", "runner-project", "viewer-project"],
         "无参数仍返回全部可见项目"
     );
 
@@ -378,7 +386,12 @@ async fn project_list_can_filter_to_admin_projects_without_changing_default_visi
         .collect();
     assert_eq!(
         global_admin_projects,
-        ["admin-project", "unrelated-project", "viewer-project"]
+        [
+            "admin-project",
+            "runner-project",
+            "unrelated-project",
+            "viewer-project"
+        ]
     );
 }
 

@@ -42,6 +42,23 @@ describe('项目域 mock 契约（票 #108）', () => {
     expect((await json('/projects/web-app', 'GET', undefined, 'bob')).status).toBe(200)
   })
 
+  it('同一用户混合 viewer/runner/admin 的管理清单仅含 admin，缺省仍含全部可见项目', async () => {
+    // bob's existing viewer and runner roles stay visible, but cannot create.
+    const visible = await (await json('/projects', 'GET', undefined, 'bob')).json() as { name: string }[]
+    expect(visible.map(p => p.name)).toEqual(['api-gateway', 'cli-tool', 'web-app'])
+    expect(await (await json('/projects?permission=admin', 'GET', undefined, 'bob')).json()).toEqual([])
+    const assigned = await json('/projects/mobile-app/members', 'PUT', [{ username: 'bob', role: 'admin' }])
+    expect(assigned.status).toBe(200)
+    const manageable = await (await json('/projects?permission=admin', 'GET', undefined, 'bob')).json() as { name: string }[]
+    expect(manageable.map(p => p.name)).toEqual(['mobile-app'])
+    const global = await (await json('/projects?permission=admin', 'GET')).json() as { name: string }[]
+    expect(global.some(p => p.name === 'mobile-app')).toBe(true)
+    expect(global.some(p => p.name === 'web-app')).toBe(true)
+    // Restore the fixture through its public API so later permission tests
+    // still exercise bob without any project-admin membership.
+    expect((await json('/projects/mobile-app/members', 'PUT', [])).status).toBe(200)
+  })
+
   it('项目 admin 档守卫：无角色 404 同形 / 有角色非 admin 403', async () => {
     // bob 在 mobile-app 无角色 → 404（不可借 403/404 之辨探测存在性）。
     expect((await json('/projects/mobile-app/members', 'GET', undefined, 'bob')).status).toBe(404)

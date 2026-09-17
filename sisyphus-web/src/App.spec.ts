@@ -89,10 +89,11 @@ describe('App 壳（四项导航 + 登出闭环）', () => {
   })
 
   it('流水线页顶栏新建按钮在当前页打开创建选择器并保留查询参数', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify([{ name: 'demo' }]), { status: 200 }))
     const auth = useAuthStore()
     auth.setAuthed({ username: 'alice', isAdmin: false })
     await router.push('/pipelines?q=deploy&group=flat')
-    await wrapper.vm.$nextTick()
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="topbar-cta"]').exists()).toBe(true))
 
     await wrapper.get('[data-testid="topbar-cta"]').trigger('click')
 
