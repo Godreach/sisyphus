@@ -10,7 +10,7 @@ use sisyphus_model::pipeline::Pipeline;
 
 mod common;
 
-use common::{TestApp, body_json, get, req_with_cookie};
+use common::{TestApp, body_json, cookie_of, get, post, req_with_cookie};
 
 /// 业务端点用例的已认证装配：app + 会话 cookie。
 async fn authed_app() -> (TestApp, String) {
@@ -374,4 +374,117 @@ async fn definition_endpoint_error_surface() {
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_json_content_type(&resp);
     assert_eq!(body_json(resp).await["code"], "VALIDATION_FAILED");
+}
+
+/// 跨项目流水线总览：服务端返回可见范围内的稳定排序清单与总数；空项目
+/// 不制造虚假条目，未认证请求仍由保护路由统一返回 401。
+#[tokio::test]
+async fn pipeline_list_returns_sorted_items_and_explicit_empty_shape() {
+    let (app, cookie) = authed_app().await;
+
+    for project in ["zeta", "alpha", "empty"] {
+        let resp = authed_post(
+            &app,
+            &cookie,
+            "/api/v1/projects",
+            &format!(
+                r#"{{ "name": "{project}", "scm_type": "git", "scm_url": "https://example.com/{project}" }}"#
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED, "创建项目 {project}");
+    }
+
+    for (project, pipeline) in [("zeta", "release"), ("alpha", "main"), ("alpha", "build")] {
+        let resp = authed_put(
+            &app,
+            &cookie,
+            &format!("/api/v1/projects/{project}/pipelines/{pipeline}"),
+            &valid_definition(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "保存 {project}/{pipeline}");
+    }
+
+    let resp = authed_get(&app, &cookie, "/api/v1/pipelines").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 3);
+    let items = body["items"].as_array().expect("items 数组");
+    let keys: Vec<String> = items
+        .iter()
+        .map(|item| {
+            format!(
+                "{}/{}",
+                item["project"].as_str().expect("project"),
+                item["pipeline"].as_str().expect("pipeline")
+            )
+        })
+        .collect();
+    assert_eq!(keys, ["alpha/build", "alpha/main", "zeta/release"]);
+    assert!(
+        items
+            .iter()
+            .all(|item| item["updated_at"].as_i64().unwrap_or_default() > 0)
+    );
+
+    // 普通 viewer 只得到有显式成员角色的项目；同一用户对不可见项目的
+    // pipeline 不得借总览端点探测出来。
+    let resp = authed_post(
+        &app,
+        &cookie,
+        "/api/v1/users",
+        r#"{ "username": "viewer", "password": "viewer-password", "is_admin": false }"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resp = authed_put(
+        &app,
+        &cookie,
+        "/api/v1/projects/alpha/members",
+        r#"[{ "username": "viewer", "role": "viewer" }]"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let login = post(
+        &app,
+        "/api/v1/auth/login",
+        r#"{ "username": "viewer", "password": "viewer-password" }"#,
+    )
+    .await;
+    assert_eq!(login.status(), StatusCode::OK);
+    let viewer_cookie = cookie_of(&login).expect("viewer 登录 cookie");
+    let resp = authed_get(&app, &viewer_cookie, "/api/v1/pipelines").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["total"], 2);
+    assert_eq!(
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["project"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["alpha", "alpha"]
+    );
+
+    // 空项目不返回占位 pipeline；有认证但没有任何可见定义时仍是稳定空对象。
+    let (empty_app, empty_cookie) = authed_app().await;
+    let resp = authed_post(
+        &empty_app,
+        &empty_cookie,
+        "/api/v1/projects",
+        r#"{ "name": "empty-project", "scm_type": "none", "scm_url": "" }"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resp = authed_get(&empty_app, &empty_cookie, "/api/v1/pipelines").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(resp).await,
+        serde_json::json!({ "items": [], "total": 0 })
+    );
+
+    let unauthenticated = get(&empty_app, "/api/v1/pipelines").await;
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
 }

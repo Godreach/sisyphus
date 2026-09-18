@@ -557,7 +557,7 @@ export function createHandlers(options: MockHandlerOptions) {
       const denied = guard(options, request)
       if (denied != null) return denied
       await delay(150)
-      return HttpResponse.json(db.pipelineListItems())
+      return HttpResponse.json(db.pipelineListItemsFor(sessionUser(request) ?? 'admin'))
     }),
 
     // ----- 流水线统计（契约票 #102：fixture + 动态合并聚合，口径同构建列表）-----

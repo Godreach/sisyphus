@@ -15,8 +15,10 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use super::AppState;
+use super::auth::AuthContext;
 use super::error::{ApiError, ErrorBody, parse_body};
 use super::policy::{RequireAdmin, RequireViewer};
+use crate::store::pipelines::PipelineListItem;
 use sisyphus_model::pipeline::Pipeline;
 
 /// PUT 请求体：Pipeline 定义（sisyphus-model JSON 形态）。
@@ -49,6 +51,64 @@ pub struct SaveDefinitionResponse {
     pub operator: String,
     /// 保存时间（Unix 毫秒）。
     pub updated_at: i64,
+}
+
+/// 跨项目流水线清单项（viewer 可见范围内）。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PipelineListItemResponse {
+    /// 所属项目名。
+    pub project: String,
+    /// 流水线名。
+    pub pipeline: String,
+    /// 定义最近修改时间（Unix 毫秒）。
+    pub updated_at: i64,
+}
+
+impl From<PipelineListItem> for PipelineListItemResponse {
+    fn from(item: PipelineListItem) -> Self {
+        Self {
+            project: item.project,
+            pipeline: item.pipeline,
+            updated_at: item.updated_at,
+        }
+    }
+}
+
+/// 跨项目流水线清单响应。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PipelineListResponse {
+    /// 按项目名、流水线名字典序排列的清单。
+    pub items: Vec<PipelineListItemResponse>,
+    /// 清单总数（等于 `items.length`）。
+    pub total: i64,
+}
+
+/// 列出当前调用者可见的全部流水线（全局管理员为全部活动项目，普通用户
+/// 为具备项目角色的项目；无可见项目返回空清单）。
+#[utoipa::path(
+    get,
+    path = "/api/v1/pipelines",
+    tag = "pipelines",
+    responses(
+        (status = 200, description = "调用者可见的跨项目流水线（按项目名、流水线名排序）", body = PipelineListResponse),
+        (status = 401, description = "未认证", body = ErrorBody),
+    )
+)]
+pub async fn list(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthContext>,
+) -> Result<Json<PipelineListResponse>, ApiError> {
+    let items = state
+        .pipelines
+        .list_visible(auth.is_admin, auth.user_id)
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<PipelineListItemResponse>>();
+    Ok(Json(PipelineListResponse {
+        total: items.len() as i64,
+        items,
+    }))
 }
 
 /// 读 pipeline 定义（viewer 档：无角色与项目不存在同形 404，票 B2b-T5）。

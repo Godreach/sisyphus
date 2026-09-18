@@ -32,6 +32,17 @@ pub struct StoredPipeline {
     pub updated_at: i64,
 }
 
+/// 跨项目流水线清单项（只包含总览所需的稳定元数据）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineListItem {
+    /// 所属项目名。
+    pub project: String,
+    /// 流水线名。
+    pub pipeline: String,
+    /// 定义最近修改时间（Unix 毫秒）。
+    pub updated_at: i64,
+}
+
 /// Pipeline 定义 repo：保存（校验 + 事务内条件更新）与读取。
 #[derive(Debug, Clone)]
 pub struct PipelineRepo {
@@ -42,6 +53,49 @@ impl PipelineRepo {
     /// 以连接池构造。
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// 列出调用者可见的跨项目流水线。
+    ///
+    /// 全局管理员隐含所有活动项目的 admin 权限；普通用户只看到具备任意
+    /// 显式项目角色的活动项目。项目名、流水线名均参与排序，保证分页前的
+    /// 全量响应在数据库调用之间保持稳定。
+    pub async fn list_visible(
+        &self,
+        is_admin: bool,
+        user_id: i64,
+    ) -> Result<Vec<PipelineListItem>, StoreError> {
+        let rows = if is_admin {
+            sqlx::query_as::<_, (String, String, i64)>(
+                "SELECT j.name, p.name, p.updated_at
+                 FROM pipelines p
+                 JOIN projects j ON j.id = p.project_id
+                 WHERE j.lifecycle = 'active'
+                 ORDER BY j.name, p.name",
+            )
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, (String, String, i64)>(
+                "SELECT j.name, p.name, p.updated_at
+                 FROM pipelines p
+                 JOIN projects j ON j.id = p.project_id
+                 JOIN project_members m ON m.project_id = j.id
+                 WHERE j.lifecycle = 'active' AND m.user_id = ?
+                 ORDER BY j.name, p.name",
+            )
+            .bind(user_id)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows
+            .into_iter()
+            .map(|(project, pipeline, updated_at)| PipelineListItem {
+                project,
+                pipeline,
+                updated_at,
+            })
+            .collect())
     }
 
     /// 保存定义：model 校验通过后按 Revision 语义递增落库，返回新修订版本。

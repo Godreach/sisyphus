@@ -380,6 +380,7 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route("/users/{name}", patch(users::patch))
         .route("/users/{name}/password", put(users::reset_password))
         .route("/projects", get(projects::list).post(projects::create))
+        .route("/pipelines", get(pipelines::list))
         // SCM 探测（创建期，ad-hoc 凭据不落库，全局 admin）：测试连接 + 分支枚举预填
         // （B5-T3，ADR-0016）。静态段置于 `/projects/{name}` 之前，免被动态段捕获。
         .route("/projects/scm-probe", post(scm::scm_probe))

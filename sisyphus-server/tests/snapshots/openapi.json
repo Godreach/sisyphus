@@ -2643,6 +2643,37 @@
         }
       }
     },
+    "/api/v1/pipelines": {
+      "get": {
+        "tags": [
+          "pipelines"
+        ],
+        "summary": "列出当前调用者可见的全部流水线（全局管理员为全部活动项目，普通用户\n为具备项目角色的项目；无可见项目返回空清单）。",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "调用者可见的跨项目流水线（按项目名、流水线名排序）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/project-deletions": {
       "get": {
         "tags": [
@@ -8513,6 +8544,52 @@
             "type": "integer",
             "format": "int64",
             "description": "最后保存时间（Unix 毫秒）。"
+          }
+        }
+      },
+      "PipelineListItemResponse": {
+        "type": "object",
+        "description": "跨项目流水线清单项（viewer 可见范围内）。",
+        "required": [
+          "project",
+          "pipeline",
+          "updated_at"
+        ],
+        "properties": {
+          "pipeline": {
+            "type": "string",
+            "description": "流水线名。"
+          },
+          "project": {
+            "type": "string",
+            "description": "所属项目名。"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "定义最近修改时间（Unix 毫秒）。"
+          }
+        }
+      },
+      "PipelineListResponse": {
+        "type": "object",
+        "description": "跨项目流水线清单响应。",
+        "required": [
+          "items",
+          "total"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PipelineListItemResponse"
+            },
+            "description": "按项目名、流水线名字典序排列的清单。"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "清单总数（等于 `items.length`）。"
           }
         }
       },

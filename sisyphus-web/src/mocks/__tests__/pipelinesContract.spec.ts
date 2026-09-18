@@ -66,6 +66,33 @@ describe('Pipeline 定义端点 mock 契约（票 #109）', () => {
     server.close()
   })
 
+  it('GET 跨项目清单：按 viewer 可见项目过滤、稳定排序并返回总数', async () => {
+    const admin = await json('/pipelines', 'GET')
+    expect(admin.status).toBe(200)
+    const adminBody = (await admin.json()) as {
+      items: { project: string; pipeline: string; updated_at: number }[]
+      total: number
+    }
+    expect(adminBody.total).toBe(adminBody.items.length)
+    expect(adminBody.items.map(item => `${item.project}/${item.pipeline}`)).toEqual(
+      [...adminBody.items]
+        .sort((a, b) => a.project.localeCompare(b.project) || a.pipeline.localeCompare(b.pipeline))
+        .map(item => `${item.project}/${item.pipeline}`),
+    )
+    expect(adminBody.items.every(item => item.updated_at > 0)).toBe(true)
+
+    // bob 只有 web-app/api-gateway/cli-tool 的显式项目角色；其它项目即使
+    // 存在流水线也不可见。无角色用户得到稳定空清单而非 404。
+    const bob = await json('/pipelines', 'GET', undefined, 'bob')
+    const bobBody = (await bob.json()) as { items: { project: string }[]; total: number }
+    expect(bobBody.total).toBe(bobBody.items.length)
+    expect(new Set(bobBody.items.map(item => item.project))).toEqual(
+      new Set(['web-app', 'api-gateway', 'cli-tool']),
+    )
+    const nobody = await json('/pipelines', 'GET', undefined, 'nobody')
+    expect(await nobody.json()).toEqual({ items: [], total: 0 })
+  })
+
   it('GET 定义：model JSON 形态（env 永发、steps tagged union、参数 required 永发）', async () => {
     const res = await json('/projects/web-app/pipelines/main', 'GET')
     expect(res.status).toBe(200)

@@ -531,14 +531,20 @@ export function savePipelineDefinition(
   return stored
 }
 
-/** 流水线清单（契约票 #105，P1）：跨项目全量，(project, pipeline) 字典序
- *  （sort 稳定，定义顺序即同名兜底序）；updated_at 按序确定性回溯（清单
- *  条目只需稳定，不承载真实编辑时刻）。 */
-export function pipelineListItems(): PipelineListResponse {
-  const items = [...PIPELINES]
+/** 流水线清单（契约票 #105，P1）：按调用者项目可见性过滤，(project,
+ * pipeline) 字典序（sort 稳定，定义顺序即同名兜底序）；updated_at 按序确定性
+ * 回溯（清单条目只需稳定，不承载真实编辑时刻）。 */
+export function pipelineListItemsFor(username: string): PipelineListResponse {
+  const items = PIPELINES
+    .filter((pipeline) => projectRoleOf(username, pipeline.project) != null)
     .sort((a, b) => a.project.localeCompare(b.project) || a.name.localeCompare(b.name))
     .map((p, i) => ({ project: p.project, pipeline: p.name, updated_at: NOW - (i + 1) * 3600e3 }))
   return { items, total: items.length }
+}
+
+/** 管理员默认清单（兼容 fixture 调用方）。 */
+export function pipelineListItems(): PipelineListResponse {
+  return pipelineListItemsFor('admin')
 }
 
 /** 项目卡片使用的流水线定义数量（与权威清单同一 fixture 来源）。 */
