@@ -27,7 +27,7 @@
 //! （喂给本模块的 `LogEvent.seq` 会被本模块重新编号——seq 分配归缓冲层），
 //! 通道经 `set_live`/`replay_all`/`clear_now` 驱动补传与孤儿清理。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -42,11 +42,14 @@ use sisyphus_proto::agent::{
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 
+use crate::logarchive::{self, SealedArchive};
+
 /// 缓冲删除宽限默认值（ADR-0013：终态上报成功后延迟固定宽限删除，默认
 /// 1 分钟——宽限内崩溃重启缓冲留作孤儿取证）。
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(60);
 /// 缓冲文件后缀（jsonl = 每行一个 JSON）。
 const LOGBUF_EXT: &str = ".jsonl";
+const ARCHIVE_PENDING_EXT: &str = ".archive-pending";
 /// 单 (job, attempt) 行缓冲容量（OS 写缓冲；fsync 节奏由调用方 batch 控制）。
 const LINE_BUF_CAPACITY: usize = 64 * 1024;
 
@@ -130,9 +133,44 @@ impl LogBuffer {
         self.dir.join(format!("{job_id}-{attempt}{LOGBUF_EXT}"))
     }
 
+    fn archive_pending_path(&self, job_id: &str, attempt: i32) -> PathBuf {
+        self.dir
+            .join(format!("{job_id}-{attempt}{ARCHIVE_PENDING_EXT}"))
+    }
+
+    /// 持久化“任务已进入终态归档”意图；后台 worker 只处理带此标记的缓冲。
+    pub(crate) fn mark_archive_pending(&self, job_id: &str, attempt: i32) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
+        let path = self.archive_pending_path(job_id, attempt);
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        file.sync_all()
+    }
+
     /// 缓冲目录。
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// 封存一个 attempt 的持久缓冲，保留源 JSONL 直到 Server 确认归档 ready。
+    pub(crate) fn seal_archive(
+        &self,
+        job_id: &str,
+        attempt: i32,
+    ) -> Result<SealedArchive, logarchive::ArchiveError> {
+        let archive_dir = self.dir.join("archives");
+        let stem = format!("{job_id}-{attempt}");
+        let source = self.path(job_id, attempt);
+        if !source.exists() {
+            std::fs::create_dir_all(&self.dir)?;
+            std::fs::File::create(&source)?;
+        }
+        logarchive::seal(
+            &source,
+            &archive_dir.join(format!("{stem}.slog")),
+            &archive_dir.join(format!("{stem}.json")),
+            job_id,
+            attempt,
+        )
     }
 
     /// 追加一条日志事件：分配 seq → 落盘（含 fsync）→ 若有活体连接即转发。
@@ -290,15 +328,68 @@ impl LogBuffer {
             .collect()
     }
 
+    /// 列出已持久化终态意图的归档任务；未结束的运行中缓冲不会被误封存。
+    pub(crate) fn pending_archives(&self) -> Vec<(String, i32)> {
+        let mut found = BTreeSet::new();
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = name.strip_suffix(ARCHIVE_PENDING_EXT) {
+                if let Some((job, attempt)) = stem
+                    .rsplit_once('-')
+                    .and_then(|(job, n)| Some((job.to_string(), n.parse::<i32>().ok()?)))
+                {
+                    found.insert((job, attempt));
+                }
+            }
+        }
+        let archive_dir = self.dir.join("archives");
+        if let Ok(entries) = std::fs::read_dir(archive_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if let Some(stem) = name.strip_suffix(".json") {
+                    if let Some((job, attempt)) = stem
+                        .rsplit_once('-')
+                        .and_then(|(job, n)| Some((job.to_string(), n.parse::<i32>().ok()?)))
+                    {
+                        found.insert((job, attempt));
+                    }
+                }
+            }
+        }
+        found.into_iter().collect()
+    }
+
     /// 延迟删除缓冲文件（终态上报成功后的宽限删除）。宽限为 0 = 立即经
     /// worker 删除。发送失败（worker 已退出）记警告——删除是维护动作，失败
     /// 只留孤儿文件，不阻塞数据路径。
     pub fn clear_deferred(&self, job_id: &str, attempt: i32) {
         self.release_handle(job_id, attempt);
-        let _ = self.delete_tx.try_send(DeleteJob {
-            path: self.path(job_id, attempt),
-            delay: self.grace,
-        });
+        // Server 已确认后本地封存副本不再需要；marker 与源 JSONL 留到宽限
+        // 结束再删，保证确认前/崩溃窗口仍可恢复。
+        remove_file_best_effort(
+            &self
+                .dir
+                .join("archives")
+                .join(format!("{job_id}-{attempt}.slog")),
+        );
+        remove_file_best_effort(
+            &self
+                .dir
+                .join("archives")
+                .join(format!("{job_id}-{attempt}.json")),
+        );
+        for path in [
+            self.path(job_id, attempt),
+            self.archive_pending_path(job_id, attempt),
+        ] {
+            let _ = self.delete_tx.try_send(DeleteJob {
+                path,
+                delay: self.grace,
+            });
+        }
     }
 
     /// 立即删除缓冲文件（孤儿补传完成后——执行丢弃、日志保留作取证后清空）。

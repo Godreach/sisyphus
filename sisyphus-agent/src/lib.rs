@@ -15,6 +15,7 @@ pub mod checkout;
 pub mod config;
 pub mod container;
 pub mod exec;
+mod logarchive;
 pub mod logbuf;
 pub mod redact;
 pub mod register;
@@ -90,6 +91,7 @@ pub struct Agent {
     /// 产物传输缝（票 #74）：runner 上传/依赖下载；默认 real（api_url /
     /// token 取配置），测试经 [`Self::with_artifact_io`] 注入 fake。
     artifact_io: Arc<dyn artifacts::ArtifactIo>,
+    log_archive_io: Arc<dyn logarchive::LogArchiveIo>,
 }
 
 impl Agent {
@@ -167,6 +169,9 @@ impl Agent {
             config.api_url.clone(),
             channel_cfg.token.clone(),
         ));
+        let log_archive_io: Arc<dyn logarchive::LogArchiveIo> = Arc::new(
+            logarchive::RealLogArchiveIo::new(config.api_url.clone(), channel_cfg.token.clone()),
+        );
         Self {
             config,
             channel_cfg,
@@ -187,6 +192,7 @@ impl Agent {
                 drain_gate.clone(),
                 receipts.clone(),
                 artifact_io.clone(),
+                log_archive_io.clone(),
             ),
             workspace: workspace::Handle::new(workspace_rx, handle_state, receipts.clone()),
             cache: cache::Handle::new(cache_rx, handle_cache, receipts.clone()),
@@ -198,6 +204,7 @@ impl Agent {
             exit_rx,
             receipts,
             artifact_io,
+            log_archive_io,
         }
     }
 
@@ -245,6 +252,7 @@ impl Agent {
         // 默认装配的 real io——Handle 持可替换位，与 logbuf/workspace 的
         // set_live 同款时机语义（spawn 前注入，之后不再变）。
         self.runner.set_artifact_io(self.artifact_io.clone());
+        self.runner.set_log_archive_io(self.log_archive_io.clone());
         let runner_task = tokio::spawn(self.runner.run());
         let workspace_task = tokio::spawn(self.workspace.run());
         let cache_task = tokio::spawn(self.cache.run());
@@ -272,6 +280,12 @@ impl Agent {
             .workspace_sampler
             .clone()
             .spawn(self.channel_cfg.workspace_sample_interval);
+        // 待归档日志后台重试：扫描持久缓冲，进程重启后也会恢复；确认前不删。
+        let archive_retry_task = logarchive::spawn_retry_worker(
+            self.logbuf.clone(),
+            self.in_flight.clone(),
+            self.log_archive_io.clone(),
+        );
 
         // 容器探测周期循环（ADR-0018：周期 `docker version` →
         // `sisyphus/container=docker` 标签随 metadata 上报）。经
@@ -328,6 +342,7 @@ impl Agent {
         cache_task.abort();
         upgrader_task.abort();
         sampler_task.abort();
+        archive_retry_task.abort();
         if let Some(t) = probe_task {
             t.abort();
         }

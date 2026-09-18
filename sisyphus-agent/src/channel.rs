@@ -624,9 +624,8 @@ pub async fn run_connection(
             .await
             .map_err(|_| ChannelError("上行邮箱关闭".into()))?;
     }
-    for (job_id, attempt) in logbuf.orphans(&job_ids) {
-        logbuf.clear_now(&job_id, attempt);
-    }
+    // 未确认归档的孤儿缓冲不得在重连时自动删除（ADR-0027）；后台归档成功后
+    // 才由 runner 的确认路径清理。这里仍重放旧 SQLite 兼容日志，但保留源文件。
     // 离线期间缓冲的终态补发（日志重放之后；同一 writer 保写序）。
     runner_uplink.flush_pending(&out_tx).await;
     // 升级最新阶段补发（断线期间的退回/失败原因在重连后可见）。

@@ -74,6 +74,10 @@ pub struct CleanupReport {
     pub artifact_meta_deleted: i64,
     /// 回收的空构建目录数（`artifacts/<build_id>/`）。
     pub empty_dirs_reclaimed: usize,
+    /// 删除的终态日志归档行数。
+    pub log_archives_deleted: i64,
+    /// 删除的归档正文/索引文件数。
+    pub log_archive_files_deleted: usize,
 }
 
 /// 每日扫描：找出「最新活动早于 cutoff」的过期构建，逐个 [`purge_build`]。
@@ -86,11 +90,15 @@ pub async fn sweep(
     retention_days: i64,
 ) -> Result<CleanupReport, StoreError> {
     let cutoff = now - retention_days.max(1) * 24 * 60 * 60 * 1000;
+    let mut report = purge_expired_archives(pool, cutoff).await?;
     let build_ids = sqlx::query_scalar::<_, i64>(
         "SELECT build_id FROM (
              SELECT build_id, created_at AS last FROM logs
              UNION ALL
              SELECT build_id, created_at AS last FROM artifacts WHERE backend = 'local'
+             UNION ALL
+             SELECT j.build_id, a.created_at AS last FROM log_archives a
+             JOIN jobs j ON j.id = a.job_id
          )
          GROUP BY build_id HAVING MAX(last) < ?",
     )
@@ -98,7 +106,6 @@ pub async fn sweep(
     .fetch_all(pool)
     .await?;
 
-    let mut report = CleanupReport::default();
     for build_id in build_ids {
         match purge_build(pool, artifacts_root, build_id).await {
             Ok(partial) => {
@@ -107,6 +114,8 @@ pub async fn sweep(
                 report.artifact_files_deleted += partial.artifact_files_deleted;
                 report.artifact_meta_deleted += partial.artifact_meta_deleted;
                 report.empty_dirs_reclaimed += partial.empty_dirs_reclaimed;
+                report.log_archives_deleted += partial.log_archives_deleted;
+                report.log_archive_files_deleted += partial.log_archive_files_deleted;
             }
             Err(e) => tracing::warn!(build_id, error = %e, "保留清理：构建数据裁剪失败"),
         }
@@ -123,6 +132,44 @@ pub async fn sweep(
                 e
             })
             .ok();
+    }
+    Ok(report)
+}
+
+/// 按 attempt 终态归档时间独立清理归档；查看、重试或同构建的新活动不会
+/// 延长旧 attempt 的日志保留期。`created_at` 在终态 pending 首次登记时写入。
+async fn purge_expired_archives(
+    pool: &SqlitePool,
+    cutoff: i64,
+) -> Result<CleanupReport, StoreError> {
+    let rows = sqlx::query_as::<_, (i64, i32, String, String, String)>(
+        "SELECT job_id, attempt, path, index_path, state FROM log_archives WHERE created_at < ?",
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await?;
+    let mut report = CleanupReport::default();
+    for (job_id, attempt, path, index_path, state) in &rows {
+        for candidate in [path, index_path] {
+            match tokio::fs::remove_file(candidate).await {
+                Ok(()) => report.log_archive_files_deleted += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(StoreError::Io(e)),
+            }
+        }
+        tracing::debug!(job_id, attempt, "已按 attempt 保留期删除日志归档");
+        if state == "pending" {
+            sqlx::query("UPDATE log_archives SET state = 'lost' WHERE job_id = ? AND attempt = ? AND state = 'pending'")
+                .bind(job_id).bind(attempt).execute(pool).await?;
+        }
+    }
+    if rows.iter().any(|(_, _, _, _, state)| state != "pending") {
+        let result =
+            sqlx::query("DELETE FROM log_archives WHERE created_at < ? AND state = 'ready'")
+                .bind(cutoff)
+                .execute(pool)
+                .await?;
+        report.log_archives_deleted = result.rows_affected() as i64;
     }
     Ok(report)
 }
@@ -149,6 +196,26 @@ async fn purge_build(
 ) -> Result<CleanupReport, StoreError> {
     let mut report = CleanupReport::default();
 
+    // 归档正文与索引不在 artifacts/<build> 下，先按 job 归属取出并删除；
+    // DB 行随后与旧 logs 一起事务删除，避免 ready/pending 文件永久泄漏。
+    let archives = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT a.job_id, a.path, a.index_path FROM log_archives a
+         JOIN jobs j ON j.id = a.job_id WHERE j.build_id = ?",
+    )
+    .bind(build_id)
+    .fetch_all(pool)
+    .await?;
+    for (job_id, path, index_path) in &archives {
+        for candidate in [path, index_path] {
+            match tokio::fs::remove_file(candidate).await {
+                Ok(()) => report.log_archive_files_deleted += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(StoreError::Io(e)),
+            }
+        }
+        tracing::debug!(build_id, job_id, "已删除任务日志归档文件");
+    }
+
     // 产物字节先删。path 可能包含任务 attempt 隔离键，不能再由 public name
     // 反推；旧行 path 同样是 build/name 形式，直接按根拼接兼容两者。
     let paths = sqlx::query_scalar::<_, String>(
@@ -173,6 +240,15 @@ async fn purge_build(
 
     // 日志 chunk + 产物元数据行：一事务删（外键关联均以 build_id 定位）。
     let mut tx = pool.begin().await?;
+    // 到达保留边界仍未补齐的 pending 归档先显式记为 lost，再随该构建的
+    // 到期数据删除；这条迁移路径保留“永久丢失”审计语义而不影响任务终态。
+    sqlx::query(
+        "UPDATE log_archives SET state = 'lost'
+         WHERE job_id IN (SELECT id FROM jobs WHERE build_id = ?) AND state = 'pending'",
+    )
+    .bind(build_id)
+    .execute(&mut *tx)
+    .await?;
     let logs = sqlx::query("DELETE FROM logs WHERE build_id = ?")
         .bind(build_id)
         .execute(&mut *tx)
@@ -181,9 +257,16 @@ async fn purge_build(
         .bind(build_id)
         .execute(&mut *tx)
         .await?;
+    let archives_deleted = sqlx::query(
+        "DELETE FROM log_archives WHERE job_id IN (SELECT id FROM jobs WHERE build_id = ?)",
+    )
+    .bind(build_id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     report.logs_deleted = logs.rows_affected() as i64;
     report.artifact_meta_deleted = metas.rows_affected() as i64;
+    report.log_archives_deleted = archives_deleted.rows_affected() as i64;
 
     // 空目录回收：仅当目录已空（全部产物删净）才移除；非空/不存在忽略——
     // 绝不误删非本构建数据（目录即 build_id，命名空间隔离）。

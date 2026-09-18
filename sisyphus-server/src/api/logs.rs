@@ -18,7 +18,9 @@
 
 use std::collections::VecDeque;
 
-use axum::extract::{Path, Query, State};
+use axum::Json;
+use axum::body::Body;
+use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response, sse::Event as SseEvent};
@@ -29,12 +31,16 @@ use super::AppState;
 use super::builds::load_build;
 use super::error::{ApiError, ErrorBody, ValidationIssue};
 use super::policy::RequireViewer;
+use crate::api::artifacts::AgentAuth;
 use crate::events::Event;
 use crate::logs::{self, JobEndEvent, LogStreamEvent};
+use crate::store::ArchiveIndex;
 use crate::store::LogLocation;
 use crate::store::LogStore;
 use crate::store::builds::BuildRow;
 use crate::store::jobs::{JobRepo, JobRow};
+use futures::StreamExt;
+use tokio::io::AsyncWriteExt;
 
 /// SSE 尾随状态机（`futures::stream::unfold` 的折叠态）。
 struct LogTail {
@@ -115,6 +121,107 @@ pub struct LogStreamQuery {
     pub from: Option<String>,
 }
 
+/// Agent 终态归档上传：正文流式落临时文件，Server 校验大小/SHA-256 后原子登记 ready。
+/// 索引通过 JSON header 传递，避免把归档正文拼入内存或 JSON。
+pub(crate) async fn agent_archive_upload(
+    State(state): State<AppState>,
+    Extension(agent): Extension<AgentAuth>,
+    Path((job_id, attempt)): Path<(i64, i32)>,
+    Query(query): Query<ArchiveUploadQuery>,
+    request: Request,
+) -> Result<Json<ArchiveUploadResponse>, ApiError> {
+    let _job = crate::store::jobs::JobRepo::new(state.pool.clone())
+        .get(job_id)
+        .await?
+        .filter(|job| job.agent_id == Some(agent.agent_id))
+        .ok_or_else(|| ApiError::resource_not_found(format!("任务 {job_id} 不存在")))?;
+    state
+        .log_archives
+        .mark_pending(job_id, attempt)
+        .await
+        .map_err(|e| ApiError::internal("登记待归档日志", &e))?;
+    let index_raw = request
+        .headers()
+        .get("x-sisyphus-archive-index")
+        .ok_or_else(|| {
+            ApiError::validation(
+                "日志归档索引缺失",
+                vec![ValidationIssue {
+                    path: "x-sisyphus-archive-index".into(),
+                    message: "必须提供归档索引".into(),
+                }],
+            )
+        })?
+        .to_str()
+        .map_err(|_| ApiError::validation("日志归档索引非法", vec![]))?;
+    let index: ArchiveIndex = serde_json::from_str(index_raw).map_err(|e| {
+        ApiError::validation(
+            "日志归档索引非法",
+            vec![ValidationIssue {
+                path: "index".into(),
+                message: e.to_string(),
+            }],
+        )
+    })?;
+    let root = state.log_archives.root().join("tmp");
+    tokio::fs::create_dir_all(&root)
+        .await
+        .map_err(|e| ApiError::internal("创建日志归档临时目录", &e))?;
+    let temp = root.join(format!(
+        "{job_id}-{attempt}-{}.upload",
+        crate::store::now_ms()
+    ));
+    let mut file = tokio::fs::File::create(&temp)
+        .await
+        .map_err(|e| ApiError::internal("创建日志归档临时文件", &e))?;
+    let mut stream = request.into_body().into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| ApiError::internal("接收日志归档", &e))?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| ApiError::internal("写入日志归档", &e))?;
+    }
+    file.sync_all()
+        .await
+        .map_err(|e| ApiError::internal("同步日志归档", &e))?;
+    if let Err(error) = state
+        .log_archives
+        .publish(job_id, attempt, &temp, query.size, &query.sha256, &index)
+        .await
+    {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(match error {
+            crate::store::StoreError::Conflict(message) => ApiError::conflict(message),
+            crate::store::StoreError::Invalid(message) => ApiError::validation(
+                "日志归档参数非法",
+                vec![ValidationIssue {
+                    path: "archive".into(),
+                    message,
+                }],
+            ),
+            other => ApiError::internal("登记日志归档", &other),
+        });
+    }
+    Ok(Json(ArchiveUploadResponse {
+        job_id,
+        attempt,
+        state: "ready".into(),
+    }))
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub(crate) struct ArchiveUploadQuery {
+    pub size: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ArchiveUploadResponse {
+    pub job_id: i64,
+    pub attempt: i32,
+    pub state: String,
+}
+
 /// SSE 日志流端点（viewer 档，ADR-0013）：`from` 起播先补 DB 历史、再接
 /// 事件总线尾随；`Last-Event-ID`（原生 EventSource 断线重连自动携带）即
 /// seq 游标，续传自 id+1 起。任务终态送达并 flush 后关流。
@@ -180,6 +287,9 @@ pub async fn stream(
             if tail.reread {
                 tail.reread = false;
                 if tail.drain_db().await > 0 {
+                    // 归档和 SQLite 都按有限批次返回；队列排空后继续从
+                    // 新游标读取下一帧，避免历史归档一次性驻留内存。
+                    tail.reread = true;
                     continue; // 历史有货：先发
                 }
             }
@@ -248,6 +358,20 @@ pub async fn download(
     let build = load_build(&state, &access.project.id, &pipeline, number).await?;
     let job = load_job(&state, &build, &job_name, attempt).await?;
     let loc = logs::location(build.id, job.id, attempt);
+    if let Some(stream) = state
+        .log_archives
+        .stream_plain(job.id, attempt)
+        .await
+        .map_err(|e| ApiError::internal("日志归档读取", &e))?
+    {
+        let body = Body::from_stream(stream.map(|result| result.map(axum::body::Bytes::from)));
+        return Ok((
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            body,
+        )
+            .into_response());
+    }
     let chunks = state
         .logs
         .read_from(loc, 0)

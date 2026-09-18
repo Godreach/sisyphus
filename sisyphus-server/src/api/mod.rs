@@ -71,6 +71,7 @@ use crate::events::EventBus;
 use crate::grpc::SessionRegistry;
 use crate::secrets::MasterKey;
 use crate::storage::S3Client;
+use crate::store::LocalLogArchiveStore;
 use crate::store::SqliteLogStore;
 use crate::store::agents::AgentRepo;
 use crate::store::artifacts::{LocalDiskArtifactStore, SqliteArtifactMetaRepo};
@@ -126,6 +127,8 @@ pub struct AppState {
     /// 构建日志存储（票 #73，ADR-0013）：grpc 落库（写）与 SSE 回放/下载
     /// （读，独立连接）两消费面。
     pub logs: SqliteLogStore,
+    /// 任务终态日志归档（本地后端；旧 SQLite logs 仍并行可读）。
+    pub(crate) log_archives: LocalLogArchiveStore,
     /// 产物字节存储（票 #74，ADR-0004）：Agent 上传端点（写）与下载端点
     /// （读）两消费面，布局 data/artifacts/<build_id>/<name>。
     pub artifacts: LocalDiskArtifactStore,
@@ -198,6 +201,7 @@ impl AppState {
         // recorder（进程内只装一次）。装配后事件埋点与快照灌入即被记录，
         // `/metrics` 端点渲染同一 recorder。
         crate::metrics::install();
+        let log_archives = LocalLogArchiveStore::new(pool.clone(), data_dir.join("log-archives"));
         Ok(Self {
             pool: pool.clone(),
             projects: ProjectRepo::new(pool.clone()),
@@ -212,7 +216,10 @@ impl AppState {
             agents: AgentRepo::new(pool.clone()),
             triggers: TriggerRepo::new(pool.clone()),
             audit: AuditRepo::new(pool.clone()),
-            logs: SqliteLogStore::open(&pool).await?,
+            logs: SqliteLogStore::open(&pool)
+                .await?
+                .with_archive(log_archives.clone()),
+            log_archives,
             artifacts: LocalDiskArtifactStore::new(data_dir.join(crate::config::ARTIFACTS_DIR)),
             artifact_meta: SqliteArtifactMetaRepo::new(pool.clone(), retention_days),
             deletions: crate::store::deletions::DeletionRepo::new(pool.clone()),
@@ -290,6 +297,10 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
     // （Bearer sisa_ 族；PAT/会话 401）——不与用户面认证/CSRF 中间件叠加
     // （Bearer 天然免疫 CSRF，且 Agent 无 cookie 语义）。
     let v1_agent_artifacts = Router::new()
+        .route(
+            "/agent/log-archives/{job_id}/{attempt}",
+            post(logs::agent_archive_upload),
+        )
         .route(
             "/agent/artifacts/{job_id}/sets",
             post(artifacts::agent_create_set),

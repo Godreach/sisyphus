@@ -15,6 +15,7 @@ pub mod builds;
 pub mod cleanup;
 pub mod deletions;
 pub mod jobs;
+mod log_archives;
 pub mod logs;
 pub mod members;
 pub mod pipelines;
@@ -39,6 +40,7 @@ pub use artifacts::{
     ARTIFACT_NAME_MAX, LocalDiskArtifactStore, SqliteArtifactMetaRepo, validate_artifact_name,
 };
 pub use cleanup::{CLEANUP_INTERVAL, CleanupReport, delete_build_data, run_daily_cleanup, sweep};
+pub(crate) use log_archives::{ArchiveIndex, LocalLogArchiveStore};
 pub use logs::SqliteLogStore;
 pub use s3_identity::{S3BackendIdentity, S3IdentityRepo};
 pub use scm_credentials::ScmCredentialRepo;

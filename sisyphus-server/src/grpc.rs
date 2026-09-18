@@ -48,7 +48,7 @@ use crate::events::Event;
 use crate::sched::{JobDispatcher, SchedError, SchedulerHandle};
 use crate::store::LogStore;
 use crate::store::agents::{AgentDiskUsage, AgentVersion, VolumeUsage};
-use crate::store::jobs::JobRow;
+use crate::store::jobs::{JobRepo, JobRow};
 use crate::store::now_ms;
 
 /// 心跳间隔语义（ADR-0007）：Agent 15s 一报。
@@ -586,12 +586,23 @@ async fn session_loop(
                 let job_id = status.job_id.parse().unwrap_or(0);
                 // 契约未知阶段（未来 Server 的新字段）：忽略不上报（旧 Server
                 // 前瞻兼容，不误标 unknown）。
-                if let Some(phase) = map_job_phase(status.phase)
-                    && let Err(e) = scheduler
+                if let Some(phase) = map_job_phase(status.phase) {
+                    // 终态帧本身就是 Server 可达的独立确认点：即使 Agent
+                    // 的归档 HTTP 上传在 DNS/连接层失败，也先登记 pending，
+                    // 让执行结果与归档状态保持分离，后续上传可继续收敛 ready。
+                    if phase.is_terminal()
+                        && let Ok(Some(job)) = JobRepo::new(state.pool.clone()).get(job_id).await
+                        && job.agent_id == Some(agent_id)
+                        && let Err(e) = state.log_archives.mark_pending(job.id, job.attempt).await
+                    {
+                        tracing::warn!(agent = %agent, job_id, error = %e, "登记终态日志归档 pending 失败");
+                    }
+                    if let Err(e) = scheduler
                         .on_job_status(agent_id, job_id, phase, status.exit_code, status.detail)
                         .await
-                {
-                    tracing::warn!(agent = %agent, error = %e, "JobStatus 处理失败");
+                    {
+                        tracing::warn!(agent = %agent, error = %e, "JobStatus 处理失败");
+                    }
                 }
             }
             Some(Kind::JobReported(reported)) => {

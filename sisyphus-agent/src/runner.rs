@@ -63,6 +63,7 @@ use crate::cache::{Cache, RestoreError};
 use crate::checkout;
 use crate::container;
 use crate::exec::{self, SpawnError, StepOutcome};
+use crate::logarchive::LogArchiveIo;
 use crate::logbuf::LogBuffer;
 use crate::stepio::{Truncation, emit_step, run_streamed_step, step_event};
 use crate::upgrader::DrainGate;
@@ -228,13 +229,14 @@ pub struct Handle {
     receipts: ReceiptLog,
     /// 产物传输缝（票 #74）：上传/依赖下载经 REST 面；测试注入 fake。
     artifact_io: Arc<dyn ArtifactIo>,
+    log_archive_io: Arc<dyn LogArchiveIo>,
 }
 
 impl Handle {
     /// 以分派接收端、上行链路、在途集、工作区、缓存、日志缓冲、排空闸门、收帧
     /// 观测与产物传输缝构造。
     #[allow(clippy::too_many_arguments)] // 各依赖语义独立，聚合在 Handle 构造
-    pub fn new(
+    pub(crate) fn new(
         rx: mpsc::Receiver<ChannelMessage>,
         uplink: RunnerUplink,
         in_flight: Arc<RwLock<Vec<String>>>,
@@ -244,6 +246,7 @@ impl Handle {
         gate: DrainGate,
         receipts: ReceiptLog,
         artifact_io: Arc<dyn ArtifactIo>,
+        log_archive_io: Arc<dyn LogArchiveIo>,
     ) -> Self {
         Self {
             rx,
@@ -257,6 +260,7 @@ impl Handle {
             gate,
             receipts,
             artifact_io,
+            log_archive_io,
         }
     }
 
@@ -264,6 +268,10 @@ impl Handle {
     /// `with_channel_config` 装配，测试经 `Agent::with_artifact_io` 换 fake）。
     pub fn set_artifact_io(&mut self, io: Arc<dyn ArtifactIo>) {
         self.artifact_io = io;
+    }
+
+    pub(crate) fn set_log_archive_io(&mut self, io: Arc<dyn LogArchiveIo>) {
+        self.log_archive_io = io;
     }
 
     /// 下行循环：JobSpec → 起任务执行；Cancel → 触发对应 job 取消；同时回收
@@ -354,6 +362,7 @@ impl Handle {
         let cancels = self.cancels.clone();
         let gate = self.gate.clone();
         let artifact_io = self.artifact_io.clone();
+        let log_archive_io = self.log_archive_io.clone();
         let job_id_for_cleanup = job_id.clone();
         self.jobs.spawn(async move {
             run_job(
@@ -366,6 +375,7 @@ impl Handle {
                 logbuf,
                 gate,
                 artifact_io,
+                log_archive_io,
             )
             .await;
             // 清理取消注册（已取消则 no-op；防 stale 发送器泄漏）。
@@ -526,6 +536,7 @@ async fn run_job(
     logbuf: LogBuffer,
     gate: DrainGate,
     artifact_io: Arc<dyn ArtifactIo>,
+    log_archive_io: Arc<dyn LogArchiveIo>,
 ) {
     let job_id = spec.job_id.clone();
     let attempt = spec.attempt;
@@ -546,14 +557,17 @@ async fn run_job(
     let ws_dir = match workspace.resolve(&spec.pipeline_name, &spec.job_name) {
         Ok(p) => p,
         Err(e) => {
-            uplink
-                .report_terminal(
-                    &job_id,
-                    JobPhase::JobFailed,
-                    None,
-                    &format!("工作区解析失败：{e}"),
-                )
-                .await;
+            archive_then_report(
+                &uplink,
+                &logbuf,
+                &log_archive_io,
+                &job_id,
+                attempt,
+                JobPhase::JobFailed,
+                None,
+                &format!("工作区解析失败：{e}"),
+            )
+            .await;
             release_inflight(&in_flight, &job_id, &gate).await;
             return;
         }
@@ -565,9 +579,17 @@ async fn run_job(
     if !spec.downloads.is_empty()
         && let Err(detail) = download_deps(&artifact_io, &spec, &ws_dir).await
     {
-        uplink
-            .report_terminal(&job_id, JobPhase::JobFailed, None, &detail)
-            .await;
+        archive_then_report(
+            &uplink,
+            &logbuf,
+            &log_archive_io,
+            &job_id,
+            attempt,
+            JobPhase::JobFailed,
+            None,
+            &detail,
+        )
+        .await;
         release_inflight(&in_flight, &job_id, &gate).await;
         return;
     }
@@ -585,9 +607,17 @@ async fn run_job(
         Some(EnvKind::Container(c)) => match container::ContainerTask::prepare(c, &spec, &ws_dir) {
             Ok(task) => Some(task),
             Err(e) => {
-                uplink
-                    .report_terminal(&job_id, JobPhase::JobFailed, None, &e)
-                    .await;
+                archive_then_report(
+                    &uplink,
+                    &logbuf,
+                    &log_archive_io,
+                    &job_id,
+                    attempt,
+                    JobPhase::JobFailed,
+                    None,
+                    &e,
+                )
+                .await;
                 release_inflight(&in_flight, &job_id, &gate).await;
                 return;
             }
@@ -625,14 +655,86 @@ async fn run_job(
     };
 
     let (phase, exit_code, detail) = outcome_phase(outcome);
+    archive_then_report(
+        &uplink,
+        &logbuf,
+        &log_archive_io,
+        &job_id,
+        attempt,
+        phase,
+        exit_code,
+        &detail,
+    )
+    .await;
+    release_inflight(&in_flight, &job_id, &gate).await;
+    // container_task drop：env 文件 + ASKPASS 任务毕即删（ADR-0018）。
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn archive_then_report(
+    uplink: &RunnerUplink,
+    logbuf: &LogBuffer,
+    log_archive_io: &Arc<dyn LogArchiveIo>,
+    job_id: &str,
+    attempt: i32,
+    phase: JobPhase,
+    exit_code: Option<i32>,
+    detail: &str,
+) {
+    // 终态前先把本地持久缓冲封存为独立 gzip 帧归档；归档失败不改写执行结果，
+    // 源缓冲仍保留，供后台重试/运维取证（ADR-0027）。
+    // 先落盘终态意图，封存过程崩溃后 worker 仍能识别并重试；即使
+    // marker 写入失败，也继续尝试封存，完成的 archive index 可供扫描恢复。
+    if let Err(error) = logbuf.mark_archive_pending(job_id, attempt) {
+        tracing::warn!(job = %job_id, attempt, error = %error, "日志归档意图落盘失败，仍尝试封存");
+    }
+    let archive_confirmed = match logbuf.seal_archive(job_id, attempt) {
+        Ok(archive) => {
+            if let Err(error) =
+                upload_archive_immediate(log_archive_io, job_id, attempt, &archive).await
+            {
+                tracing::warn!(job = %job_id, attempt, error = %error, "日志归档上传失败，保留本地缓冲");
+                false
+            } else {
+                true
+            }
+        }
+        Err(error) => {
+            tracing::warn!(job = %job_id, attempt, error = %error, "日志归档封存失败，保留本地缓冲");
+            false
+        }
+    };
     uplink
-        .report_terminal(&job_id, phase, exit_code, &detail)
+        .report_terminal(job_id, phase, exit_code, detail)
         .await;
     // 终态上报成功后延迟宽限删除日志缓冲（ADR-0013：宽限内崩溃重启缓冲留作
     // 孤儿补传取证；宽限到期由 logbuf 删除 worker 清理）。
-    logbuf.clear_deferred(&job_id, attempt);
-    release_inflight(&in_flight, &job_id, &gate).await;
-    // container_task drop：env 文件 + ASKPASS 任务毕即删（ADR-0018）。
+    if archive_confirmed {
+        logbuf.clear_deferred(job_id, attempt);
+    }
+}
+
+async fn upload_archive_immediate(
+    io: &Arc<dyn LogArchiveIo>,
+    job_id: &str,
+    attempt: i32,
+    archive: &crate::logarchive::SealedArchive,
+) -> Result<(), String> {
+    let mut last = String::new();
+    for delay in [
+        Duration::ZERO,
+        Duration::from_millis(200),
+        Duration::from_secs(1),
+    ] {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        match io.upload(job_id, attempt, archive).await {
+            Ok(()) => return Ok(()),
+            Err(error) => last = error,
+        }
+    }
+    Err(last)
 }
 
 /// job 终态 → 上报三元组（phase / exit_code / detail）。纯函数，便于单测覆盖

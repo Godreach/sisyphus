@@ -16,6 +16,7 @@
 
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
+use std::sync::Arc;
 
 use super::StoreError;
 use super::traits::{LogChunk, LogLocation, LogStore};
@@ -31,6 +32,7 @@ pub struct SqliteLogStore {
     write: SqlitePool,
     /// 读路径（SSE 回放/尾随、整份下载）：独立小池（ADR-0004）。
     read: SqlitePool,
+    archive: Option<Arc<super::log_archives::LocalLogArchiveStore>>,
 }
 
 impl SqliteLogStore {
@@ -44,7 +46,17 @@ impl SqliteLogStore {
         Ok(Self {
             write: pool.clone(),
             read,
+            archive: None,
         })
+    }
+
+    /// 注入终态归档后端；旧 SQLite chunk 仍优先读取，归档作为无旧正文时的兼容回退。
+    pub(crate) fn with_archive(
+        mut self,
+        archive: super::log_archives::LocalLogArchiveStore,
+    ) -> Self {
+        self.archive = Some(Arc::new(archive));
+        self
     }
 }
 
@@ -99,6 +111,20 @@ impl LogStore for SqliteLogStore {
         loc: LogLocation,
         from_seq: u64,
     ) -> Result<Vec<LogChunk>, StoreError> {
+        // 终态归档 ready 后以归档为真源；没有归档的运行中任务和历史数据才
+        // 回落到旧 SQLite chunk，避免新任务长期继续从 SQLite 正文读取。
+        if let Some(archive) = &self.archive {
+            let values = archive
+                .read_events(loc.job_id, loc.attempt, from_seq)
+                .await?;
+            let events = values
+                .into_iter()
+                .filter_map(super::log_archives::agent_json_event)
+                .collect::<Vec<_>>();
+            if !events.is_empty() {
+                return Ok(vec![crate::logs::encode_chunk(&events)]);
+            }
+        }
         let rows = sqlx::query_as::<_, (i64, Vec<u8>)>(
             "SELECT start_seq, data FROM logs
              WHERE build_id = ? AND job_id = ? AND attempt = ?
@@ -112,13 +138,14 @@ impl LogStore for SqliteLogStore {
         .bind(from_seq as i64)
         .fetch_all(&self.read)
         .await?;
-        Ok(rows
+        let chunks: Vec<LogChunk> = rows
             .into_iter()
             .map(|(start_seq, compressed)| LogChunk {
                 start_seq: start_seq as u64,
                 compressed,
             })
-            .collect())
+            .collect();
+        Ok(chunks)
     }
 }
 
