@@ -32,6 +32,7 @@ use super::builds::load_build;
 use super::error::{ApiError, ErrorBody, ValidationIssue};
 use super::policy::RequireViewer;
 use crate::api::artifacts::AgentAuth;
+use crate::config::LogArchiveBackend;
 use crate::events::Event;
 use crate::logs::{self, JobEndEvent, LogStreamEvent};
 use crate::store::ArchiveIndex;
@@ -121,6 +122,99 @@ pub struct LogStreamQuery {
     pub from: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArchiveGrantRequest {
+    index: ArchiveIndex,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ArchiveGrantResponse {
+    backend: &'static str,
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+}
+
+pub(crate) async fn agent_archive_grant(
+    State(state): State<AppState>,
+    Extension(agent): Extension<AgentAuth>,
+    Path((job_id, attempt)): Path<(i64, i32)>,
+    Json(request): Json<ArchiveGrantRequest>,
+) -> Result<Json<ArchiveGrantResponse>, ApiError> {
+    crate::store::jobs::JobRepo::new(state.pool.clone())
+        .get(job_id)
+        .await?
+        .filter(|job| job.agent_id == Some(agent.agent_id) && job.attempt == attempt)
+        .ok_or_else(|| ApiError::resource_not_found(format!("任务 {job_id} 不存在")))?;
+    if state.log_archive_backend == LogArchiveBackend::Local {
+        return Ok(Json(ArchiveGrantResponse {
+            backend: "local",
+            state: "pending",
+            url: None,
+        }));
+    }
+    let s3 = state
+        .s3
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("S3 日志后端未配置"))?;
+    let key = state
+        .log_archives
+        .grant_s3(job_id, attempt, s3.prefix(), &request.index)
+        .await
+        .map_err(archive_store_error)?;
+    let url = key
+        .map(|key| s3.presign_put(&key, 300))
+        .transpose()
+        .map_err(|e| ApiError::internal("签发日志归档直传 URL", &e))?;
+    Ok(Json(ArchiveGrantResponse {
+        backend: "s3",
+        state: if url.is_some() { "pending" } else { "ready" },
+        url,
+    }))
+}
+
+pub(crate) async fn agent_archive_complete(
+    State(state): State<AppState>,
+    Extension(agent): Extension<AgentAuth>,
+    Path((job_id, attempt)): Path<(i64, i32)>,
+) -> Result<Json<ArchiveUploadResponse>, ApiError> {
+    crate::store::jobs::JobRepo::new(state.pool.clone())
+        .get(job_id)
+        .await?
+        .filter(|job| job.agent_id == Some(agent.agent_id) && job.attempt == attempt)
+        .ok_or_else(|| ApiError::resource_not_found(format!("任务 {job_id} 不存在")))?;
+    state
+        .log_archives
+        .publish_s3(
+            job_id,
+            attempt,
+            state.artifact_transfer_limits.copy_object_limit,
+            state.artifact_transfer_limits.copy_part_size,
+        )
+        .await
+        .map_err(archive_store_error)?;
+    Ok(Json(ArchiveUploadResponse {
+        job_id,
+        attempt,
+        state: "ready".into(),
+    }))
+}
+
+fn archive_store_error(error: crate::store::StoreError) -> ApiError {
+    match error {
+        crate::store::StoreError::Conflict(message) => ApiError::conflict(message),
+        crate::store::StoreError::NotFound(message) => ApiError::resource_not_found(message),
+        crate::store::StoreError::Invalid(message) => ApiError::validation(
+            "日志归档参数非法",
+            vec![ValidationIssue {
+                path: "archive".into(),
+                message,
+            }],
+        ),
+        other => ApiError::internal("登记日志归档", &other),
+    }
+}
+
 /// Agent 终态归档上传：正文流式落临时文件，Server 校验大小/SHA-256 后原子登记 ready。
 /// 索引通过 JSON header 传递，避免把归档正文拼入内存或 JSON。
 pub(crate) async fn agent_archive_upload(
@@ -130,10 +224,13 @@ pub(crate) async fn agent_archive_upload(
     Query(query): Query<ArchiveUploadQuery>,
     request: Request,
 ) -> Result<Json<ArchiveUploadResponse>, ApiError> {
-    let _job = crate::store::jobs::JobRepo::new(state.pool.clone())
+    if state.log_archive_backend != LogArchiveBackend::Local {
+        return Err(ApiError::conflict("当前日志归档后端为 S3，请使用直传许可"));
+    }
+    crate::store::jobs::JobRepo::new(state.pool.clone())
         .get(job_id)
         .await?
-        .filter(|job| job.agent_id == Some(agent.agent_id))
+        .filter(|job| job.agent_id == Some(agent.agent_id) && job.attempt == attempt)
         .ok_or_else(|| ApiError::resource_not_found(format!("任务 {job_id} 不存在")))?;
     state
         .log_archives

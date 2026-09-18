@@ -81,11 +81,14 @@ impl S3IdentityRepo {
         Ok(())
     }
 
-    /// 是否已有 S3 对象引用（产物行 `backend = 's3'`）。
+    /// 是否已有 S3 对象引用（产物或终态日志，含待归档临时对象）。
     pub async fn has_object_refs(&self) -> Result<bool, StoreError> {
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE backend = 's3'")
-            .fetch_one(&self.pool)
-            .await?;
+        let n: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM artifacts WHERE backend = 's3') +
+                    (SELECT COUNT(*) FROM log_archives WHERE backend = 's3')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
         Ok(n > 0)
     }
 

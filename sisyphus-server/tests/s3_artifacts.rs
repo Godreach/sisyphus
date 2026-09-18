@@ -16,6 +16,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use common::{DEFAULT_PEER, custom_req};
+use futures::StreamExt;
 use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
 use sisyphus_model::pipeline::{Job, Pipeline, Revision, Stage};
@@ -28,6 +29,8 @@ use sisyphus_server::store::builds::{BuildRepo, BuildRow, StartBuild, TriggerSou
 use sisyphus_server::store::jobs::{JobRepo, NewJob};
 use sisyphus_server::store::projects::{NewProject, ProjectRepo, ScmType};
 use sisyphus_server::{api, store};
+use std::io::Write;
+use tower::ServiceExt;
 
 #[derive(Clone)]
 struct Mock {
@@ -37,6 +40,7 @@ struct Mock {
     uploads: Arc<Mutex<HashMap<String, (String, HashMap<u32, Vec<u8>>)>>>,
     next_upload: Arc<AtomicUsize>,
     fail_deletes: Arc<AtomicBool>,
+    ranges: Arc<Mutex<Vec<String>>>,
 }
 
 async fn handle(State(mock): State<Mock>, req: Request<axum::body::Body>) -> Response {
@@ -210,6 +214,7 @@ async fn handle(State(mock): State<Mock>, req: Request<axum::body::Body>) -> Res
             if let Some(range) = headers.get("range").and_then(|v| v.to_str().ok())
                 && let Some(rest) = range.strip_prefix("bytes=")
             {
+                mock.ranges.lock().unwrap().push(range.to_string());
                 let mut parts = rest.split('-');
                 let start: usize = parts.next().unwrap_or("0").parse().unwrap_or(0);
                 let end: usize = parts
@@ -265,6 +270,7 @@ async fn spawn_mock(access_key: &str, bucket: &str) -> (SocketAddr, Mock) {
         uploads: Arc::new(Mutex::new(HashMap::new())),
         next_upload: Arc::new(AtomicUsize::new(1)),
         fail_deletes: Arc::new(AtomicBool::new(false)),
+        ranges: Arc::new(Mutex::new(Vec::new())),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -302,10 +308,21 @@ struct Harness {
 }
 
 async fn harness() -> Harness {
-    harness_with_limits(sisyphus_server::api::ArtifactTransferLimits::default()).await
+    harness_with_limits_and_backend(
+        sisyphus_server::api::ArtifactTransferLimits::default(),
+        None,
+    )
+    .await
 }
 
 async fn harness_with_limits(limits: sisyphus_server::api::ArtifactTransferLimits) -> Harness {
+    harness_with_limits_and_backend(limits, None).await
+}
+
+async fn harness_with_limits_and_backend(
+    limits: sisyphus_server::api::ArtifactTransferLimits,
+    backend: Option<sisyphus_server::config::LogArchiveBackend>,
+) -> Harness {
     let dir = tempfile::tempdir().expect("临时数据目录");
     let pool = store::bootstrap(dir.path()).await.expect("bootstrap");
     let master_key = sisyphus_server::secrets::ensure_master_key(
@@ -319,7 +336,7 @@ async fn harness_with_limits(limits: sisyphus_server::api::ArtifactTransferLimit
         .await
         .expect("S3 启动校验")
         .expect("已配置");
-    let state = api::AppState::new(
+    let mut state = api::AppState::new(
         pool.clone(),
         dir.path().to_path_buf(),
         false,
@@ -332,6 +349,9 @@ async fn harness_with_limits(limits: sisyphus_server::api::ArtifactTransferLimit
     .expect("装配 AppState")
     .with_artifact_transfer_limits(limits)
     .with_s3(Some(client));
+    if let Some(backend) = backend {
+        state = state.with_log_archive_backend(backend);
+    }
     let app = common::test_app_from_state(state.clone(), dir.path());
 
     let project = ProjectRepo::new(pool.clone())
@@ -474,6 +494,207 @@ async fn harness_with_limits(limits: sisyphus_server::api::ArtifactTransferLimit
 
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn two_frame_log_archive(job_id: i64) -> (Vec<u8>, serde_json::Value) {
+    let mut archive = b"SYLOGA01".to_vec();
+    let mut frames = Vec::new();
+    let mut raw_bytes = 0;
+    for (seq, data) in [(0, "b25lCg"), (1, "dHdvCg")] {
+        let line =
+            format!("{{\"seq\":{seq},\"kind\":\"output\",\"stream\":0,\"data\":\"{data}\"}}\n");
+        raw_bytes += line.len();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(line.as_bytes()).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let offset = archive.len() as u64 + 8;
+        archive.extend_from_slice(&(compressed.len() as u64).to_le_bytes());
+        archive.extend_from_slice(&compressed);
+        frames.push(serde_json::json!({
+            "start_seq": seq, "end_seq": seq, "offset": offset,
+            "compressed_len": compressed.len()
+        }));
+    }
+    let index = serde_json::json!({
+        "job_id": job_id.to_string(), "attempt": 1,
+        "first_seq": 0, "last_seq": 1, "raw_bytes": raw_bytes,
+        "compressed_bytes": archive.len(), "sha256": sha256_hex(&archive),
+        "frames": frames
+    });
+    (archive, index)
+}
+
+#[tokio::test]
+async fn log_archive_grant_only_signs_a_temporary_log_object() {
+    let h = harness().await;
+    let bytes = b"SYLOGA01";
+    let request = serde_json::json!({
+        "index": {
+            "job_id": h.job_a.to_string(), "attempt": 1,
+            "first_seq": null, "last_seq": null, "raw_bytes": 0,
+            "compressed_bytes": bytes.len(), "sha256": sha256_hex(bytes),
+            "frames": []
+        }
+    });
+    let path = format!("/api/v1/agent/log-archives/{}/1/upload-url", h.job_a);
+    let response = agent_post_json(&h, &path, &request.to_string()).await;
+    assert_eq!(response.status(), 200);
+    let grant = common::body_json(response).await;
+    assert_eq!(grant["backend"], "s3");
+    let url = grant["url"].as_str().expect("预签名 URL");
+    assert!(url.contains("/logs/tmp/"), "只能签临时日志 key：{url}");
+    assert!(!url.contains("/logs/final/"));
+}
+
+#[tokio::test]
+async fn configured_local_log_backend_keeps_server_upload_when_s3_exists() {
+    let h = harness_with_limits_and_backend(
+        sisyphus_server::api::ArtifactTransferLimits::default(),
+        Some(sisyphus_server::config::LogArchiveBackend::Local),
+    )
+    .await;
+    let (archive, index) = two_frame_log_archive(h.job_a);
+    let path = format!("/api/v1/agent/log-archives/{}/1/upload-url", h.job_a);
+    let response =
+        agent_post_json(&h, &path, &serde_json::json!({"index": index}).to_string()).await;
+    assert_eq!(response.status(), 200);
+    let grant = common::body_json(response).await;
+    assert_eq!(grant["backend"], "local");
+    assert!(grant.get("url").is_none());
+    assert!(
+        h.mock
+            .objects
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|key| !key.contains("/logs/"))
+    );
+
+    let upload = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/v1/agent/log-archives/{}/1?size={}&sha256={}",
+            h.job_a,
+            archive.len(),
+            sha256_hex(&archive)
+        ))
+        .header("authorization", format!("Bearer {}", h.agent_token))
+        .header("x-sisyphus-archive-index", index.to_string())
+        .extension(axum::extract::ConnectInfo(DEFAULT_PEER))
+        .body(axum::body::Body::from(archive))
+        .unwrap();
+    let response = h.app.router.clone().oneshot(upload).await.unwrap();
+    assert_eq!(response.status(), 200);
+
+    // 后续部署切回 S3 时，既有 Server 本地归档仍从原路径读取。
+    let state = h
+        .app
+        .state
+        .clone()
+        .with_log_archive_backend(sisyphus_server::config::LogArchiveBackend::S3);
+    let app = common::test_app_from_state(state, h._dir.path());
+    let response = custom_req(
+        &app,
+        "GET",
+        &format!(
+            "/api/v1/projects/demo/pipelines/release/builds/{}/jobs/build/attempts/1/logs",
+            h.build.number
+        ),
+        None,
+        Some(&h.cookie),
+        &[],
+        DEFAULT_PEER,
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(common::body_text(response).await, "one\ntwo\n");
+}
+
+#[tokio::test]
+async fn s3_log_archive_is_immutable_and_downloaded_through_server() {
+    let h = harness().await;
+    let (archive, index) = two_frame_log_archive(h.job_a);
+    let grant_path = format!("/api/v1/agent/log-archives/{}/1/upload-url", h.job_a);
+    let response = agent_post_json(
+        &h,
+        &grant_path,
+        &serde_json::json!({"index": index}).to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let grant = common::body_json(response).await;
+    let url = grant["url"].as_str().unwrap();
+    http_client()
+        .put(url)
+        .body(archive.clone())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let complete = format!("/api/v1/agent/log-archives/{}/1/complete", h.job_a);
+    let response = agent_post_json(&h, &complete, "{}").await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(common::body_json(response).await["state"], "ready");
+    let key = h
+        .mock
+        .objects
+        .lock()
+        .unwrap()
+        .keys()
+        .find(|key| key.contains("/logs/final/"))
+        .cloned()
+        .expect("最终 key");
+    assert!(
+        h.mock
+            .objects
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|key| !key.contains("/logs/tmp/"))
+    );
+
+    // 旧上传许可只会改变临时 key；已确认的归档正文始终不变。
+    http_client()
+        .put(url)
+        .body(b"tampered".to_vec())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(h.mock.objects.lock().unwrap().get(&key), Some(&archive));
+    assert_eq!(agent_post_json(&h, &complete, "{}").await.status(), 200);
+
+    let path = format!(
+        "/api/v1/projects/demo/pipelines/release/builds/{}/jobs/build/attempts/1/logs",
+        h.build.number
+    );
+    let before = h.mock.ranges.lock().unwrap().len();
+    let response = viewer_get(&h, &path).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(common::body_text(response).await, "one\ntwo\n");
+    assert_eq!(
+        h.mock.ranges.lock().unwrap().len() - before,
+        2,
+        "下载逐帧 Range GET"
+    );
+
+    let response = viewer_get(&h, &format!("{path}/stream?from=1")).await;
+    assert_eq!(response.status(), 200);
+    let mut stream = response.into_body().into_data_stream();
+    let chunk = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("SSE 回放及时返回")
+        .expect("有 seq=1 事件")
+        .unwrap();
+    let text = String::from_utf8(chunk.to_vec()).unwrap();
+    assert!(
+        text.contains("id: 1") && text.contains("two"),
+        "按 seq 回放：{text}"
+    );
+    assert!(!text.contains("id: 0"), "不回放游标之前事件：{text}");
 }
 
 #[tokio::test]

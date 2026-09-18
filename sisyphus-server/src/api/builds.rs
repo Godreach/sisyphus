@@ -608,9 +608,14 @@ pub async fn remove(
     // 数据裁剪（日志 + 本地产物文件/元数据 + 空目录回收；其它后端与
     // builds/jobs 记录保留）。
     let artifacts_root = state.artifacts.root().to_path_buf();
-    crate::store::delete_build_data(&state.pool, &artifacts_root, build.id)
-        .await
-        .map_err(|e| ApiError::internal("构建数据清理", &e))?;
+    crate::store::delete_build_data_with_s3(
+        &state.pool,
+        &artifacts_root,
+        build.id,
+        state.s3.as_deref(),
+    )
+    .await
+    .map_err(|e| ApiError::internal("构建数据清理", &e))?;
     if !query.delete_s3_artifacts {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }

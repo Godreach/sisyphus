@@ -336,26 +336,24 @@ impl LogBuffer {
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some(stem) = name.strip_suffix(ARCHIVE_PENDING_EXT) {
-                if let Some((job, attempt)) = stem
+            if let Some(stem) = name.strip_suffix(ARCHIVE_PENDING_EXT)
+                && let Some((job, attempt)) = stem
                     .rsplit_once('-')
                     .and_then(|(job, n)| Some((job.to_string(), n.parse::<i32>().ok()?)))
-                {
-                    found.insert((job, attempt));
-                }
+            {
+                found.insert((job, attempt));
             }
         }
         let archive_dir = self.dir.join("archives");
         if let Ok(entries) = std::fs::read_dir(archive_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if let Some(stem) = name.strip_suffix(".json") {
-                    if let Some((job, attempt)) = stem
+                if let Some(stem) = name.strip_suffix(".json")
+                    && let Some((job, attempt)) = stem
                         .rsplit_once('-')
                         .and_then(|(job, n)| Some((job.to_string(), n.parse::<i32>().ok()?)))
-                    {
-                        found.insert((job, attempt));
-                    }
+                {
+                    found.insert((job, attempt));
                 }
             }
         }

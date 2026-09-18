@@ -1,4 +1,4 @@
--- 0025 任务终态日志归档（ADR-0027 / #129）。旧 logs 表保持原样可读，
+-- 0027 任务终态日志归档（ADR-0027 / #129）。旧 logs 表保持原样可读，
 -- 新归档以 attempt 为粒度独立登记；正文路径由本地后端维护。
 CREATE TABLE log_archives (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

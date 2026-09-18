@@ -113,17 +113,20 @@ impl LogStore for SqliteLogStore {
     ) -> Result<Vec<LogChunk>, StoreError> {
         // 终态归档 ready 后以归档为真源；没有归档的运行中任务和历史数据才
         // 回落到旧 SQLite chunk，避免新任务长期继续从 SQLite 正文读取。
-        if let Some(archive) = &self.archive {
-            let values = archive
+        if let Some(archive) = &self.archive
+            && let Some(values) = archive
                 .read_events(loc.job_id, loc.attempt, from_seq)
-                .await?;
+                .await?
+        {
             let events = values
                 .into_iter()
                 .filter_map(super::log_archives::agent_json_event)
                 .collect::<Vec<_>>();
-            if !events.is_empty() {
-                return Ok(vec![crate::logs::encode_chunk(&events)]);
-            }
+            return Ok(if events.is_empty() {
+                Vec::new()
+            } else {
+                vec![crate::logs::encode_chunk(&events)]
+            });
         }
         let rows = sqlx::query_as::<_, (i64, Vec<u8>)>(
             "SELECT start_seq, data FROM logs

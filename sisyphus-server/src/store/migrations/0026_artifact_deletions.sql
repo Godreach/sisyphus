@@ -1,4 +1,4 @@
--- 0024 产物异步删除任务（票 #128，ADR-0026）。
+-- 0026 产物异步删除任务（票 #128，ADR-0026）。
 -- 未完成任务本身就是 deleting 标记；失败行保留供后台重试和 UI 展示。
 ALTER TABLE projects ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'active'
     CHECK (lifecycle IN ('active', 'deleting', 'deleted'));
