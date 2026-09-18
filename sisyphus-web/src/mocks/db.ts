@@ -16,6 +16,7 @@ import type {
   BuildStatusDto,
   BuildSummaryResponse,
   CacheEntry,
+  DeletionJobResponse,
   FavoriteLatestBuildDto,
   JobStatusDto,
   MemberAssignment,
@@ -223,7 +224,78 @@ export const PROJECTS: ProjectResponse[] = [
   // svn 项目（无分支概念）：PATCH 校验「svn 不支持默认分支」与列表 svn 徽章
   // 的演示源；无成员分配（项目详情对非全局 admin 404 同形）。
   project(13, 'svn-hooks', 'https://svn.acme/hooks/trunk', 'svn'),
+  // 项目清理失败态演示：首次清理失败，显式重试后完成（票 #139）。
+  project(14, 'deletion-failure-demo', '', 'none'),
 ]
+
+// ---------------------------------------------------------------------------
+// 项目异步删除（票 #139）：冻结即从 PROJECTS 可见面摘除，任务快照独立保留。
+// ---------------------------------------------------------------------------
+
+const PROJECT_DELETIONS: DeletionJobResponse[] = []
+const PROJECT_DELETION_FAIL_ONCE = new Set<number>()
+let nextProjectDeletionId = 1_000
+
+/** 冻结项目并创建 queued 清理任务；null 表示项目不存在或已被冻结。 */
+export function enqueueProjectDeletion(name: string): DeletionJobResponse | null {
+  const index = PROJECTS.findIndex((project) => project.name === name)
+  if (index < 0) return null
+  const project = PROJECTS[index] as ProjectResponse
+  const now = Date.now()
+  const job: DeletionJobResponse = {
+    id: nextProjectDeletionId++,
+    project_id: project.id,
+    project_name: project.name,
+    scope: 'project',
+    state: 'queued',
+    pipeline_name: null,
+    build_number: null,
+    set_id: null,
+    attempts: 0,
+    last_error: null,
+    created_at: now,
+    updated_at: now,
+  }
+  PROJECTS.splice(index, 1)
+  PROJECT_DELETIONS.unshift(job)
+  if (project.name === 'deletion-failure-demo') PROJECT_DELETION_FAIL_ONCE.add(job.id)
+  return { ...job }
+}
+
+/** 读取全局项目清理队列，并为下一次刷新推进确定性演示状态。 */
+export function listProjectDeletionsAndAdvance(): DeletionJobResponse[] {
+  const current = PROJECT_DELETIONS.map((job) => ({ ...job }))
+  const now = Date.now()
+  for (const job of PROJECT_DELETIONS) {
+    if (job.state === 'queued') {
+      job.state = 'running'
+      job.attempts += 1
+      job.updated_at = now
+    } else if (job.state === 'running') {
+      if (PROJECT_DELETION_FAIL_ONCE.has(job.id) && job.attempts === 1) {
+        job.state = 'failed'
+        job.last_error = 'object delete denied（demo fixture）'
+      } else {
+        job.state = 'completed'
+        job.last_error = null
+      }
+      job.updated_at = now
+    }
+  }
+  return current
+}
+
+/** 将失败的项目清理重新排队；其它状态幂等返回，null 表示未知任务。 */
+export function retryProjectDeletion(id: number): DeletionJobResponse | null {
+  const job = PROJECT_DELETIONS.find((item) => item.id === id)
+  if (job == null) return null
+  if (job.state === 'failed') {
+    job.state = 'queued'
+    job.last_error = null
+    job.updated_at = Date.now()
+  }
+  return { ...job }
+}
 
 // ---------------------------------------------------------------------------
 // 项目成员 / 角色分配（票 #108 项目详情成员卡；ADR-0014 项目级三档角色）。
