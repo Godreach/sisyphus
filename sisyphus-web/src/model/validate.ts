@@ -214,7 +214,7 @@ function workspaceRelativeComponents(p: string): string[] | undefined {
   const normalized = p.replaceAll('\\', '/')
   if (
     normalized.startsWith('/') ||
-    (normalized.length >= 2 && /^[A-Za-z]$/.test(normalized[0]) && normalized[1] === ':')
+    (normalized.length >= 2 && /^[A-Za-z]$/.test(normalized.charAt(0)) && normalized[1] === ':')
   ) return undefined
   const components: string[] = []
   for (const component of normalized.split('/')) {
