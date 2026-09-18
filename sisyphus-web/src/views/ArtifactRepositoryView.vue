@@ -49,7 +49,6 @@ async function loadStatus(): Promise<void> {
   errorMessage.value = ''
   try {
     status.value = await artifactRepositoryApi.status()
-    if (isAdmin.value) void checkConsistency()
     if (status.value.available) {
       await Promise.all([loadItems(), loadDeletionManagement()])
     }

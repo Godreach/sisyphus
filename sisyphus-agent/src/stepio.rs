@@ -364,6 +364,10 @@ mod tests {
         let logbuf = LogBuffer::new(dir.path().to_path_buf(), crate::logbuf::DEFAULT_GRACE);
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         logbuf.set_live(Some(tx)).await;
+        logbuf
+            .subscribe("job-tail", 0, 0)
+            .await
+            .expect("建立尾段输出订阅");
 
         // duplex 模拟进程管道：writer 未写、reader 未读；drain 已置位
         // （进程已终态、读任务落后）。

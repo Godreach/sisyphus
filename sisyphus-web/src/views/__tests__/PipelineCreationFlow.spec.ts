@@ -214,7 +214,9 @@ describe('新建流水线真实页面闭环（#120）', () => {
 
   it.each(['explicit', 'browser'])('草稿 %s 返回恢复状态筛选和列表视图，不重开对话框', async action => {
     await mountAt('/pipelines?group=flat')
-    await vi.waitFor(() => expect(wrapper.find('[data-testid="chip-success"]').exists()).toBe(true))
+    // PipelinesView aggregates each row's latest-build data before rendering chips;
+    // on the GitHub runner that fan-out can exceed Vitest's 1s default timeout.
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="chip-success"]').exists()).toBe(true), { timeout: 5_000 })
     await wrapper.get('[data-testid="chip-success"]').trigger('click')
     await vi.waitFor(() => expect(router.currentRoute.value.query.status).toBe('success'))
     await wrapper.get('[data-testid="view-list-btn"]').trigger('click')
@@ -223,7 +225,7 @@ describe('新建流水线真实页面闭环（#120）', () => {
     await enterDraft('[data-testid="topbar-cta"]', `flow-return-${action}`)
     if (action === 'explicit') await wrapper.get('[data-testid="editor-back"]').trigger('click')
     else router.back()
-    await vi.waitFor(() => expect(wrapper.find('[data-testid="chip-success"]').exists()).toBe(true))
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="chip-success"]').exists()).toBe(true), { timeout: 5_000 })
     expect(wrapper.get('[data-testid="chip-success"]').classes()).toContain('active')
     expect(wrapper.get('[data-testid="view-list-btn"]').classes()).toContain('active')
     expect(router.currentRoute.value.fullPath).toBe(source)

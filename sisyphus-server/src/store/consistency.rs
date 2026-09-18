@@ -229,6 +229,10 @@ async fn scalar(pool: &SqlitePool, query: &'static str) -> Result<i64, StoreErro
     Ok(sqlx::query_scalar(query).fetch_one(pool).await?)
 }
 
+// Each argument describes one side of the SQLite/object-store consistency
+// comparison; keeping them explicit makes the finding/error paths readable at
+// the call sites instead of hiding the contract in a short-lived context type.
+#[allow(clippy::too_many_arguments)]
 async fn check_object(
     findings: &mut Vec<ConsistencyFinding>,
     errors: &mut Vec<String>,
