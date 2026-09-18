@@ -473,6 +473,47 @@ export function createHandlers(options: MockHandlerOptions) {
       return HttpResponse.json(updated)
     }),
 
+    projectRemove: http.delete('/api/v1/projects/:name', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const deniedAdmin = globalAdminGuard(request)
+      if (deniedAdmin != null) return deniedAdmin
+      const name = String(params.name)
+      await delay(200)
+      const project = db.PROJECTS.find((item) => item.name === name)
+      if (project == null) return jsonError(404, 'NOT_FOUND', `项目 ${name} 不存在`)
+      const hasLiveBuild = db.PIPELINES
+        .filter((pipeline) => pipeline.project === name)
+        .some((pipeline) => mergedSummaries(name, pipeline.name)
+          .some((build) => build.status === 'queued' || build.status === 'running'))
+      if (hasLiveBuild) {
+        return jsonError(409, 'CONFLICT', '项目仍有排队或运行中的构建')
+      }
+      const job = db.enqueueProjectDeletion(name)
+      if (job == null) return jsonError(404, 'NOT_FOUND', `项目 ${name} 不存在`)
+      return HttpResponse.json(job, { status: 202 })
+    }),
+
+    projectDeletionsList: http.get('/api/v1/project-deletions', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const deniedAdmin = globalAdminGuard(request)
+      if (deniedAdmin != null) return deniedAdmin
+      await delay(150)
+      return HttpResponse.json({ items: db.listProjectDeletionsAndAdvance() })
+    }),
+
+    projectDeletionRetry: http.post('/api/v1/project-deletions/:id/retry', async ({ request, params }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const deniedAdmin = globalAdminGuard(request)
+      if (deniedAdmin != null) return deniedAdmin
+      await delay(150)
+      const job = db.retryProjectDeletion(Number(params.id))
+      if (job == null) return jsonError(404, 'NOT_FOUND', '项目删除任务不存在')
+      return HttpResponse.json(job, { status: 202 })
+    }),
+
     projectMembersList: http.get('/api/v1/projects/:name/members', async ({ request, params }) => {
       const denied = guard(options, request)
       if (denied != null) return denied
