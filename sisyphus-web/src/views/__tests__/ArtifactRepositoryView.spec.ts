@@ -132,4 +132,45 @@ describe('ArtifactRepositoryView 一级制品库入口（票 #122）', () => {
     expect(testCall?.[0]).toBe('/api/v1/config/s3/test-connection')
     expect(String(JSON.stringify(testCall))).not.toContain('secret')
   })
+
+  it('已启用时展示来源/校验和并按筛选条件重新查询', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/artifact-repository/artifacts')) {
+        return Promise.resolve(jsonResponse(200, {
+          items: [{
+            kind: 'set_entry',
+            id: 7,
+            name: 'dist/app.js',
+            set_name: 'bundle',
+            path: 'dist/app.js',
+            size: 2048,
+            sha256: 'a'.repeat(64),
+            executable: false,
+            backend: 's3',
+            availability: 'ready',
+            created_at: 1,
+            source: { project: 'web-app', pipeline: 'release', build: 12, job: 'package', attempt: 2 },
+            download_url: '/api/v1/projects/web-app/pipelines/release/builds/12/artifact-sets/7/file?path=dist%2Fapp.js',
+          }],
+          total: 1,
+          page: 1,
+          limit: 50,
+          legacy_local_count: 1,
+        }))
+      }
+      return Promise.resolve(jsonResponse(200, {
+        available: true,
+        backend: { endpoint: 'https://s3.example', region: 'us-east-1', bucket: 'sisyphus', prefix: '', path_style: true },
+      }))
+    })
+    useAuthStore().setAuthed({ username: 'alice', isAdmin: false })
+    const w = mountView()
+    await vi.waitFor(() => expect(w.find('[data-testid="artifact-browser"]').exists()).toBe(true))
+    expect(w.text()).toContain('web-app / release / #12 / package / a2')
+    expect(w.text()).toContain('dist/app.js')
+    expect(w.find('[data-testid="artifact-repo-legacy"]').exists()).toBe(true)
+    await w.get('[data-testid="artifact-filter-project"] input').setValue('web-app')
+    await w.get('[data-testid="artifact-browser"] button').trigger('click')
+    await vi.waitFor(() => expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('project=web-app'))).toBe(true))
+  })
 })

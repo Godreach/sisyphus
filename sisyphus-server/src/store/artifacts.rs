@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
+use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::StoreError;
@@ -276,6 +276,79 @@ pub struct ArtifactMetaEntry {
     pub meta: ArtifactMeta,
     /// 上传时刻（Unix 毫秒；重跑同名再传刷新）。
     pub created_at: i64,
+}
+
+/// 一级制品库查询的扁平行。
+///
+/// 产物集的目录条目与旧式单文件产物统一成同一查询面，调用方再根据
+/// `kind` 组装下载链接。查询只返回 ready 的 S3 正文；历史本地产物由
+/// [`count_local_artifacts`] 单独统计，用于 UI 的兼容提示。
+#[allow(missing_docs)]
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ArtifactRepositoryItemRow {
+    /// `artifact_sets.id` 或 `artifacts.id`。
+    pub item_id: i64,
+    /// `file`（旧式单文件）或 `set_entry`（目录产物集条目）。
+    pub kind: String,
+    pub project_id: i64,
+    pub project_name: String,
+    pub pipeline_name: String,
+    pub build_id: i64,
+    pub build_number: i64,
+    pub job_id: Option<i64>,
+    pub job_name: Option<String>,
+    pub attempt: Option<i32>,
+    /// 目录产物集名称；旧式单文件为空。
+    pub set_name: Option<String>,
+    /// 用户可见名称（单文件名或清单相对路径）。
+    pub name: String,
+    pub size: i64,
+    pub sha256: String,
+    pub executable: bool,
+    pub backend: String,
+    /// 正文可用状态；一级制品库当前只返回 ready 的 S3 条目。
+    pub availability: String,
+    pub created_at: i64,
+    /// 目录条目对应的内部对象名；目录本身为空。
+    pub artifact_name: Option<String>,
+}
+
+/// 一级制品库过滤条件。
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactRepositoryFilter {
+    pub project: Option<String>,
+    pub pipeline: Option<String>,
+    pub build: Option<i64>,
+    pub job: Option<String>,
+    pub attempt: Option<i32>,
+    pub name: Option<String>,
+}
+
+fn append_repository_filter(query: &mut QueryBuilder<Sqlite>, filter: &ArtifactRepositoryFilter) {
+    if let Some(project) = filter.project.as_deref().filter(|value| !value.is_empty()) {
+        query.push(" AND project_name = ").push_bind(project);
+    }
+    if let Some(pipeline) = filter.pipeline.as_deref().filter(|value| !value.is_empty()) {
+        query.push(" AND pipeline_name = ").push_bind(pipeline);
+    }
+    if let Some(build) = filter.build {
+        query.push(" AND build_number = ").push_bind(build);
+    }
+    if let Some(job) = filter.job.as_deref().filter(|value| !value.is_empty()) {
+        query.push(" AND job_name = ").push_bind(job);
+    }
+    if let Some(attempt) = filter.attempt {
+        query.push(" AND attempt = ").push_bind(attempt);
+    }
+    if let Some(name) = filter.name.as_deref().filter(|value| !value.is_empty()) {
+        query
+            .push(" AND (name LIKE ")
+            .push_bind(format!("%{name}%"))
+            .push(" OR set_name LIKE ")
+            .push_bind(format!("%{name}%"))
+            .push(")");
+    }
 }
 
 /// 目录清单条目的支持类型。
@@ -632,6 +705,93 @@ impl SqliteArtifactMetaRepo {
             pool,
             retention_days: retention_days.max(1),
         }
+    }
+
+    /// 列出调用者可见项目中的 S3 产物。
+    ///
+    /// 目录产物集按清单条目展开，保留目录（目录没有正文对象）以便 UI
+    /// 原样浏览；只有至少包含一个 S3 文件的集合才会进入一级制品库。
+    /// 历史本地产物不混入结果，避免把未配置/旧后端误当成一级入口内容。
+    pub async fn list_repository_items(
+        &self,
+        project_ids: &[i64],
+        filter: &ArtifactRepositoryFilter,
+    ) -> Result<Vec<ArtifactRepositoryItemRow>, StoreError> {
+        if project_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut query = QueryBuilder::<Sqlite>::new(
+            r#"WITH items AS (
+                SELECT a.id AS item_id, 'file' AS kind, p.id AS project_id, p.name AS project_name,
+                       b.pipeline_name, b.id AS build_id, b.number AS build_number,
+                       a.job_id AS job_id, j.name AS job_name, a.attempt AS attempt,
+                       NULL AS set_name, a.name AS name, a.size AS size, a.sha256 AS sha256,
+                       0 AS executable, a.backend AS backend, 'ready' AS availability, a.created_at AS created_at,
+                       NULL AS artifact_name
+                FROM artifacts a
+                JOIN builds b ON b.id = a.build_id
+                JOIN projects p ON p.id = b.project_id
+                LEFT JOIN jobs j ON j.id = a.job_id
+                WHERE a.state = 'ready' AND a.backend = 's3' AND a.name NOT LIKE '.set-%'
+                UNION ALL
+                SELECT s.id AS item_id, 'set_entry' AS kind, p.id AS project_id, p.name AS project_name,
+                       b.pipeline_name, b.id AS build_id, b.number AS build_number,
+                       s.job_id AS job_id, j.name AS job_name, s.attempt AS attempt,
+                       s.name AS set_name, e.path AS name, e.size AS size, e.sha256 AS sha256,
+                       e.executable AS executable, COALESCE(a.backend, 's3') AS backend, 'ready' AS availability,
+                       s.created_at AS created_at, e.artifact_name AS artifact_name
+                FROM artifact_sets s
+                JOIN artifact_set_entries e ON e.set_id = s.id
+                JOIN jobs j ON j.id = s.job_id
+                JOIN builds b ON b.id = s.build_id
+                JOIN projects p ON p.id = b.project_id
+                LEFT JOIN artifacts a ON a.build_id = s.build_id AND a.name = e.artifact_name
+                    AND a.job_id = s.job_id AND a.attempt = s.attempt AND a.state = 'ready'
+                WHERE s.state = 'ready'
+                  AND (a.backend = 's3' OR (e.kind = 'directory' AND EXISTS (
+                      SELECT 1 FROM artifact_set_entries ef
+                      JOIN artifacts af ON af.build_id = s.build_id AND af.name = ef.artifact_name
+                          AND af.job_id = s.job_id AND af.attempt = s.attempt
+                      WHERE ef.set_id = s.id AND ef.kind = 'file' AND af.state = 'ready' AND af.backend = 's3'
+                  )))
+            ) SELECT item_id, kind, project_id, project_name, pipeline_name, build_id, build_number,
+                     job_id, job_name, attempt, set_name, name, size, sha256, executable, backend, availability,
+                     created_at, artifact_name FROM items WHERE project_id IN ("#,
+        );
+        {
+            let mut separated = query.separated(", ");
+            for id in project_ids {
+                separated.push_bind(id);
+            }
+        }
+        query.push(")");
+        append_repository_filter(&mut query, filter);
+        query.push(" ORDER BY project_name, pipeline_name, build_number DESC, job_name, attempt, set_name, name");
+
+        Ok(query
+            .build_query_as::<ArtifactRepositoryItemRow>()
+            .fetch_all(&self.pool)
+            .await?)
+    }
+
+    /// 统计可见项目中的历史本地产物，用于一级入口的混合后端提示。
+    pub async fn count_local_artifacts(&self, project_ids: &[i64]) -> Result<i64, StoreError> {
+        if project_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT COUNT(*) FROM artifacts a JOIN builds b ON b.id = a.build_id
+             WHERE a.backend = 'local' AND a.state != 'pending' AND b.project_id IN (",
+        );
+        {
+            let mut separated = query.separated(", ");
+            for id in project_ids {
+                separated.push_bind(id);
+            }
+        }
+        query.push(")");
+        Ok(query.build_query_scalar().fetch_one(&self.pool).await?)
     }
 
     /// 列出一次构建的全部产物（含上传时刻，按名排序）——构建详情页产物
@@ -1297,6 +1457,69 @@ mod tests {
         assert!(entries.is_empty(), "无 .part / 半截文件残留：{entries:?}");
         assert!(repo.find(1, "broken.bin").await.unwrap().is_none());
     }
+
+    #[tokio::test]
+    async fn repository_query_scopes_s3_items_and_expands_ready_sets() {
+        let (_dir, _store, repo) = fixture().await;
+        let pool = repo.pool.clone();
+        sqlx::query("INSERT INTO jobs (build_id, stage_index, name, status, attempt, labels) VALUES (1, 0, 'package', 'succeeded', 2, '[]')")
+            .execute(&pool)
+            .await
+            .expect("建任务");
+        let s3 = ArtifactMeta {
+            build_id: 1,
+            job_id: Some(1),
+            attempt: Some(2),
+            backend: ArtifactBackend::S3,
+            state: ArtifactState::Ready,
+            name: "bundle.zip".into(),
+            path: "1/bundle.zip".into(),
+            size: 12,
+            sha256: "a".repeat(64),
+        };
+        repo.record(&s3).await.expect("S3 单文件");
+        let local = ArtifactMeta {
+            backend: ArtifactBackend::Local,
+            name: "old.bin".into(),
+            path: "1/old.bin".into(),
+            ..s3.clone()
+        };
+        repo.record(&local).await.expect("历史本地文件");
+        sqlx::query("INSERT INTO artifact_sets (build_id, job_id, attempt, name, state, created_at) VALUES (1, 1, 2, 'bundle', 'ready', 0)")
+            .execute(&pool)
+            .await
+            .expect("建产物集");
+        sqlx::query("INSERT INTO artifact_set_entries (set_id, path, kind, size, sha256, executable, artifact_name) VALUES (1, 'dist/app.js', 'file', 12, ?, 0, '.set-1-0')")
+            .bind("b".repeat(64))
+            .execute(&pool)
+            .await
+            .expect("建清单");
+        let set_file = ArtifactMeta {
+            name: ".set-1-0".into(),
+            path: "1/.set-1-0".into(),
+            sha256: "b".repeat(64),
+            ..s3
+        };
+        repo.record(&set_file).await.expect("清单文件");
+
+        let rows = repo
+            .list_repository_items(
+                &[1],
+                &ArtifactRepositoryFilter {
+                    job: Some("package".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("查询");
+        assert_eq!(rows.len(), 2, "S3 单文件 + 产物集条目；本地历史不混入");
+        assert!(
+            rows.iter()
+                .any(|row| row.kind == "set_entry" && row.name == "dist/app.js")
+        );
+        assert_eq!(repo.count_local_artifacts(&[1]).await.unwrap(), 1);
+    }
+
     /// 枚举目录内文件名（tokio ReadDir 逐 next_entry）。
     async fn list_dir(dir: &Path) -> Vec<String> {
         let mut rd = tokio::fs::read_dir(dir).await.expect("枚举");

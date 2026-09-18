@@ -654,6 +654,40 @@ export interface ArtifactRepositoryStatus {
   backend?: S3BackendDto
 }
 
+/** 一级制品库聚合来源。 */
+export interface ArtifactRepositorySource {
+  project: string
+  pipeline: string
+  build: number
+  job?: string | null
+  attempt?: number | null
+}
+
+/** 一级制品库文件/目录条目。 */
+export interface ArtifactRepositoryItem {
+  kind: 'file' | 'set_entry'
+  id: number
+  name: string
+  set_name?: string | null
+  path: string
+  size: number
+  sha256: string
+  executable: boolean
+  backend: 's3' | 'local' | string
+  availability: 'ready' | 'missing' | 'unavailable' | string
+  created_at: number
+  source: ArtifactRepositorySource
+  download_url?: string | null
+}
+
+export interface ArtifactRepositoryResponse {
+  items: ArtifactRepositoryItem[]
+  total: number
+  page: number
+  limit: number
+  legacy_local_count: number
+}
+
 /** 脱敏 S3 配置态（全局 admin，`GET /config/s3`）。 */
 export interface S3ConfigState {
   configured: boolean

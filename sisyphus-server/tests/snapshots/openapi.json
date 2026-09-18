@@ -1514,6 +1514,159 @@
         }
       }
     },
+    "/api/v1/artifact-repository/artifacts": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "按项目聚合浏览 S3 历史构建产物。",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "description": "项目名。",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "query",
+            "description": "Pipeline 名。",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "build",
+            "in": "query",
+            "description": "构建号。",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "job",
+            "in": "query",
+            "description": "任务名。",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "attempt",
+            "in": "query",
+            "description": "attempt 序号。",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "description": "产物名或目录路径的包含匹配。",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "页码（从 1 开始）。",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "每页条数，默认 50，最大 100。",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "按项目聚合的 S3 产物条目",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactRepositoryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "未配置 S3",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "分页参数非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/audit": {
       "get": {
         "tags": [
@@ -5592,6 +5745,214 @@
               "$ref": "#/components/schemas/ArtifactPreflightFile"
             },
             "description": "本次任务将上传的全部单文件声明。"
+          }
+        }
+      },
+      "ArtifactRepositoryItem": {
+        "type": "object",
+        "description": "一级制品库中的一条文件/目录条目。",
+        "required": [
+          "kind",
+          "id",
+          "name",
+          "path",
+          "size",
+          "sha256",
+          "executable",
+          "backend",
+          "availability",
+          "created_at",
+          "source"
+        ],
+        "properties": {
+          "availability": {
+            "type": "string",
+            "description": "正文可用状态（当前聚合查询只返回 `ready`）。"
+          },
+          "backend": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "download_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "可下载文件的同源 URL；目录条目为空。"
+          },
+          "executable": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "产物集 ID 或旧式单文件 ID。"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`file` 或 `set_entry`。"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "set_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "source": {
+            "$ref": "#/components/schemas/ArtifactRepositorySource"
+          }
+        }
+      },
+      "ArtifactRepositoryQuery": {
+        "type": "object",
+        "description": "一级制品库筛选与分页参数。",
+        "properties": {
+          "attempt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "attempt 序号。"
+          },
+          "build": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "构建号。"
+          },
+          "job": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "任务名。"
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "每页条数，默认 50，最大 100。"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "产物名或目录路径的包含匹配。"
+          },
+          "page": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "页码（从 1 开始）。"
+          },
+          "pipeline": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pipeline 名。"
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "项目名。"
+          }
+        }
+      },
+      "ArtifactRepositoryResponse": {
+        "type": "object",
+        "description": "一级制品库分页响应。",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "limit",
+          "legacy_local_count"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtifactRepositoryItem"
+            }
+          },
+          "legacy_local_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "可见项目中仍存在的旧本地产物数量。"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "page": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ArtifactRepositorySource": {
+        "type": "object",
+        "description": "聚合条目的来源定位。",
+        "required": [
+          "project",
+          "pipeline",
+          "build"
+        ],
+        "properties": {
+          "attempt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "build": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "job": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pipeline": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
           }
         }
       },

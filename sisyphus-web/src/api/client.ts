@@ -52,6 +52,7 @@ import type {
   WorkspaceCleanRequest,
   WorkspaceListResponse,
   ArtifactRepositoryStatus,
+  ArtifactRepositoryResponse,
   S3ConfigState,
   S3TestReportDto,
 } from './types'
@@ -393,6 +394,16 @@ export const artifactsApi = {
 /** 一级制品库入口状态（票 #122，ADR-0026）：任意登录角色。 */
 export const artifactRepositoryApi = {
   status: () => http.get<ArtifactRepositoryStatus>('artifact-repository'),
+  list: (query: {
+    project?: string
+    pipeline?: string
+    build?: number
+    job?: string
+    attempt?: number
+    name?: string
+    page?: number
+    limit?: number
+  } = {}) => http.get<ArtifactRepositoryResponse>('artifact-repository/artifacts', { query }),
 }
 
 /** 全局 S3 配置只读脱敏与连接自检（票 #122：全局 admin；无 PUT）。 */

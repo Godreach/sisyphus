@@ -419,6 +419,10 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route("/config/smtp", get(smtp_config::get).put(smtp_config::put))
         .route("/config/s3", get(s3_config::get))
         .route("/config/s3/test-connection", post(s3_config::test_connection))
+        .route(
+            "/artifact-repository/artifacts",
+            get(artifact_repository::list),
+        )
         .route("/artifact-repository", get(artifact_repository::status))
         .route("/upgrade-packages", get(upgrade_packages::list).post(upgrade_packages::upload))
         .route(

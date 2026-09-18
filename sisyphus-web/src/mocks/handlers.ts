@@ -801,6 +801,11 @@ export function createHandlers(options: MockHandlerOptions) {
       if (denied != null) return denied
       return HttpResponse.json({ available: false, reason: 's3_unconfigured' })
     }),
+    artifactRepositoryItems: http.get('/api/v1/artifact-repository/artifacts', ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      return jsonError(409, 'CONFLICT', '未配置 S3 后端，制品库不可用')
+    }),
     s3Config: http.get('/api/v1/config/s3', ({ request }) => {
       const denied = guard(options, request)
       if (denied != null) return denied
