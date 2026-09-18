@@ -52,6 +52,7 @@ import type {
   WorkspaceCleanRequest,
   WorkspaceListResponse,
   ArtifactRepositoryStatus,
+  ConsistencyReport,
   ArtifactRepositoryResponse,
   S3ConfigState,
   S3TestReportDto,
@@ -439,6 +440,13 @@ export const artifactRepositoryApi = {
 export const s3ConfigApi = {
   get: () => http.get<S3ConfigState>('config/s3'),
   testConnection: () => http.post<S3TestReportDto>('config/s3/test-connection'),
+}
+
+/** 管理员只读 SQLite / 对象存储一致性检查（#133）。 */
+export const storageConsistencyApi = {
+  check: (deepHash = false) => http.get<ConsistencyReport>('storage/consistency', {
+    query: deepHash ? { deep_hash: true } : {},
+  }),
 }
 
 /** 升级包端点（后端 `api/upgrade_packages.rs`，票 #76 / B5-T4，ADR-0017）：

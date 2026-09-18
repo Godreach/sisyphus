@@ -5565,6 +5565,61 @@
         }
       }
     },
+    "/api/v1/storage/consistency": {
+      "get": {
+        "tags": [
+          "storage"
+        ],
+        "summary": "执行一次不修改数据的存储一致性检查。",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "deep_hash",
+            "in": "query",
+            "description": "显式启用逐对象 SHA-256；默认只做 stat/HEAD 大小检查。",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "只读一致性检查结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsistencyReport"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "仅全局管理员可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/upgrade-packages": {
       "get": {
         "tags": [
@@ -7442,6 +7497,139 @@
           "new_password": {
             "type": "string",
             "description": "新密码（最小长度 8，无复杂度规则）。"
+          }
+        }
+      },
+      "ConsistencyBacklog": {
+        "type": "object",
+        "required": [
+          "pending_uploads",
+          "pending_multipart_uploads",
+          "pending_deletions",
+          "pending_archives"
+        ],
+        "properties": {
+          "pending_archives": {
+            "type": "integer",
+            "format": "int64",
+            "description": "待归档日志（Agent 仍需重试）。",
+            "minimum": 0
+          },
+          "pending_deletions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "异步删除队列（queued/running/failed）。",
+            "minimum": 0
+          },
+          "pending_multipart_uploads": {
+            "type": "integer",
+            "format": "int64",
+            "description": "尚未完成的 multipart 会话。",
+            "minimum": 0
+          },
+          "pending_uploads": {
+            "type": "integer",
+            "format": "int64",
+            "description": "尚未发布的单对象/产物集元数据。",
+            "minimum": 0
+          }
+        }
+      },
+      "ConsistencyFinding": {
+        "type": "object",
+        "required": [
+          "kind",
+          "resource",
+          "backend",
+          "key"
+        ],
+        "properties": {
+          "actual_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "backend": {
+            "type": "string"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "ready_missing_object / size_mismatch / hash_mismatch / unregistered_object。"
+          },
+          "resource": {
+            "type": "string",
+            "description": "artifact 或 log_archive。"
+          }
+        }
+      },
+      "ConsistencyQuery": {
+        "type": "object",
+        "properties": {
+          "deep_hash": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "显式启用逐对象 SHA-256；默认只做 stat/HEAD 大小检查。"
+          }
+        }
+      },
+      "ConsistencyReport": {
+        "type": "object",
+        "required": [
+          "checked_at",
+          "deep_hash",
+          "backend",
+          "findings",
+          "backlog",
+          "errors"
+        ],
+        "properties": {
+          "backend": {
+            "type": "string"
+          },
+          "backlog": {
+            "$ref": "#/components/schemas/ConsistencyBacklog"
+          },
+          "checked_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "deep_hash": {
+            "type": "boolean"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "S3 暂时不可达等非破坏性检查错误；存在时不把对象误报成缺失。"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConsistencyFinding"
+            }
           }
         }
       },

@@ -61,3 +61,23 @@ async fn unauthenticated_repository_status_is_401() {
     let resp = common::get(&app, "/api/v1/artifact-repository").await;
     assert_eq!(resp.status(), 401);
 }
+
+#[tokio::test]
+async fn storage_consistency_is_read_only_and_reports_backlog() {
+    let app = test_app().await;
+    let cookie = setup_and_login(&app).await;
+    let resp = req_with_cookie(
+        &app,
+        "GET",
+        "/api/v1/storage/consistency",
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    assert_eq!(body["deep_hash"], false);
+    assert!(body["findings"].is_array());
+    assert!(body["backlog"]["pending_uploads"].is_number());
+    assert!(body["errors"].is_array());
+}

@@ -27,6 +27,7 @@ pub mod artifacts;
 pub mod audit;
 pub mod auth;
 pub mod builds;
+pub mod consistency;
 pub mod csrf;
 pub mod deletions;
 pub mod docs;
@@ -482,6 +483,7 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
             get(artifact_repository::list),
         )
         .route("/artifact-repository", get(artifact_repository::status))
+        .route("/storage/consistency", get(consistency::get))
         .route("/upgrade-packages", get(upgrade_packages::list).post(upgrade_packages::upload))
         .route(
             "/upgrade-packages/{package_name}",

@@ -38,6 +38,14 @@ nssm set    sisyphus-server Start SERVICE_AUTO_START
 nssm start  sisyphus-server
 ```
 
+## 备份与恢复（#133）
+
+SQLite、`artifacts/`、日志归档和对象存储 bucket 必须作为一个恢复单元备份，
+不能只备份 `sisyphus.db`。恢复后先停止调度、启动 Server，再由全局管理员调用
+`GET /api/v1/storage/consistency`；需要逐对象校验时加 `?deep_hash=true`。确认
+ready 对象、未登记对象和积压状态后再恢复 Agent。完整的 SQLite/WAL、bucket
+生命周期及自托管 S3 endpoint 约束见 [存储备份、恢复与一致性检查](storage-operations.md)。
+
 管理：
 
 ```powershell

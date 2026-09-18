@@ -754,6 +754,31 @@ export interface S3TestReportDto {
   checks: S3TestCheckDto[]
 }
 
+/** 管理员只读存储一致性检查（`GET /storage/consistency`，#133）。 */
+export interface ConsistencyFinding {
+  kind: 'ready_missing_object' | 'size_mismatch' | 'hash_mismatch' | 'unregistered_object' | string
+  resource: 'artifact' | 'log_archive' | string
+  backend: string
+  key: string
+  expected_size: number | null
+  actual_size: number | null
+  detail: string | null
+}
+
+export interface ConsistencyReport {
+  checked_at: number
+  deep_hash: boolean
+  backend: string
+  findings: ConsistencyFinding[]
+  backlog: {
+    pending_uploads: number
+    pending_multipart_uploads: number
+    pending_deletions: number
+    pending_archives: number
+  }
+  errors: string[]
+}
+
 // ---------------------------------------------------------------------------
 // 升级包 / 升级指令 / 工作区 / 缓存（后端 `api/upgrade_packages.rs`、
 // `api/agents.rs`，票 #76 / B5-T4，ADR-0017/0011/0012）。升级包管理面全局

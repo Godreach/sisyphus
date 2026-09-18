@@ -54,6 +54,10 @@ pub const GRPC_DISCONNECTS: &str = "sisyphus_grpc_disconnects_total";
 /// 调度循环最后活动时间（gauge；Unix 毫秒。ADR-0019：只进 /metrics 不进
 /// healthz——healthz 是给编排器的二值信号）。
 pub const SCHEDULER_LAST_ACTIVITY: &str = "sisyphus_scheduler_last_activity_ms";
+/// 一致性检查发现数（最近一次显式检查）。
+pub const STORAGE_CONSISTENCY_ISSUES: &str = "sisyphus_storage_consistency_issues";
+/// 存储积压当前值（kind=uploads/multipart/deletions/archives）。
+pub const STORAGE_BACKLOG: &str = "sisyphus_storage_backlog";
 
 /// 安装全局 metrics recorder（幂等：进程内只装一次，后续调用返回既有句柄。
 /// 由 [`crate::api::AppState::new`] 在组合根装配点调用——测试多 AppState 共享
@@ -131,6 +135,16 @@ pub fn report_snapshot(s: &crate::snapshot::Snapshot) {
     metrics::gauge!(SLOTS_TOTAL).set(s.slots_total as f64);
     metrics::gauge!(STORAGE_BYTES, "kind" => "artifacts").set(s.artifact_bytes as f64);
     metrics::gauge!(STORAGE_BYTES, "kind" => "logs").set(s.log_bytes as f64);
+}
+
+/// 将最近一次只读一致性检查结果灌入 `/metrics`；检查失败时不覆盖旧值。
+pub fn report_consistency(s: &crate::store::ConsistencyReport) {
+    metrics::gauge!(STORAGE_CONSISTENCY_ISSUES).set(s.issue_count() as f64);
+    metrics::gauge!(STORAGE_BACKLOG, "kind" => "uploads").set(s.backlog.pending_uploads as f64);
+    metrics::gauge!(STORAGE_BACKLOG, "kind" => "multipart")
+        .set(s.backlog.pending_multipart_uploads as f64);
+    metrics::gauge!(STORAGE_BACKLOG, "kind" => "deletions").set(s.backlog.pending_deletions as f64);
+    metrics::gauge!(STORAGE_BACKLOG, "kind" => "archives").set(s.backlog.pending_archives as f64);
 }
 
 #[cfg(test)]

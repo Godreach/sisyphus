@@ -9,11 +9,11 @@ import {
 } from 'naive-ui'
 import { RefreshOutline } from '@vicons/ionicons5'
 
-import { artifactDeletionsApi, artifactRepositoryApi, projectsApi, s3ConfigApi } from '@/api/client'
+import { artifactDeletionsApi, artifactRepositoryApi, projectsApi, s3ConfigApi, storageConsistencyApi } from '@/api/client'
 import { describeSubmitError } from '@/api/errors'
 import type {
   ArtifactRepositoryItem, ArtifactRepositoryResponse, ArtifactRepositoryStatus,
-  DeletionJobResponse, ProjectResponse, S3TestReportDto,
+  ConsistencyReport, DeletionJobResponse, ProjectResponse, S3TestReportDto,
 } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
@@ -38,6 +38,9 @@ const deletionJobs = ref<DeletionJobResponse[]>([])
 const deletionError = ref('')
 const deletionLoading = ref(false)
 const retryingDeletionId = ref<number | null>(null)
+const consistency = ref<ConsistencyReport | null>(null)
+const consistencyLoading = ref(false)
+const consistencyError = ref('')
 
 onMounted(() => { void loadStatus() })
 
@@ -46,6 +49,7 @@ async function loadStatus(): Promise<void> {
   errorMessage.value = ''
   try {
     status.value = await artifactRepositoryApi.status()
+    if (isAdmin.value) void checkConsistency()
     if (status.value.available) {
       await Promise.all([loadItems(), loadDeletionManagement()])
     }
@@ -53,6 +57,18 @@ async function loadStatus(): Promise<void> {
     errorMessage.value = describeSubmitError(err)
     status.value = null
   } finally { loading.value = false }
+}
+
+async function checkConsistency(deepHash = false): Promise<void> {
+  consistencyLoading.value = true
+  consistencyError.value = ''
+  try {
+    consistency.value = await storageConsistencyApi.check(deepHash)
+  } catch (err) {
+    consistencyError.value = describeSubmitError(err)
+  } finally {
+    consistencyLoading.value = false
+  }
 }
 
 function filterQuery(): Parameters<typeof artifactRepositoryApi.list>[0] {
@@ -204,6 +220,22 @@ async function testConnection(): Promise<void> {
       <n-alert v-if="repository && repository.legacy_local_count > 0" type="warning" data-testid="artifact-repo-legacy">{{ t('artifacts.legacyHint', { n: repository.legacy_local_count }) }}</n-alert>
       <n-alert v-if="testError" type="error" style="margin-top: 16px">{{ testError }}</n-alert>
       <ul v-if="report" class="artifact-repo-checks" data-testid="artifact-repo-report"><li v-for="check in report.checks" :key="check.op">{{ check.op }}: {{ check.ok ? t('artifacts.checkOk') : t('artifacts.checkFail') }}<span v-if="check.detail"> — {{ check.detail }}</span></li></ul>
+      <section v-if="isAdmin" class="consistency-panel" data-testid="storage-consistency">
+        <div class="deletion-panel-head">
+          <div><h3>{{ t('artifacts.consistencyTitle') }}</h3><p class="artifact-repo-desc">{{ t('artifacts.consistencyHint') }}</p></div>
+          <div class="consistency-actions">
+            <n-button size="small" :loading="consistencyLoading" @click="checkConsistency(false)">{{ t('artifacts.consistencyCheck') }}</n-button>
+            <n-button size="small" secondary :loading="consistencyLoading" @click="checkConsistency(true)">{{ t('artifacts.consistencyDeepCheck') }}</n-button>
+          </div>
+        </div>
+        <n-alert v-if="consistencyError" type="error">{{ consistencyError }}</n-alert>
+        <template v-if="consistency">
+          <p class="consistency-summary">{{ t('artifacts.consistencySummary', { n: consistency.findings.length }) }}</p>
+          <p>{{ t('artifacts.consistencyBacklog', { uploads: consistency.backlog.pending_uploads, multipart: consistency.backlog.pending_multipart_uploads, deletes: consistency.backlog.pending_deletions, archives: consistency.backlog.pending_archives }) }}</p>
+          <ul v-if="consistency.findings.length" class="consistency-findings"><li v-for="finding in consistency.findings" :key="`${finding.kind}:${finding.key}`"><strong>{{ finding.kind }}</strong> — {{ finding.key }}<span v-if="finding.detail">: {{ finding.detail }}</span></li></ul>
+          <n-alert v-if="consistency.errors.length" type="warning">{{ consistency.errors.join('；') }}</n-alert>
+        </template>
+      </section>
       <section class="artifact-browser" data-testid="artifact-browser">
         <div class="artifact-filters">
           <n-input v-model:value="filters.project" :placeholder="t('artifacts.projectFilter')" data-testid="artifact-filter-project" />
@@ -273,6 +305,10 @@ async function testConnection(): Promise<void> {
 .artifact-repo-backend dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .artifact-repo-checks { margin: 16px 0 0; padding-left: 20px; }
 .artifact-browser { margin-top: 24px; }
+.consistency-panel { margin-top: 24px; padding: 16px; border: 1px solid var(--n-border-color, #e5e7eb); border-radius: 8px; }
+.consistency-actions { display: flex; gap: 8px; }
+.consistency-summary { font-weight: 600; }
+.consistency-findings { max-height: 240px; overflow: auto; padding-left: 20px; }
 .artifact-filters { display: grid; grid-template-columns: repeat(3, minmax(140px, 1fr)) auto; gap: 10px; margin-bottom: 16px; }
 .artifact-item-name { display: flex; align-items: center; gap: 8px; }
 .artifact-sha { font-size: 11px; }

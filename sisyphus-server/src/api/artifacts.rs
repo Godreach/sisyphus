@@ -1673,6 +1673,9 @@ async fn set_response(
                         Err(crate::storage::StorageError::MissingBucket(_)) => {
                             ArtifactStateDto::Missing
                         }
+                        Err(crate::storage::StorageError::MissingObject(_)) => {
+                            ArtifactStateDto::Missing
+                        }
                         Err(_) => ArtifactStateDto::Unavailable,
                     },
                 },

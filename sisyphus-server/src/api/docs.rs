@@ -9,6 +9,7 @@ use super::artifacts;
 use super::audit;
 use super::auth;
 use super::builds;
+use super::consistency;
 use super::deletions;
 use super::error::{ErrorBody, ValidationIssue};
 use super::health;
@@ -96,6 +97,7 @@ use super::users;
         artifacts::download,
         artifact_repository::status,
         artifact_repository::list,
+        consistency::get,
         triggers::list,
         triggers::create,
         triggers::get_one,
@@ -204,6 +206,10 @@ use super::users;
         artifact_repository::ArtifactRepositorySource,
         artifact_repository::ArtifactRepositoryItem,
         artifact_repository::ArtifactRepositoryResponse,
+        consistency::ConsistencyQuery,
+        crate::store::ConsistencyReport,
+        crate::store::ConsistencyBacklog,
+        crate::store::ConsistencyFinding,
         triggers::TriggerKindDto,
         triggers::CronSpecDto,
         triggers::PollSpecInputDto,

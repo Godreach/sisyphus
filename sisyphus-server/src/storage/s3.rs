@@ -25,6 +25,15 @@ pub struct S3Client {
     path_style: bool,
 }
 
+/// S3 bucket 中列举到的对象摘要。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedObject {
+    /// 对象 key。
+    pub key: String,
+    /// 对象大小（服务端返回的 Content-Length）。
+    pub size: u64,
+}
+
 impl std::fmt::Debug for S3Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3Client")
@@ -280,6 +289,46 @@ impl S3Client {
             size += chunk.len() as u64;
         }
         Ok((size, hex_encode(&hasher.finalize())))
+    }
+
+    /// 列举 bucket 中指定前缀的对象。该操作只读，并自动跟随
+    /// ListObjectsV2 分页；不会把对象正文读入内存。
+    pub async fn list_objects(&self, prefix: &str) -> Result<Vec<ListedObject>, StorageError> {
+        let mut token: Option<String> = None;
+        let mut objects = Vec::new();
+        loop {
+            let mut query = vec![("list-type", "2"), ("prefix", prefix)];
+            if let Some(value) = token.as_deref() {
+                query.push(("continuation-token", value));
+            }
+            let resp = self.send("GET", None, &query, &[], b"").await?;
+            if !(200..300).contains(&resp.status) {
+                return Err(map_s3_status(resp.status, &resp.body, "列举对象"));
+            }
+            let body = String::from_utf8_lossy(&resp.body);
+            for block in xml_blocks(&body, "Contents") {
+                let Some(key) = xml_tag(block, "Key") else {
+                    continue;
+                };
+                let size = xml_tag(block, "Size")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(0);
+                objects.push(ListedObject {
+                    key: xml_unescape(&key),
+                    size,
+                });
+            }
+            let truncated = xml_tag(&body, "IsTruncated")
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+            if !truncated {
+                break;
+            }
+            let Some(next) = xml_tag(&body, "NextContinuationToken") else {
+                return Err(StorageError::Protocol("列举对象响应缺少续传 token".into()));
+            };
+            token = Some(xml_unescape(&next));
+        }
+        Ok(objects)
     }
 
     pub(crate) async fn put_object(&self, key: &str, body: &[u8]) -> Result<(), StorageError> {
@@ -800,6 +849,9 @@ fn map_s3_status(status: u16, body: &[u8], op: &str) -> StorageError {
     {
         return StorageError::Credentials(format!("{op} 凭据被拒绝"));
     }
+    if (status == 404 || code == "NotFound") && op == "HEAD" {
+        return StorageError::MissingObject(format!("{op} 未找到对象"));
+    }
     if status == 404 || code == "NoSuchBucket" || code == "NotFound" {
         return StorageError::MissingBucket(format!("{op} 未找到 bucket"));
     }
@@ -817,6 +869,29 @@ fn xml_tag(body: &str, tag: &str) -> Option<String> {
     let rest = &body[i + start.len()..];
     let j = rest.find(&end)?;
     Some(rest[..j].trim().to_string())
+}
+
+fn xml_blocks<'a>(body: &'a str, tag: &str) -> Vec<&'a str> {
+    let start = format!("<{tag}>");
+    let end = format!("</{tag}>");
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(i) = rest.find(&start) {
+        let after = &rest[i + start.len()..];
+        let Some(j) = after.find(&end) else { break };
+        out.push(&after[..j]);
+        rest = &after[j + end.len()..];
+    }
+    out
+}
+
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
 }
 
 fn xml_escape(s: &str) -> String {

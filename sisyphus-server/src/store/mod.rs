@@ -14,6 +14,7 @@ pub mod artifacts;
 pub mod audit;
 pub mod builds;
 pub mod cleanup;
+pub mod consistency;
 pub mod deletions;
 pub mod jobs;
 mod log_archives;
@@ -44,6 +45,7 @@ pub use cleanup::{
     CLEANUP_INTERVAL, CleanupReport, delete_build_data, delete_build_data_with_s3,
     run_daily_cleanup, run_daily_cleanup_with_s3, sweep,
 };
+pub use consistency::{ConsistencyBacklog, ConsistencyFinding, ConsistencyReport};
 pub use log_archives::ArchiveStatus;
 pub(crate) use log_archives::{ArchiveIndex, LocalLogArchiveStore};
 pub use logs::SqliteLogStore;

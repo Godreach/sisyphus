@@ -20,6 +20,8 @@ pub enum StorageError {
     Credentials(String),
     /// bucket 不存在或不可见。
     MissingBucket(String),
+    /// 对象不存在（与 bucket 不存在区分）。
+    MissingObject(String),
     /// S3 协议/响应不符合契约。
     Protocol(String),
     /// 远端 S3 其它错误。
@@ -56,6 +58,7 @@ impl std::fmt::Display for StorageError {
             Self::Config(m)
             | Self::Credentials(m)
             | Self::MissingBucket(m)
+            | Self::MissingObject(m)
             | Self::Protocol(m)
             | Self::Transport(m) => {
                 write!(f, "{m}")
