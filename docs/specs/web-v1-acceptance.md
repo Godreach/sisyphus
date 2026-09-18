@@ -53,7 +53,7 @@
 
 ## AC3：mock handler 与后端实现对账
 
-见专文 [web-v1-mock-backend-reconciliation.md](web-v1-mock-backend-reconciliation.md)。票 #144 收口后的结论：71 个 handler 全部有 server 对应，server 缺失为 0；server 另有 21 个按用途刻意不做浏览器 mock 的端点。`npm run api:check` 与 CI 会对 OpenAPI snapshot、MSW handler 和版本化基线做 method/path 防漂移校验。
+见专文 [web-v1-mock-backend-reconciliation.md](web-v1-mock-backend-reconciliation.md)。票 #144 收口后的结论：71 个 handler 全部有 server 对应，server 缺失为 0；server 另有 25 个按用途刻意不做浏览器 mock 的端点。`npm run api:check` 与 CI 的 vitest 质量门会对 Axum router、OpenAPI snapshot、MSW handler 和版本化基线做 method/path 防漂移校验。
 
 ## AC4：demo「mock 环境当 demo 演示看不出是假的」验收
 
@@ -83,5 +83,5 @@ cd sisyphus-web
 npm run build          # 产物进 dist/（smoke 用）
 npm run smoke          # AC1：15 条主路径真实浏览器断言
 npm run screenshots    # AC2/AC4：48 张截图归档（自起 demo dev 服务器）
-npm run check          # typecheck + vitest + i18n 对账（产品化质量门）
+npm run check          # typecheck + vitest（含 API 清单防漂移）+ i18n 对账
 ```

@@ -1,6 +1,26 @@
-export type ApiEndpoint = `${string} ${string}`
+export type HttpMethod =
+  | 'CONNECT'
+  | 'DELETE'
+  | 'GET'
+  | 'HEAD'
+  | 'OPTIONS'
+  | 'PATCH'
+  | 'POST'
+  | 'PUT'
+  | 'TRACE'
+export type ApiEndpoint = `${HttpMethod} /${string}`
 
-const HTTP_METHODS = new Set(['DELETE', 'GET', 'PATCH', 'POST', 'PUT'])
+const HTTP_METHODS: ReadonlySet<string> = new Set([
+  'CONNECT',
+  'DELETE',
+  'GET',
+  'HEAD',
+  'OPTIONS',
+  'PATCH',
+  'POST',
+  'PUT',
+  'TRACE',
+])
 
 // 这两组是经评审的对账基线：shared 同时存在于 server OpenAPI 与 demo/test
 // MSW；serverOnly 是不由浏览器 mock 消费的 Agent、运维与尚无 UI 的管理面。
@@ -80,6 +100,15 @@ export const sharedApiEndpoints: readonly ApiEndpoint[] = [
   'PUT /api/v1/users/:param/password',
 ]
 
+// utoipa 当前未描述 Prometheus 文本端点与 Agent 日志归档上传三端点；它们
+// 仍是 Axum 真实路由，必须进入总基线并由组合根源码检查守护。
+export const serverRoutesOutsideOpenApi: readonly ApiEndpoint[] = [
+  'GET /metrics',
+  'POST /api/v1/agent/log-archives/:param/:param',
+  'POST /api/v1/agent/log-archives/:param/:param/complete',
+  'POST /api/v1/agent/log-archives/:param/:param/upload-url',
+]
+
 export const serverOnlyApiEndpoints: readonly ApiEndpoint[] = [
   'GET /api/v1/agent/artifacts/:param/downloads/:param/:param',
   'GET /api/v1/agent/artifacts/:param/sets/:param/file',
@@ -102,6 +131,7 @@ export const serverOnlyApiEndpoints: readonly ApiEndpoint[] = [
   'POST /api/v1/auth/register',
   'POST /api/v1/projects/:param/pipelines/:param/triggers',
   'PUT /api/v1/config/smtp',
+  ...serverRoutesOutsideOpenApi,
 ]
 
 export interface EndpointDiff {
@@ -117,7 +147,63 @@ function normalizeEndpoint(method: string, path: string): ApiEndpoint {
   const normalizedPath = path
     .replace(/\{[^/]+\}/g, ':param')
     .replace(/:[^/]+/g, ':param')
-  return `${normalizedMethod} ${normalizedPath}`
+  return `${normalizedMethod as HttpMethod} ${normalizedPath as `/${string}`}`
+}
+
+/**
+ * 从 Axum 组合根的 `.route("path", get(...).post(...))` 声明提取真实路由。
+ * 根路由目前只有 /healthz 与 /metrics；其余声明都被 nest 到 /api/v1。
+ */
+export function collectAxumRouterEndpoints(source: string): ApiEndpoint[] {
+  const endpoints: ApiEndpoint[] = []
+  let cursor = 0
+
+  while (cursor < source.length) {
+    const routeStart = source.indexOf('.route(', cursor)
+    if (routeStart === -1) break
+    const open = source.indexOf('(', routeStart)
+    let close = -1
+    let depth = 0
+    let quote = ''
+    let escaped = false
+    for (let index = open; index < source.length; index += 1) {
+      const char = source[index]!
+      if (quote !== '') {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === quote) quote = ''
+        continue
+      }
+      if (char === '"' || char === "'") quote = char
+      else if (char === '(') depth += 1
+      else if (char === ')') {
+        depth -= 1
+        if (depth === 0) {
+          close = index
+          break
+        }
+      }
+    }
+    if (close === -1) throw new Error('Axum router 中存在未闭合的 .route(...)')
+
+    const body = source.slice(open + 1, close)
+    const pathMatch = /^\s*"([^"]+)"\s*,/.exec(body)
+    cursor = close + 1
+    if (pathMatch == null) continue
+    const declaredPath = pathMatch[1]!
+    const methodsExpression = body.slice(pathMatch[0].length)
+    const path = declaredPath === '/healthz' || declaredPath === '/metrics'
+      ? declaredPath
+      : `/api/v1${declaredPath}`
+    for (const methodMatch of methodsExpression.matchAll(
+      /\b(connect|delete|get|head|options|patch|post|put|trace)\s*\(/g,
+    )) {
+      const method = methodMatch[1]
+      if (method != null) endpoints.push(normalizeEndpoint(method, path))
+    }
+  }
+
+  return [...new Set(endpoints)].sort()
 }
 
 export function collectOpenApiEndpoints(document: unknown): ApiEndpoint[] {

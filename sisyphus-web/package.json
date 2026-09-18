@@ -19,7 +19,7 @@
     "i18n:check": "node scripts/i18n-check.mjs",
     "smoke": "node scripts/smoke.mjs",
     "screenshots": "node scripts/screenshots.mjs",
-    "check": "npm run typecheck && npm run api:check && npm run test && npm run i18n:check"
+    "check": "npm run typecheck && npm run test && npm run i18n:check"
   },
   "dependencies": {
     "@vicons/ionicons5": "^0.13.0",

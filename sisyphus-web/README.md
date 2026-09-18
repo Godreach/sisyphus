@@ -27,8 +27,10 @@ rust-embed 内嵌该目录产物对外提供静态服务与 SPA fallback（relea
   fixture：真实规模项目/流水线/构建/Agent + 空态/错误态钩子）、`engine.ts`
   （动态构建生命周期：触发/重跑排队 → 运行 → 步骤/输出推送 → 终态）、
   `handlers.ts`（核心链路 REST handlers，dev worker 与 vitest node 共用）、
-  `eventSource.ts`（SSE 日志流替身——MSW 拦不到 EventSource）。后端每就绪
-  一个端点即删除对应 handler，mock 层随后端进度收敛为零。
+  `eventSource.ts`（SSE 日志流替身——MSW 拦不到 EventSource）。真实后端就绪
+  后，handler 仍为无后端 demo 与隔离组件测试保留；`npm run dev` 默认关闭
+  MSW 并走真实 server，`npm run demo` 才显式打开。两边 method/path 由
+  `apiInventory.ts` 与 `npm run api:check` 对账，demo 退役后再收敛 handler。
 
 ## 依赖纪律
 
@@ -48,8 +50,10 @@ rust-embed 内嵌该目录产物对外提供静态服务与 SPA fallback（relea
   但生产无 `setupWorker` 注册，纯惰性文件无行为。
 - `npm run build`：vue-tsc 类型 + vite 构建，产物进 `dist/`。
 - `npm run preview`：预览构建产物。
+- `npm run api:check`：对账 Axum router、OpenAPI snapshot 与 MSW handler，
+  逐条报告新增/缺失的 method/path；也会由全量 vitest 自动执行。
 - `npm run typecheck` / `npm test` / `npm run i18n:check`：CI 三件套
-  （vue-tsc 类型 + vitest 行为测试 + i18n 对账）。
+  （vue-tsc 类型 + vitest 行为/接口清单测试 + i18n 对账）。
 - `npm run smoke`：headless 冒烟（票 B4-T9）——`vite preview` 伺服 `dist/`，
   playwright 在真实浏览器里走通 12 页主路径 + i18n 切换 + 登录/引导公开页。
   后端经 playwright `page.route` 拦截 `/api/v1/**` 注入 mock（不拉真后端）；
@@ -63,4 +67,5 @@ Vitest + Vue Test Utils，只测外部行为（用户可见状态、DOM 事件�
 响应形态断言），不测组件内部结构。组件挂载测试的驱动缝按 ADR-0024 收敛：
 经真实 http client 打 MSW node handlers（`src/mocks/node.ts`，fixture 即
 测试数据），新 spec 优先走该缝，逐票淘汰手写 fetch mock。
+质量门工具的诊断文本是维护者直接消费的命令接口，可以断言具体差异输出。
 headless 冒烟补 jsdom 测不到的构建/路由/历史 API 面（真实浏览器驱动）。
