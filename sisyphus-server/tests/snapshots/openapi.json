@@ -4887,6 +4887,89 @@
         }
       }
     },
+    "/api/v1/projects/{name}/pipelines/{pipeline}/stats": {
+      "get": {
+        "tags": [
+          "pipelines"
+        ],
+        "summary": "读取单条流水线统计（viewer 档）：统计窗口与构建列表同源，按构建号\n倒序取最近 N 条；流水线不存在时返回 404，不把空列表误当作存在。",
+        "operationId": "stats",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "pipeline 名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "window",
+            "in": "query",
+            "description": "最近构建数窗口（缺省 20，最终钳制到 1..=100）。",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "流水线统计",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineStatsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "项目权限不足",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目或 pipeline 不存在（或项目不可见）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{name}/pipelines/{pipeline}/triggers": {
       "get": {
         "tags": [
@@ -8221,6 +8304,46 @@
           }
         }
       },
+      "LatestBuildResponse": {
+        "type": "object",
+        "description": "最近一条构建概要（任意状态）。",
+        "required": [
+          "number",
+          "status",
+          "trigger"
+        ],
+        "properties": {
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "终态时刻。"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "per-pipeline 构建号。"
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "开始时刻（未运行为空）。"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BuildStatusDto",
+            "description": "构建状态。"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/TriggerSourceDto",
+            "description": "触发源。"
+          }
+        }
+      },
       "ListProjectsPermission": {
         "type": "string",
         "description": "项目清单权限过滤值。",
@@ -8590,6 +8713,65 @@
             "type": "integer",
             "format": "int64",
             "description": "清单总数（等于 `items.length`）。"
+          }
+        }
+      },
+      "PipelineStatsResponse": {
+        "type": "object",
+        "description": "流水线统计响应（窗口按构建号倒序；成功率分母为窗口内终态）。",
+        "required": [
+          "window",
+          "total_builds",
+          "terminal_count",
+          "succeeded_count"
+        ],
+        "properties": {
+          "avg_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "平均耗时（毫秒；无可测样本时为空）。"
+          },
+          "latest_build": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LatestBuildResponse",
+                "description": "最近一条构建（从未构建时为空）。"
+              }
+            ]
+          },
+          "succeeded_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "窗口内 succeeded 构建数。"
+          },
+          "success_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "成功率（百分比，一位小数；无终态时为空）。"
+          },
+          "terminal_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "窗口内终态构建数。"
+          },
+          "total_builds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "该流水线的全部构建数。"
+          },
+          "window": {
+            "type": "integer",
+            "format": "int64",
+            "description": "服务端实际采用的窗口大小。"
           }
         }
       },
@@ -9699,7 +9881,7 @@
     },
     {
       "name": "pipelines",
-      "description": "Pipeline 定义读写（model 校验 + revision 语义）"
+      "description": "Pipeline 定义读写、跨项目清单与构建统计"
     },
     {
       "name": "builds",

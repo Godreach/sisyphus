@@ -801,6 +801,7 @@
     "colProgress": "Progress",
     "colRate": "Success rate",
     "lastSuccessDuration": "Last duration",
+    "avgDuration": "Average duration",
     "colTrigger": "Trigger",
     "currentDuration": "Build duration",
     "currentStep": "Current step",

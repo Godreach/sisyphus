@@ -11,8 +11,8 @@
 //   avg_duration_ms 为 null → 成功率显示「—」。
 // - 进度（P3 裁定）：最近构建为 running 的行走既有构建详情端点取阶段/任务
 //   态，进度 = 当前 attempt 已落定任务数 / 任务总数（双层进度条）；排队未
-//   开始与非运行行显示「—」。卡片统计中的耗时取最近一次成功构建详情，
-//   数据缺失时显示「—」。
+//   开始与非运行行显示「—」。卡片/列表统计中的耗时直接消费 stats.avg_duration_ms，
+//   窗口内无可测终态样本时显示「—」。
 // - 收藏（票 #104 W8 裁定，入口随本票落地）：`GET/PUT/DELETE
 //   /user/pipeline-favorites`；星标切换，失败 toast 行内报错。
 // - 轻轮询（5s）：仅对最近构建为排队/运行中的行重取统计与进度，mock 动态
@@ -64,18 +64,14 @@ interface PipelineRow {
   currentDurationMs: number | null
   /** 当前任务（运行中/失败卡片展示）。 */
   currentStep: string | null
-  /** 最近一次成功构建耗时（卡片/列表统计）。 */
-  lastSuccessfulDurationMs: number | null
+  /** 统计窗口内终态构建平均耗时（服务端聚合；无样本为 null）。 */
+  avgDurationMs: number | null
 }
 
 interface LiveBuildInfo {
   progress: number | null
   currentDurationMs: number | null
   currentStep: string | null
-}
-
-interface LastSuccessfulBuildInfo {
-  lastSuccessfulDurationMs: number | null
 }
 
 const rows = ref<PipelineRow[]>([])
@@ -180,7 +176,7 @@ async function loadRow(item: { project: string; pipeline: string }): Promise<Pip
       total: stats.total_builds,
       rate: stats.success_rate != null ? `${stats.success_rate}%` : null,
       ...(await liveBuildInfoFor(item, latest)),
-      ...(await lastSuccessfulBuildInfoFor(item, latest)),
+      avgDurationMs: stats.avg_duration_ms,
     }
   } catch {
     return {
@@ -192,29 +188,8 @@ async function loadRow(item: { project: string; pipeline: string }): Promise<Pip
       progress: null,
       currentDurationMs: null,
       currentStep: null,
-      lastSuccessfulDurationMs: null,
+      avgDurationMs: null,
     }
-  }
-}
-
-/** 读取最近一次成功构建耗时；当前构建非成功时先从构建列表定位成功构建。 */
-async function lastSuccessfulBuildInfoFor(
-  item: { project: string; pipeline: string },
-  latest: LatestBuildRef | null,
-): Promise<LastSuccessfulBuildInfo> {
-  try {
-    const number =
-      latest?.status === 'succeeded'
-        ? latest.number
-        : (await buildsApi.list(item.project, item.pipeline, { page: 1, limit: 1, status: 'succeeded' })).items[0]
-            ?.number
-    if (number == null) return { lastSuccessfulDurationMs: null }
-    const detail = await buildsApi.detail(item.project, item.pipeline, number)
-    return {
-      lastSuccessfulDurationMs: detail.status === 'succeeded' ? detail.elapsed_ms : null,
-    }
-  } catch {
-    return { lastSuccessfulDurationMs: null }
   }
 }
 
@@ -732,7 +707,7 @@ function syncPipelineScrollbar(event: Event): void {
             <span class="pc-status">{{ t('plines.colStatus') }}</span>
             <span class="pc-progress">{{ t('plines.colProgress') }}</span>
             <span class="pc-rate">{{ t('plines.colRate') }}</span>
-              <span class="pc-avg">{{ t('plines.lastSuccessDuration') }}</span>
+              <span class="pc-avg">{{ t('plines.avgDuration') }}</span>
             <span class="pc-trigger">{{ t('plines.colTrigger') }}</span>
             <span class="pc-action" />
           </div>
@@ -769,7 +744,7 @@ function syncPipelineScrollbar(event: Event): void {
                 <span v-else class="pct-none">—</span>
               </div>
               <span class="pc-rate">{{ row.rate ?? '—' }}</span>
-              <span class="pc-avg">{{ row.lastSuccessfulDurationMs != null ? formatDuration(row.lastSuccessfulDurationMs) : '—' }}</span>
+              <span class="pc-avg">{{ row.avgDurationMs != null ? formatDuration(row.avgDurationMs) : '—' }}</span>
               <span class="pc-trigger">{{ triggerLabel(row) }}</span>
               <div class="pc-action">
                 <button
@@ -863,8 +838,8 @@ function syncPipelineScrollbar(event: Event): void {
                 <span class="v">{{ row.rate ?? '—' }}</span>
               </div>
               <div class="p-stat">
-                <span class="l">{{ t('plines.lastSuccessDuration') }}</span>
-                <span class="v">{{ row.lastSuccessfulDurationMs != null ? formatDuration(row.lastSuccessfulDurationMs) : '—' }}</span>
+                <span class="l">{{ t('plines.avgDuration') }}</span>
+                <span class="v">{{ row.avgDurationMs != null ? formatDuration(row.avgDurationMs) : '—' }}</span>
               </div>
               <div class="p-stat">
                 <span class="l">{{ t('plines.colTrigger') }}</span>

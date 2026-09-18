@@ -422,6 +422,10 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
             get(pipelines::get_definition).put(pipelines::put_definition),
         )
         .route(
+            "/projects/{name}/pipelines/{pipeline}/stats",
+            get(pipelines::stats),
+        )
+        .route(
             "/projects/{name}/pipelines/{pipeline}/builds",
             get(builds::list).post(builds::trigger),
         )

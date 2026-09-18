@@ -801,6 +801,7 @@
     "colProgress": "进度",
     "colRate": "成功率",
     "lastSuccessDuration": "上次耗时",
+    "avgDuration": "平均耗时",
     "colTrigger": "触发方式",
     "currentDuration": "构建耗时",
     "currentStep": "当前步骤",
