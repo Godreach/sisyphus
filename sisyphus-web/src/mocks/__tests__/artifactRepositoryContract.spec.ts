@@ -54,4 +54,36 @@ describe('制品库 / S3 配置 mock 契约（票 #122）', () => {
     expect(body.message).toContain('未配置')
     expect(JSON.stringify(body)).not.toContain('secret')
   })
+
+  it('项目管理员可按项目读取完整删除队列，空项目返回空态', async () => {
+    const managed = await json('/projects/web-app/artifact-deletions', 'GET')
+    expect(managed.status).toBe(200)
+    const body = (await managed.json()) as { items: Array<{ state: string }> }
+    expect(body.items).toHaveLength(4)
+    expect(body.items.map((item) => item.state)).toEqual(expect.arrayContaining([
+      'queued', 'running', 'failed', 'completed',
+    ]))
+
+    const empty = await json('/projects/empty-repo/artifact-deletions', 'GET')
+    expect(empty.status).toBe(200)
+    expect(await empty.json()).toEqual({ items: [] })
+  })
+
+  it('删除队列遵守项目权限，并对未知项目/任务返回 server 同形错误', async () => {
+    expect((await json('/projects/api-gateway/artifact-deletions', 'GET', 'bob')).status).toBe(403)
+    expect((await json('/projects/web-app/artifact-deletions', 'GET', 'bob')).status).toBe(403)
+    expect((await json('/projects/unknown/artifact-deletions', 'GET')).status).toBe(404)
+    expect((await json('/projects/web-app/artifact-deletions/103/retry', 'POST', 'bob')).status).toBe(403)
+    expect((await json('/projects/web-app/artifact-deletions/999/retry', 'POST')).status).toBe(404)
+  })
+
+  it('失败任务重试后返回 queued，并对重复重试保持幂等', async () => {
+    const first = await json('/projects/web-app/artifact-deletions/103/retry', 'POST')
+    expect(first.status).toBe(202)
+    expect(await first.json()).toMatchObject({ id: 103, state: 'queued', attempts: 2, last_error: null })
+
+    const second = await json('/projects/web-app/artifact-deletions/103/retry', 'POST')
+    expect(second.status).toBe(202)
+    expect(await second.json()).toMatchObject({ id: 103, state: 'queued', attempts: 2, last_error: null })
+  })
 })

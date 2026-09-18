@@ -228,6 +228,52 @@ export const PROJECTS: ProjectResponse[] = [
   project(14, 'deletion-failure-demo', '', 'none'),
 ]
 
+// 产物异步删除队列（后端票 #128 的 demo fixture，#140）。web-app 刻意覆盖
+// 四种状态，empty-repo 刻意保持空队列，便于页面演示状态矩阵与空态；任务
+// 只通过项目管理员端点暴露，不能跨项目读取或重试。
+const ARTIFACT_DELETION_JOBS: DeletionJobResponse[] = [
+  {
+    id: 101, project_id: 1, project_name: 'web-app', scope: 'build', state: 'queued',
+    pipeline_name: 'release', build_number: 19, set_id: null, attempts: 0,
+    last_error: null, created_at: NOW - 4_000, updated_at: NOW - 4_000,
+  },
+  {
+    id: 102, project_id: 1, project_name: 'web-app', scope: 'set', state: 'running',
+    pipeline_name: 'release', build_number: 18, set_id: 41, attempts: 1,
+    last_error: null, created_at: NOW - 3_000, updated_at: NOW - 2_000,
+  },
+  {
+    id: 103, project_id: 1, project_name: 'web-app', scope: 'build', state: 'failed',
+    pipeline_name: 'release', build_number: 17, set_id: null, attempts: 2,
+    last_error: 'S3 delete timeout', created_at: NOW - 2_000, updated_at: NOW - 1_000,
+  },
+  {
+    id: 104, project_id: 1, project_name: 'web-app', scope: 'project', state: 'completed',
+    pipeline_name: null, build_number: null, set_id: null, attempts: 1,
+    last_error: null, created_at: NOW - 1_000, updated_at: NOW - 500,
+  },
+]
+
+/** 项目管理员可见的删除任务清单；返回副本避免页面直接改 fixture。 */
+export function artifactDeletionJobsOf(project: string): DeletionJobResponse[] {
+  return ARTIFACT_DELETION_JOBS
+    .filter((job) => job.project_name === project)
+    .sort((a, b) => b.created_at - a.created_at || b.id - a.id)
+    .map((job) => ({ ...job }))
+}
+
+/** 失败任务显式重试；非失败状态按后端幂等语义原样返回。 */
+export function retryArtifactDeletion(project: string, id: number): DeletionJobResponse | null {
+  const job = ARTIFACT_DELETION_JOBS.find((item) => item.project_name === project && item.id === id)
+  if (job == null) return null
+  if (job.state === 'failed') {
+    job.state = 'queued'
+    job.last_error = null
+    job.updated_at = Date.now()
+  }
+  return { ...job }
+}
+
 // ---------------------------------------------------------------------------
 // 项目异步删除（票 #139）：冻结即从 PROJECTS 可见面摘除，任务快照独立保留。
 // ---------------------------------------------------------------------------

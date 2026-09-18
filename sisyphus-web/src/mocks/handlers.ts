@@ -49,6 +49,8 @@ export const SESSION_COOKIE = 'sisyphus_mock_session'
 export interface MockHandlerOptions {
   /** 浏览器 worker：校验 mock 会话 cookie（未登录 401）；vitest node：关闭。 */
   authEnforced: boolean
+  /** 浏览器 demo 提供脱敏的可用对象存储 fixture，让制品库管理面完整可体验。 */
+  demo?: boolean
 }
 
 function jsonError(status: number, code: string, message: string) {
@@ -79,6 +81,11 @@ function scmValidationError(errors: { path: string; message: string }[]) {
  *  无成员角色（或项目不存在）→ 404 同形（不可借 403/404 之辨探测存在性）；
  *  有角色但档位不足 admin → 403；admin → null 放行。 */
 function projectAdminGuard(user: string, name: string): ReturnType<typeof jsonError> | null {
+  // 全局 admin 隐含全部真实项目的 admin 档，但不能让该捷径把未知项目
+  // 误判为可见；后端 RequireAdmin 对未知/不可见项目统一返回 404。
+  if (!db.PROJECTS.some((project) => project.name === name)) {
+    return jsonError(404, 'NOT_FOUND', '项目不存在')
+  }
   const role = db.projectRoleOf(user, name)
   if (role == null) return jsonError(404, 'NOT_FOUND', '项目不存在')
   if (role !== 'admin') return jsonError(403, 'FORBIDDEN', '项目权限不足')
@@ -916,10 +923,59 @@ export function createHandlers(options: MockHandlerOptions) {
       },
     ),
 
+    // ----- 项目产物异步删除队列（后端 api/deletions.rs，票 #128/#140）-----
+    artifactDeletions: http.get(
+      '/api/v1/projects/:name/artifact-deletions',
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const name = String(params.name)
+        await delay(120)
+        if (isErrorFixture(name)) {
+          return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+        }
+        const user = sessionUser(request) ?? 'admin'
+        const deniedAdmin = projectAdminGuard(user, name)
+        if (deniedAdmin != null) return deniedAdmin
+        return HttpResponse.json({ items: db.artifactDeletionJobsOf(name) })
+      },
+    ),
+
+    artifactDeletionRetry: http.post(
+      '/api/v1/projects/:name/artifact-deletions/:id/retry',
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const name = String(params.name)
+        await delay(160)
+        if (isErrorFixture(name)) {
+          return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+        }
+        const user = sessionUser(request) ?? 'admin'
+        const deniedAdmin = projectAdminGuard(user, name)
+        if (deniedAdmin != null) return deniedAdmin
+        const job = db.retryArtifactDeletion(name, Number(params.id))
+        if (job == null) return jsonError(404, 'NOT_FOUND', '删除任务不存在')
+        return HttpResponse.json(job, { status: 202 })
+      },
+    ),
+
     // ----- 一级制品库 / S3 配置（票 #122，ADR-0026）-----
     artifactRepository: http.get('/api/v1/artifact-repository', ({ request }) => {
       const denied = guard(options, request)
       if (denied != null) return denied
+      if (options.demo) {
+        return HttpResponse.json({
+          available: true,
+          backend: {
+            endpoint: 'https://s3.demo.invalid',
+            region: 'demo',
+            bucket: 'sisyphus-demo',
+            prefix: 'artifacts',
+            path_style: true,
+          },
+        })
+      }
       return HttpResponse.json({ available: false, reason: 's3_unconfigured' })
     }),
     artifactRepositoryItems: http.get('/api/v1/artifact-repository/artifacts', ({ request }) => {

@@ -9,6 +9,6 @@ import { installMockEventSource } from './eventSource'
 
 export async function startMockWorker(): Promise<void> {
   installMockEventSource()
-  const worker = setupWorker(...createHandlers({ authEnforced: true }))
+  const worker = setupWorker(...createHandlers({ authEnforced: true, demo: true }))
   await worker.start({ onUnhandledRequest: 'bypass', quiet: true })
 }
