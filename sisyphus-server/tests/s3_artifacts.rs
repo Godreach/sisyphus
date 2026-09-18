@@ -582,6 +582,86 @@ async fn log_archive_grant_only_signs_a_temporary_log_object() {
 }
 
 #[tokio::test]
+async fn log_backlog_keeps_pending_visible_and_pages_historical_loss() {
+    let h = harness().await;
+    sqlx::query(
+        "WITH RECURSIVE n(x) AS (SELECT 2 UNION ALL SELECT x+1 FROM n WHERE x<502)
+        INSERT INTO log_archives (job_id, attempt, state, path, index_path, created_at, lost_reason)
+        SELECT ?, x, 'lost', '', '', 0, 'retention_expired' FROM n",
+    )
+    .bind(h.job_a)
+    .execute(&h.app.pool)
+    .await
+    .unwrap();
+    let (_, index) = two_frame_log_archive(h.job_a);
+    let grant = format!("/api/v1/agent/log-archives/{}/1/upload-url", h.job_a);
+    assert_eq!(
+        agent_post_json(&h, &grant, &serde_json::json!({"index":index}).to_string())
+            .await
+            .status(),
+        200
+    );
+    let first =
+        common::req_with_cookie(&h.app, "GET", "/api/v1/log-archives", None, Some(&h.cookie)).await;
+    let first = common::body_json(first).await;
+    assert_eq!(first[0]["state"], "pending", "真正积压不得被到期墓碑遮蔽");
+    assert_eq!(first.as_array().unwrap().len(), 500);
+    let next = common::req_with_cookie(
+        &h.app,
+        "GET",
+        "/api/v1/log-archives?offset=500",
+        None,
+        Some(&h.cookie),
+    )
+    .await;
+    let next = common::body_json(next).await;
+    assert_eq!(
+        next.as_array().unwrap().len(),
+        2,
+        "下一页可以读取其余历史记录"
+    );
+}
+
+#[tokio::test]
+async fn local_log_grant_preserves_last_information_when_body_never_arrives() {
+    let h = harness_with_limits_and_backend(
+        sisyphus_server::api::ArtifactTransferLimits::default(),
+        Some(sisyphus_server::config::LogArchiveBackend::Local),
+    )
+    .await;
+    JobRepo::new(h.app.pool.clone())
+        .transition(
+            h.job_a,
+            sisyphus_server::store::jobs::JobStatus::Succeeded,
+            Some(0),
+            None,
+            1700000000000,
+        )
+        .await
+        .unwrap();
+    let (bytes, index) = two_frame_log_archive(h.job_a);
+    let grant = format!("/api/v1/agent/log-archives/{}/1/upload-url", h.job_a);
+    assert_eq!(
+        agent_post_json(&h, &grant, &serde_json::json!({"index":index}).to_string())
+            .await
+            .status(),
+        200
+    );
+    let lost = common::req_with_cookie(
+        &h.app,
+        "POST",
+        &format!("/api/v1/log-archives/{}/1/lost", h.job_a),
+        Some(r#"{"reason":"Agent permanently missing before upload"}"#.into()),
+        Some(&h.cookie),
+    )
+    .await;
+    assert_eq!(lost.status(), 200);
+    let lost = common::body_json(lost).await;
+    assert_eq!(lost["last_seq"], 1);
+    assert_eq!(lost["size"], bytes.len());
+}
+
+#[tokio::test]
 async fn administrator_marks_pending_logs_lost_with_audit_and_no_execution_change() {
     let h = harness().await;
     JobRepo::new(h.app.pool.clone())

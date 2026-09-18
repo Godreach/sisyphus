@@ -431,6 +431,7 @@
     "lastReport": "最后可用报告",
     "error": "归档错误",
     "refresh": "刷新归档状态",
+    "loadMore": "加载更多归档记录",
     "reason": "永久失联或强制删除的原因（必填）",
     "markLost": "标记永久丢失并清理",
     "confirmLost": "此操作不可撤销并写入审计；Agent 重连后将清理已确认丢失的本地日志。"

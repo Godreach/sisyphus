@@ -19,6 +19,8 @@ use crate::store::ArchiveStatus;
 pub struct BacklogQuery {
     /// 构建机名。
     pub agent: Option<String>,
+    /// 每页最多 500 条，从指定偏移读取；待归档优先。
+    pub offset: Option<u32>,
 }
 
 /// 不可恢复或强制清理必须填写原因。
@@ -37,7 +39,10 @@ pub async fn backlog(
     Query(query): Query<BacklogQuery>,
 ) -> Result<Json<Vec<ArchiveStatus>>, ApiError> {
     Ok(Json(
-        state.log_archives.backlog(query.agent.as_deref()).await?,
+        state
+            .log_archives
+            .backlog(query.agent.as_deref(), query.offset.unwrap_or(0))
+            .await?,
     ))
 }
 

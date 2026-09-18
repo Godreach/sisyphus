@@ -225,6 +225,11 @@ pub(crate) async fn agent_archive_grant(
         .record_execution_end(job_id, attempt, request.index.execution_finished_at_ms)
         .await?;
     if state.log_archive_backend == LogArchiveBackend::Local {
+        state
+            .log_archives
+            .record_local_summary(job_id, attempt, &request.index)
+            .await
+            .map_err(archive_store_error)?;
         return Ok(Json(ArchiveGrantResponse {
             backend: "local",
             state: "pending",

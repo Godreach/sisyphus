@@ -31,6 +31,7 @@ import {
   type BuildLogModel,
 } from '@/model/buildLog'
 import { formatBytes, formatDuration } from '@/utils/format'
+import { archiveStateLabelKey } from '@/utils/logArchive'
 import { logArchivesApi } from '@/api/logArchives'
 import type { ArchiveStatus } from '@/api/types'
 
@@ -188,7 +189,7 @@ onBeforeUnmount(() => {
       {{ t('logArchive.pending') }}
     </div>
     <div v-if="archive?.state === 'lost'" class="state-note" role="alert">
-      {{ t(archive.lost_reason === 'retention_expired' ? 'logArchive.expired' : 'logArchive.lost') }}
+      {{ t(archiveStateLabelKey(archive)) }}
       — {{ archive.lost_reason }}
       <p>{{ t('logArchive.lastInfo', { seq: archive.last_seq ?? '—', size: formatBytes(archive.size) }) }}</p>
     </div>

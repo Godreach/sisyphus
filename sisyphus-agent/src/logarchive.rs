@@ -390,7 +390,13 @@ pub(crate) fn spawn_retry_worker(
                         continue;
                     }
                 };
-                match io.upload(&job_id, attempt, &archive).await {
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(300),
+                    io.upload(&job_id, attempt, &archive),
+                )
+                .await
+                .unwrap_or_else(|_| Err("日志归档后台上传超时".into()));
+                match result {
                     Ok(()) => {
                         logbuf.clear_deferred(&job_id, attempt);
                         tracing::info!(job = %job_id, attempt, "待归档日志后台重试成功");
@@ -410,6 +416,46 @@ mod tests {
     use super::*;
 
     struct ConfirmedArchive;
+
+    struct HangingFirstArchive;
+
+    #[async_trait::async_trait]
+    impl LogArchiveIo for HangingFirstArchive {
+        async fn upload(&self, job: &str, _: i32, _: &SealedArchive) -> Result<(), String> {
+            if job == "a" {
+                std::future::pending().await
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hanging_archive_does_not_block_other_pending_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let buffer =
+            crate::logbuf::LogBuffer::new(dir.path().to_path_buf(), std::time::Duration::ZERO);
+        buffer.mark_archive_pending("a", 1).unwrap();
+        buffer.mark_archive_pending("b", 1).unwrap();
+        let worker = spawn_retry_worker(
+            buffer.clone(),
+            Arc::new(RwLock::new(vec![])),
+            Arc::new(HangingFirstArchive),
+        );
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(305), async {
+            while buffer.pending_archives().iter().any(|(job, _)| job == "b") {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        worker.abort();
+        assert!(
+            completed.is_ok(),
+            "一个挂起的归档不得阻塞其它 attempt 的恢复"
+        );
+        assert!(buffer.pending_archives().iter().any(|(job, _)| job == "a"));
+        assert!(buffer.usage().unwrap().last_error.is_some());
+    }
 
     #[async_trait::async_trait]
     impl LogArchiveIo for ConfirmedArchive {

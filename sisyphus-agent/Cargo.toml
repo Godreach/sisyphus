@@ -63,6 +63,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
 # 产物 HTTP 缝测试（票 #74）：极简 axum stub server 驱动真 reqwest client
 # （chunked 上传体/流式下载响应的语义由真 HTTP 栈保证，手写 TCP stub 不可靠）。

@@ -384,7 +384,7 @@ async fn purge_build(
     }
 
     // 归档正文与索引不在 artifacts/<build> 下，先按 job 归属取出并删除；
-    // DB 行随后与旧 logs 一起事务删除，避免 ready/pending 文件永久泄漏。
+    // 删除成功后清除索引与临时定位，保留 lost 墓碑阻止迟到补传复活。
     let archives = sqlx::query_as::<_, (i64, i32, String, String, String, Option<String>)>(
         "SELECT a.job_id, a.attempt, a.path, a.index_path, a.backend, a.temp_path FROM log_archives a
          JOIN jobs j ON j.id = a.job_id WHERE j.build_id = ? AND ?",
@@ -439,15 +439,6 @@ async fn purge_build(
 
     // 日志 chunk + 产物元数据行：一事务删（外键关联均以 build_id 定位）。
     let mut tx = pool.begin().await?;
-    // 到达保留边界仍未补齐的 pending 归档先显式记为 lost，再随该构建的
-    // 到期数据删除；这条迁移路径保留“永久丢失”审计语义而不影响任务终态。
-    sqlx::query(
-        "UPDATE log_archives SET state = 'lost', lost_reason=COALESCE(lost_reason, 'build_data_cleaned'), lost_at=COALESCE(lost_at, ?)
-         WHERE job_id IN (SELECT id FROM jobs WHERE build_id = ?) AND ?",
-    )
-    .bind(super::now_ms()).bind(build_id).bind(include_archives)
-    .execute(&mut *tx)
-    .await?;
     let logs = sqlx::query("DELETE FROM logs WHERE build_id = ?")
         .bind(build_id)
         .execute(&mut *tx)

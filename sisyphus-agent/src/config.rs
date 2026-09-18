@@ -104,6 +104,13 @@ impl Config {
                 cache_root,
             });
         }
+        let logbuf_root = data_dir.join(LOGBUF_DIR);
+        if overlaps(&workspace_root, &logbuf_root) {
+            return Err(ConfigError::WorkspaceRootOverlapsLogBuffer {
+                workspace_root,
+                logbuf_root,
+            });
+        }
 
         Ok(Config {
             server_url,
@@ -214,6 +221,13 @@ pub enum ConfigError {
         /// 缓存根。
         cache_root: PathBuf,
     },
+    /// 工作区清理不得触及持久日志缓冲（ADR-0027）。
+    WorkspaceRootOverlapsLogBuffer {
+        /// 工作区根。
+        workspace_root: PathBuf,
+        /// 持久日志缓冲根。
+        logbuf_root: PathBuf,
+    },
     /// 数据目录或配置文件 IO 失败。
     Io(std::io::Error),
 }
@@ -242,6 +256,15 @@ impl std::fmt::Display for ConfigError {
                 cache_root.display()
             ),
             ConfigError::Io(e) => write!(f, "数据目录 IO 失败：{e}"),
+            ConfigError::WorkspaceRootOverlapsLogBuffer {
+                workspace_root,
+                logbuf_root,
+            } => write!(
+                f,
+                "工作区根 {} 与日志缓冲根 {} 重叠或互相包含（ADR-0027：工作区清理不得触及日志缓冲）",
+                workspace_root.display(),
+                logbuf_root.display()
+            ),
         }
     }
 }
@@ -457,6 +480,29 @@ mod tests {
         };
         let cfg = Config::load(&cli_override, &env).expect("CLI 胜 env");
         assert_eq!(cfg.workspace_root, dir.path().join("cli-ws"));
+    }
+
+    #[test]
+    fn workspace_root_cannot_overlap_persistent_log_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = Overrides {
+            server_url: Some("http://127.0.0.1:50051".into()),
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Overrides::default()
+        };
+        for workspace_root in [
+            dir.path().join(LOGBUF_DIR),
+            dir.path().join(LOGBUF_DIR).join("archives"),
+        ] {
+            let env = Overrides {
+                workspace_root: Some(workspace_root),
+                ..Overrides::default()
+            };
+            assert!(
+                Config::load(&base, &env).is_err(),
+                "工作区清理不得触及持久日志缓冲"
+            );
+        }
     }
 
     #[test]

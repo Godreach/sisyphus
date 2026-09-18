@@ -44,6 +44,7 @@ import {
   agentStateTagType,
 } from '@/utils/agentState'
 import { formatBytes, formatDateTime } from '@/utils/format'
+import { archiveStateLabelKey } from '@/utils/logArchive'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -68,12 +69,27 @@ const cleanupMsg = ref('')
 const archives = ref<ArchiveStatus[]>([])
 const archiveError = ref('')
 const lostReasons = ref<Record<string, string>>({})
+const archiveHasMore = ref(false)
+const archiveLoading = ref(false)
+let archiveOffset = 0
+let archiveGeneration = 0
 
-async function refreshArchives(): Promise<void> {
+async function refreshArchives(append = false): Promise<void> {
+  const generation = append ? archiveGeneration : ++archiveGeneration
+  archiveLoading.value = true
   try {
-    archives.value = await logArchivesApi.backlog(agentName.value)
+    const page = await logArchivesApi.backlog(agentName.value, append ? archiveOffset : 0)
+    if (generation !== archiveGeneration) return
+    archiveOffset = (append ? archiveOffset : 0) + page.length
+    archiveHasMore.value = page.length === 500
+    const records = append ? [...archives.value, ...page] : page
+    archives.value = [...new Map(records.map((item) => [`${item.job_id}/${item.attempt}`, item])).values()]
     archiveError.value = ''
-  } catch (error) { archiveError.value = describeSubmitError(error) }
+  } catch (error) {
+    if (generation === archiveGeneration) archiveError.value = describeSubmitError(error)
+  } finally {
+    if (generation === archiveGeneration) archiveLoading.value = false
+  }
 }
 
 async function markLost(archive: ArchiveStatus): Promise<void> {
@@ -340,7 +356,7 @@ const cacheRowKey = (e: CacheEntry): string => e.key
         <n-alert v-if="archiveError" type="error">{{ archiveError }}</n-alert>
         <n-card v-for="item in archives" :key="`${item.job_id}/${item.attempt}`" size="small">
           <p>{{ item.pipeline_name }} #{{ item.build_number }} / {{ item.job_name }} / {{ item.attempt }}</p>
-          <p>{{ t(item.state === 'pending' ? 'logArchive.pending' : item.lost_reason === 'retention_expired' ? 'logArchive.expired' : 'logArchive.lost') }} — {{ item.lost_reason }}</p>
+          <p>{{ t(archiveStateLabelKey(item)) }} — {{ item.lost_reason }}</p>
           <p>{{ t('logArchive.lastInfo', { seq: item.last_seq ?? '—', size: formatBytes(item.size) }) }}</p>
           <p>{{ t('logArchive.lastReport') }}: {{ item.last_seen_at ? formatDateTime(item.last_seen_at) : '—' }}</p>
           <template v-if="item.state === 'pending'">
@@ -351,6 +367,9 @@ const cacheRowKey = (e: CacheEntry): string => e.key
             </n-popconfirm>
           </template>
         </n-card>
+        <n-button v-if="archiveHasMore" :loading="archiveLoading" :disabled="archiveLoading" @click="refreshArchives(true)">
+          {{ t('logArchive.loadMore') }}
+        </n-button>
       </section>
 
       <!-- 工作区 / 缓存清理（经通道转发 Agent 侧既有指令；危险操作 NPopconfirm）。 -->

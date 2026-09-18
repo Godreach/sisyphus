@@ -141,6 +141,25 @@ describe('AgentDetailView 详情（标签 + 槽位 + 磁盘 + 工作区/缓存�
     expect(wrapper!.text()).toContain('archive offline')
   })
 
+  it('可以加载下一页归档记录而不丢失已显示的积压', async () => {
+    setRoute('GET', '/api/v1/agents/demo', jsonResponse(200, agent('demo')))
+    const record = { job_id: 1, state: 'lost', backend: 'local', size: 8,
+      last_seq: null, lost_reason: 'retention_expired', pipeline_name: 'release',
+      build_number: 1, job_name: 'compile' }
+    setRoute('GET', '/api/v1/log-archives', jsonResponse(200,
+      Array.from({ length: 500 }, (_, attempt) => ({ ...record, attempt }))))
+    setRoute('GET', '/api/v1/log-archives?agent=demo&offset=500', jsonResponse(200,
+      [{ ...record, attempt: 500, job_name: 'next-page-job' }]))
+    mountView()
+    await waitForAgent()
+    await vi.waitFor(() => expect(wrapper!.text()).toContain('加载更多归档记录'))
+    const more = wrapper!.findAll('button').find((button) => button.text().includes('加载更多归档记录'))!
+    await more.trigger('click')
+    await vi.waitFor(() => expect(wrapper!.text()).toContain('next-page-job'))
+    expect(wrapper!.text()).toContain('compile')
+    expect(wrapper!.text()).not.toContain('加载更多归档记录')
+  }, 10_000)
+
   it('磁盘三口径：卷级 total/free（NDataTable）+ 缓存占用 + 工作区占用（NStatistic/formatBytes）', async () => {
     setRoute(
       'GET',

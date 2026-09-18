@@ -98,13 +98,18 @@ impl LocalLogArchiveStore {
             .await?)
     }
 
-    pub async fn backlog(&self, agent: Option<&str>) -> Result<Vec<ArchiveStatus>, StoreError> {
+    pub async fn backlog(
+        &self,
+        agent: Option<&str>,
+        offset: u32,
+    ) -> Result<Vec<ArchiveStatus>, StoreError> {
         Ok(sqlx::QueryBuilder::<sqlx::Sqlite>::new(STATUS_QUERY)
             .push(" WHERE a.state IN ('pending', 'lost') AND (")
             .push_bind(agent)
             .push(" IS NULL OR g.name=")
             .push_bind(agent)
-            .push(") ORDER BY a.created_at, a.job_id LIMIT 500")
+            .push(") ORDER BY (a.state='pending') DESC, a.created_at DESC, a.job_id DESC, a.attempt DESC LIMIT 500 OFFSET ")
+            .push_bind(i64::from(offset))
             .build_query_as()
             .fetch_all(&self.pool)
             .await?)
@@ -194,6 +199,38 @@ impl LocalLogArchiveStore {
         )
         .bind(ended)
         .bind(ended)
+        .bind(job_id)
+        .bind(attempt)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 正文到达前保留 Agent 已声明的最后摘要，不覆盖已确认或丢失的归档。
+    pub async fn record_local_summary(
+        &self,
+        job_id: i64,
+        attempt: i32,
+        index: &ArchiveIndex,
+    ) -> Result<(), StoreError> {
+        validate_index(index, index.compressed_bytes, &index.sha256)?;
+        if index.job_id != job_id.to_string()
+            || index.attempt != attempt
+            || !is_sha256(&index.sha256)
+            || index.compressed_bytes > i64::MAX as u64
+            || index.first_seq.is_some_and(|seq| seq > i64::MAX as u64)
+            || index.last_seq.is_some_and(|seq| seq > i64::MAX as u64)
+        {
+            return Err(StoreError::Invalid("日志归档摘要或归属非法".into()));
+        }
+        sqlx::query(
+            "UPDATE log_archives SET size=?, sha256=?, first_seq=?, last_seq=?
+            WHERE job_id=? AND attempt=? AND state='pending' AND backend='local'",
+        )
+        .bind(index.compressed_bytes as i64)
+        .bind(&index.sha256)
+        .bind(index.first_seq.map(|seq| seq as i64))
+        .bind(index.last_seq.map(|seq| seq as i64))
         .bind(job_id)
         .bind(attempt)
         .execute(&self.pool)

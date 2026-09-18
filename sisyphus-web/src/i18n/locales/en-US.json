@@ -431,6 +431,7 @@
     "lastReport": "Last available report",
     "error": "Archive error",
     "refresh": "Refresh archive status",
+    "loadMore": "Load more archive records",
     "reason": "Reason for permanent loss or forced deletion (required)",
     "markLost": "Mark permanently lost and clean up",
     "confirmLost": "This irreversible action is audited. The Agent will delete confirmed-lost local logs after reconnecting."

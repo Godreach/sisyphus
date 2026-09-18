@@ -2458,6 +2458,20 @@
                 "null"
               ]
             }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "每页最多 500 条，从指定偏移读取；待归档优先。",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
           }
         ],
         "responses": {
