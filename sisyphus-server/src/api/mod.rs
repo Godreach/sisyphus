@@ -390,7 +390,12 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
             "/project-deletions/{id}/retry",
             post(deletions::retry_project),
         )
-        .route("/projects/{name}", get(projects::get_one).delete(projects::remove))
+        .route(
+            "/projects/{name}",
+            get(projects::get_one)
+                .patch(projects::update)
+                .delete(projects::remove),
+        )
         .route(
             "/projects/{name}/artifact-deletions",
             get(deletions::list),

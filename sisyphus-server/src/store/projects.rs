@@ -1,7 +1,7 @@
 //! 项目元数据 repo（票 B2a-T4；CONTEXT.md「项目」词条）。
 //!
-//! v1 只交付 list / create / get——update/delete 及其级联语义（pipeline 删除
-//! 对构建历史的影响）归后续批次裁定，不预开方法面。
+//! 项目元数据读写：list / create / get / update；删除及其级联语义
+//! （pipeline 删除对构建历史的影响）由删除 repo 单独承载。
 
 use sqlx::SqlitePool;
 
@@ -55,6 +55,16 @@ pub struct NewProject {
     pub default_branch: Option<String>,
 }
 
+/// 项目设置 PATCH 输入。`default_branch: None` 表示字段缺省不变，
+/// `Some(None)` 表示显式清除；`scm_url` 仅支持非空替换。
+#[derive(Debug, Clone)]
+pub struct UpdateProject {
+    /// 新仓库 URL；`None` 表示缺省不变。
+    pub scm_url: Option<String>,
+    /// 默认分支三态值：缺省不变、`Some(None)` 清除、`Some(Some(v))` 替换。
+    pub default_branch: Option<Option<String>>,
+}
+
 /// 项目行。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
@@ -76,7 +86,7 @@ pub struct Project {
     pub pipeline_count: i64,
 }
 
-/// 项目元数据 repo：list / create / get。
+/// 项目元数据 repo：list / create / get / update。
 #[derive(Debug, Clone)]
 pub struct ProjectRepo {
     pool: SqlitePool,
@@ -191,6 +201,57 @@ impl ProjectRepo {
             updated_at: now,
             pipeline_count: 0,
         })
+    }
+
+    /// 按名更新项目设置，并重新读取完整项目行（含 pipeline_count 与
+    /// 数据库生成的 updated_at），保证 REST 响应不是写入前的快照。
+    pub async fn update(
+        &self,
+        id: i64,
+        name: &str,
+        input: UpdateProject,
+    ) -> Result<Project, StoreError> {
+        let now = now_ms();
+        match (input.scm_url, input.default_branch) {
+            (Some(scm_url), Some(default_branch)) => {
+                sqlx::query(
+                    "UPDATE projects SET scm_url = ?, default_branch = ?, updated_at = MAX(updated_at + 1, ?)
+                     WHERE id = ? AND lifecycle = 'active'",
+                )
+                .bind(scm_url)
+                .bind(default_branch)
+                .bind(now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            }
+            (Some(scm_url), None) => {
+                sqlx::query(
+                    "UPDATE projects SET scm_url = ?, updated_at = MAX(updated_at + 1, ?)
+                     WHERE id = ? AND lifecycle = 'active'",
+                )
+                .bind(scm_url)
+                .bind(now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            }
+            (None, Some(default_branch)) => {
+                sqlx::query(
+                    "UPDATE projects SET default_branch = ?, updated_at = MAX(updated_at + 1, ?)
+                     WHERE id = ? AND lifecycle = 'active'",
+                )
+                .bind(default_branch)
+                .bind(now)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            }
+            (None, None) => {}
+        }
+        self.get_by_name(name)
+            .await?
+            .ok_or_else(|| StoreError::NotFound(format!("项目 {name} 不存在")))
     }
 
     /// 按名取项目；不存在返回 `None`。

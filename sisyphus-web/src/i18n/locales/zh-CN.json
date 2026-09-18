@@ -95,6 +95,7 @@
     "scmUrlInvalid": "仓库 URL 需以 http:// 或 https:// 开头",
     "infoTitle": "项目信息",
     "metaCreatedAt": "创建时间",
+    "metaUpdatedAt": "更新时间",
     "metaDefaultBranch": "默认分支",
     "pipelinesTitle": "流水线",
     "pipelinesEmpty": "本项目暂无流水线",

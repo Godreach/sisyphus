@@ -555,7 +555,17 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
 
   it('编辑项目（项目 admin）：弹窗改 URL/分支 → PATCH + toast + 元信息刷新', async () => {
     let patchBody: unknown = null
+    let projectGets = 0
     server.use(
+      http.get(`${BASE}`, () => {
+        projectGets += 1
+        return HttpResponse.json({
+          ...projectFixture(),
+          scm_url: projectGets > 1 ? 'https://github.com/acme/web-app-renamed.git' : 'https://github.com/acme/web-app.git',
+          default_branch: projectGets > 1 ? 'develop' : 'main',
+          updated_at: projectGets > 1 ? 2 : 1,
+        })
+      }),
       http.patch(`${BASE}`, async ({ request }) => {
         patchBody = await request.json()
         return HttpResponse.json({
@@ -596,9 +606,11 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
       default_branch: 'develop',
     })
     await toastWith('项目已保存')
+    expect(projectGets).toBeGreaterThan(1)
     await vi.waitFor(() =>
       expect(wrapper.find('.project-info-card').text()).toContain('web-app-renamed.git'),
     )
+    expect(wrapper.find('[data-testid="project-updated-at"]').text()).not.toBe('')
   })
 
   it('项目头部复用全局创建对话框：锁定当前项目并携来源进入新建编辑器态', async () => {

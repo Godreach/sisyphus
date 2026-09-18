@@ -1,8 +1,8 @@
 //! 项目端点（票 B2a-T4；B2b-T5 授权 retrofit）：list（按可见性过滤）/
-//! create（全局 admin）/ get（viewer 档）。
+//! create（全局 admin）/ get（viewer 档）/ update（项目 admin 档）。
 //!
-//! update/delete 及其级联语义（pipeline 删除对构建历史的影响）归后续批次
-//! 裁定，不预开端点。认证（401）由 `/api/v1` 全局中间件统一把关；项目级
+//! delete 及其级联语义（pipeline 删除对构建历史的影响）由删除批次承载。
+//! 认证（401）由 `/api/v1` 全局中间件统一把关；项目级
 //! 授权（404/403）由 [`super::policy`] 的端点 extractor 声明（矩阵本体在
 //! [`crate::auth`]，票 B2b-T5）。
 
@@ -10,14 +10,14 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
 
 use super::AppState;
 use super::auth::AuthContext;
 use super::error::{ApiError, ErrorBody, ValidationIssue, parse_body};
-use super::policy::{RequireGlobalAdmin, RequireViewer};
-use crate::store::projects::{NewProject, Project, ScmType};
+use super::policy::{RequireAdmin, RequireGlobalAdmin, RequireViewer};
+use crate::store::projects::{NewProject, Project, ScmType, UpdateProject};
 
 /// 仓库类型（API 形态；`git` / `svn` / `none`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -69,6 +69,26 @@ pub struct CreateProjectRequest {
     /// 可选 SCM 密码/token（加密落库；永不上命令行/URL）。
     #[serde(default)]
     pub scm_password: Option<String>,
+}
+
+/// 编辑项目请求体。字段缺省保持原值；`default_branch: null` 清除默认分支。
+/// `scm_url` 只能以非空 `http://` / `https://` URL 替换，项目名不可改。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateProjectRequest {
+    /// 新仓库 URL；缺省不变。
+    pub scm_url: Option<String>,
+    /// 默认分支三态值：缺省不变、null 清除、字符串替换。
+    #[serde(default, deserialize_with = "deserialize_patch_nullable")]
+    pub default_branch: Option<Option<String>>,
+}
+
+/// Preserve the distinction between an omitted nullable PATCH field (`None`)
+/// and an explicit JSON null (`Some(None)`).
+fn deserialize_patch_nullable<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 /// 项目视图（list / create / get 共用）。
@@ -268,6 +288,52 @@ pub async fn get_one(
     Ok(Json(access.project.into()))
 }
 
+/// 更新项目设置（项目 admin；PATCH 语义，票 #136）。
+#[utoipa::path(
+    patch,
+    path = "/api/v1/projects/{name}",
+    tag = "projects",
+    params(("name" = String, Path, description = "项目名")),
+    request_body = UpdateProjectRequest,
+    responses(
+        (status = 200, description = "已更新的项目（含最新更新时间）", body = ProjectResponse),
+        (status = 401, description = "未认证", body = ErrorBody),
+        (status = 403, description = "调用者不是项目管理员", body = ErrorBody),
+        (status = 404, description = "项目不存在或对调用者不可见", body = ErrorBody),
+        (status = 422, description = "SCM URL 或默认分支校验失败", body = ErrorBody),
+    )
+)]
+pub async fn update(
+    State(state): State<AppState>,
+    RequireAdmin(access): RequireAdmin,
+    body: Bytes,
+) -> Result<Json<ProjectResponse>, ApiError> {
+    let req: UpdateProjectRequest = parse_body(&body)?;
+    let issues = validate_update(&access.project, &req);
+    if !issues.is_empty() {
+        return Err(ApiError::validation("项目输入校验失败", issues));
+    }
+
+    let scm_url = req.scm_url.map(|url| url.trim().to_string());
+    let default_branch = req.default_branch.map(|branch| {
+        branch
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    });
+    let updated = state
+        .projects
+        .update(
+            access.project.id,
+            &access.project.name,
+            UpdateProject {
+                scm_url,
+                default_branch,
+            },
+        )
+        .await?;
+    Ok(Json(updated.into()))
+}
+
 /// 删除项目：全局管理员发起；所有构建均终态后，原子冻结项目授权并进入
 /// 异步删除。项目行在清理完成前保留归属，完成后保留不可访问墓碑。
 #[utoipa::path(
@@ -331,6 +397,36 @@ fn validate_create(req: &CreateProjectRequest) -> Vec<ValidationIssue> {
         });
     }
     if matches!(req.scm_type, ScmTypeDto::Svn | ScmTypeDto::None) && req.default_branch.is_some() {
+        issues.push(ValidationIssue {
+            path: "default_branch".into(),
+            message: "该项目类型无分支概念，不支持默认分支".into(),
+        });
+    }
+    issues
+}
+
+/// 编辑项目的字段校验，与前端编辑契约保持一致。
+fn validate_update(project: &Project, req: &UpdateProjectRequest) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+    if let Some(url) = req.scm_url.as_deref() {
+        let trimmed = url.trim();
+        if trimmed.is_empty() {
+            issues.push(ValidationIssue {
+                path: "scm_url".into(),
+                message: "仓库 URL 不能为空".into(),
+            });
+        } else if !(trimmed.starts_with("http://") || trimmed.starts_with("https://"))
+            || trimmed.len() <= trimmed.find("://").map_or(0, |index| index + 3)
+        {
+            issues.push(ValidationIssue {
+                path: "scm_url".into(),
+                message: "仓库 URL 需以 http:// 或 https:// 开头".into(),
+            });
+        }
+    }
+    if matches!(project.scm_type, ScmType::Svn | ScmType::None)
+        && req.default_branch.as_ref().is_some_and(Option::is_some)
+    {
         issues.push(ValidationIssue {
             path: "default_branch".into(),
             message: "该项目类型无分支概念，不支持默认分支".into(),

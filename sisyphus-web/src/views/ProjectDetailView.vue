@@ -465,10 +465,12 @@ async function submitEditProject(): Promise<void> {
   editSaving.value = true
   try {
     const isGit = project.value?.scm_type === 'git'
-    project.value = await projectsApi.update(projectName.value, {
+    await projectsApi.update(projectName.value, {
       scm_url: url,
       default_branch: isGit ? editBranch.value.trim() || null : null,
     })
+    // PATCH 成功后再从详情端点读回事实态，避免页面依赖写端点的响应快照。
+    await loadProject()
     editOpen.value = false
     message.success(t('projects.editSaved'))
   } catch (err) {
@@ -582,6 +584,10 @@ function openNewPipeline(): void {
         <div class="meta-item">
           <dt>{{ t('projects.metaCreatedAt') }}</dt>
           <dd>{{ formatDateTime(project.created_at) }}</dd>
+        </div>
+        <div class="meta-item">
+          <dt>{{ t('projects.metaUpdatedAt') }}</dt>
+          <dd data-testid="project-updated-at">{{ formatDateTime(project.updated_at) }}</dd>
         </div>
       </dl>
     </section>

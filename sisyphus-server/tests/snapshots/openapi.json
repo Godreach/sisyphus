@@ -3122,6 +3122,86 @@
             }
           }
         }
+      },
+      "patch": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "更新项目设置（项目 admin；PATCH 语义，票 #136）。",
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已更新的项目（含最新更新时间）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "调用者不是项目管理员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在或对调用者不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "SCM URL 或默认分支校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/projects/{name}/artifact-deletions": {
@@ -9587,6 +9667,26 @@
           "cron",
           "poll"
         ]
+      },
+      "UpdateProjectRequest": {
+        "type": "object",
+        "description": "编辑项目请求体。字段缺省保持原值；`default_branch: null` 清除默认分支。\n`scm_url` 只能以非空 `http://` / `https://` URL 替换，项目名不可改。",
+        "properties": {
+          "default_branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "默认分支三态值：缺省不变、null 清除、字符串替换。"
+          },
+          "scm_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "新仓库 URL；缺省不变。"
+          }
+        }
       },
       "UpgradeCommandRequest": {
         "type": "object",

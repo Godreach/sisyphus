@@ -109,6 +109,13 @@ describe('项目域 mock 契约（票 #108）', () => {
     expect(after.scm_url).toBe(before.scm_url) // 未提交字段不动
   })
 
+  it('PATCH nullable 语义：default_branch 显式 null 清空', async () => {
+    const res = await json('/projects/web-app', 'PATCH', { default_branch: null })
+    expect(res.status).toBe(200)
+    const after = (await res.json()) as { default_branch: string | null }
+    expect(after.default_branch).toBeNull()
+  })
+
   it('users/directory：bob（无任何项目 admin 档）403；alice（web-app admin）200', async () => {
     expect((await json('/users/directory', 'GET', undefined, 'bob')).status).toBe(403)
     expect((await json('/users/directory', 'GET', undefined, 'alice')).status).toBe(200)

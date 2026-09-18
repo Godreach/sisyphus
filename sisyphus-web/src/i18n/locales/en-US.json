@@ -95,6 +95,7 @@
     "scmUrlInvalid": "Repository URL must start with http:// or https://",
     "infoTitle": "Project info",
     "metaCreatedAt": "Created at",
+    "metaUpdatedAt": "Updated at",
     "metaDefaultBranch": "Default branch",
     "pipelinesTitle": "Pipelines",
     "pipelinesEmpty": "No pipelines in this project yet",

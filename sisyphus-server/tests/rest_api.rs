@@ -32,6 +32,10 @@ async fn authed_put(app: &TestApp, cookie: &str, path: &str, body: &str) -> Resp
     req_with_cookie(app, "PUT", path, Some(body.into()), Some(cookie)).await
 }
 
+async fn authed_patch(app: &TestApp, cookie: &str, path: &str, body: &str) -> Response {
+    req_with_cookie(app, "PATCH", path, Some(body.into()), Some(cookie)).await
+}
+
 fn assert_json_content_type(resp: &Response) {
     assert!(
         resp.headers()
@@ -320,6 +324,173 @@ async fn projects_round_trip() {
     let resp = authed_post(&app, &cookie, "/api/v1/projects", "{ not json").await;
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body_json(resp).await["code"], "VALIDATION_FAILED");
+}
+
+/// 项目设置 PATCH：字段缺省保持不变，显式 null 清除默认分支；写入后
+/// 返回真实项目行（含更新时间），并沿用 SCM/分支校验语义。
+#[tokio::test]
+async fn project_patch_updates_metadata_with_patch_semantics() {
+    let (app, cookie) = authed_app().await;
+
+    let created = authed_post(
+        &app,
+        &cookie,
+        "/api/v1/projects",
+        r#"{ "name": "demo", "scm_type": "git", "scm_url": "https://example.com/old.git", "default_branch": "main" }"#,
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let before = body_json(created).await;
+
+    // 缺省字段不动；URL 更新后返回的 updated_at 应不早于原值。
+    let resp = authed_patch(
+        &app,
+        &cookie,
+        "/api/v1/projects/demo",
+        r#"{ "scm_url": "https://example.com/new.git" }"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let updated = body_json(resp).await;
+    assert_eq!(updated["scm_url"], "https://example.com/new.git");
+    assert_eq!(updated["default_branch"], "main");
+    assert!(updated["updated_at"].as_i64() >= before["updated_at"].as_i64());
+
+    // nullable 字段显式 null = 清除。
+    let resp = authed_patch(
+        &app,
+        &cookie,
+        "/api/v1/projects/demo",
+        r#"{ "default_branch": null }"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cleared = body_json(resp).await;
+    assert_eq!(cleared["scm_url"], "https://example.com/new.git");
+    assert!(cleared["default_branch"].is_null());
+
+    // 与前端契约一致：空 URL、非 http(s) URL、svn 非空默认分支均 422。
+    for (body, path) in [
+        (r#"{ "scm_url": "   " }"#, "scm_url"),
+        (r#"{ "scm_url": "ssh://example.com/repo" }"#, "scm_url"),
+    ] {
+        let resp = authed_patch(&app, &cookie, "/api/v1/projects/demo", body).await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let errors = body_json(resp).await["detail"]["errors"]
+            .as_array()
+            .cloned()
+            .expect("校验错误清单");
+        assert!(errors.iter().any(|e| e["path"] == path));
+    }
+
+    let svn = authed_post(
+        &app,
+        &cookie,
+        "/api/v1/projects",
+        r#"{ "name": "svn", "scm_type": "svn", "scm_url": "https://example.com/svn" }"#,
+    )
+    .await;
+    assert_eq!(svn.status(), StatusCode::CREATED);
+    let resp = authed_patch(
+        &app,
+        &cookie,
+        "/api/v1/projects/svn",
+        r#"{ "default_branch": "trunk" }"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(resp).await["code"], "VALIDATION_FAILED");
+}
+
+#[tokio::test]
+async fn project_patch_permission_surface_is_stable() {
+    let (app, admin_cookie) = authed_app().await;
+    let created = authed_post(
+        &app,
+        &admin_cookie,
+        "/api/v1/projects",
+        r#"{ "name": "demo", "scm_type": "git", "scm_url": "https://example.com/repo", "default_branch": "main" }"#,
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    let user = authed_post(
+        &app,
+        &admin_cookie,
+        "/api/v1/users",
+        r#"{ "username": "member", "password": "member-password", "is_admin": false }"#,
+    )
+    .await;
+    assert_eq!(user.status(), StatusCode::CREATED);
+    let resp = authed_put(
+        &app,
+        &admin_cookie,
+        "/api/v1/projects/demo/members",
+        r#"[{ "username": "member", "role": "admin" }]"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let login = post(
+        &app,
+        "/api/v1/auth/login",
+        r#"{ "username": "member", "password": "member-password" }"#,
+    )
+    .await;
+    assert_eq!(login.status(), StatusCode::OK);
+    let member_cookie = cookie_of(&login).expect("成员登录 cookie");
+
+    let resp = authed_patch(
+        &app,
+        &member_cookie,
+        "/api/v1/projects/demo",
+        r#"{ "default_branch": "develop" }"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "项目 admin 可编辑");
+
+    let resp = authed_patch(
+        &app,
+        &member_cookie,
+        "/api/v1/projects/ghost",
+        r#"{ "default_branch": "main" }"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "未知项目稳定 404");
+
+    let user = authed_post(
+        &app,
+        &admin_cookie,
+        "/api/v1/users",
+        r#"{ "username": "viewer", "password": "viewer-password", "is_admin": false }"#,
+    )
+    .await;
+    assert_eq!(user.status(), StatusCode::CREATED);
+    let resp = authed_put(
+        &app,
+        &admin_cookie,
+        "/api/v1/projects/demo/members",
+        r#"[{ "username": "member", "role": "admin" }, { "username": "viewer", "role": "viewer" }]"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let login = post(
+        &app,
+        "/api/v1/auth/login",
+        r#"{ "username": "viewer", "password": "viewer-password" }"#,
+    )
+    .await;
+    let viewer_cookie = cookie_of(&login).expect("viewer 登录 cookie");
+    let resp = authed_patch(
+        &app,
+        &viewer_cookie,
+        "/api/v1/projects/demo",
+        r#"{ "default_branch": "feature" }"#,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "普通成员稳定 403");
+
+    let resp = get(&app, "/api/v1/projects/demo").await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "未认证稳定 401");
 }
 
 /// pipeline 定义端点的寻径错误面与非法 JSON（已认证面）。
