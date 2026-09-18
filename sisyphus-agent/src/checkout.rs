@@ -448,15 +448,28 @@ fn write_cred_artifact(path: &Path, cred: &ScmCredential, repo_url: &str) -> std
 /// ACE、仅当前用户 Full 控制权限（0600 等价，ADR-0016）。icacls 退出非零 → Err。
 #[cfg(windows)]
 fn restrict_acl_owner_only(path: &Path) -> std::io::Result<()> {
-    let user = std::env::var("USERNAME").unwrap_or_default();
-    if user.is_empty() {
-        return Err(std::io::Error::other(
-            "无法确定当前用户名（USERNAME 环境变量空）",
-        ));
-    }
+    // `USERNAME` is not authoritative when the agent is launched by a service
+    // account (and in our Windows CI sandbox it differs from the token running
+    // this process).  Grant the SID-resolving `whoami` identity so the process
+    // can remove the file again in `Drop`; otherwise the ACL would lock out the
+    // very account that created it.
+    let account = std::process::Command::new("whoami")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| {
+            let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            (!value.is_empty()).then_some(value)
+        })
+        .or_else(|| {
+            std::env::var("USERNAME")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| std::io::Error::other("无法确定当前 Windows 账户"))?;
     let status = std::process::Command::new("icacls")
         .arg(path)
-        .args(["/inheritance:r", "/grant:r", &format!("{user}:F")])
+        .args(["/inheritance:r", "/grant:r", &format!("{account}:F")])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1526,7 +1539,7 @@ mod tests {
     /// 产生 revision 1（`svn import` 一并创建 `/trunk` 路径）。返回可 checkout 的
     /// `file://` URL（前导盘符已转正斜杠）。
     fn make_svn_repo(parent: &Path, name: &str) -> String {
-        let repo = parent.join(name);
+        let repo = svn_fs_path(&parent.join(name));
         let _ = StdCommand::new("svnadmin")
             .args(["create", &repo.to_string_lossy()])
             .output()
@@ -1534,6 +1547,7 @@ mod tests {
         // import 一个文件到 /trunk 产生 r1（import 一并创建 /trunk）。
         let src = parent.join("svn-import-src");
         std::fs::create_dir_all(&src).expect("建 import 源");
+        let src = svn_fs_path(&src);
         std::fs::write(src.join("hello.txt"), "svn-v1\n").expect("写文件");
         let url = file_url(&repo);
         let imp = StdCommand::new("svn")
@@ -1557,15 +1571,36 @@ mod tests {
 
     /// 本地路径 → `file://` URL（Windows 盘符反斜杠转正斜杠、去前导斜杠避免三斜杠后多一截）。
     fn file_url(path: &Path) -> String {
-        let s = path.to_string_lossy().replace('\\', "/");
+        let s = svn_fs_path(path).to_string_lossy().replace('\\', "/");
         let s = s.trim_start_matches('/');
         format!("file:///{s}")
+    }
+
+    /// svn on Windows rejects the short `C:\\Users\\...` aliases returned by
+    /// the process temp directory (`Error resolving case`).  Resolve the path
+    /// through the filesystem first, then remove the Win32 extended-path
+    /// prefix because the svn CLI expects a regular DOS path.
+    fn svn_fs_path(path: &Path) -> std::path::PathBuf {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        #[cfg(windows)]
+        {
+            let value = path.to_string_lossy();
+            if let Some(value) = value.strip_prefix(r"\\?\") {
+                return std::path::PathBuf::from(value);
+            }
+        }
+        path
     }
 
     /// 工作区当前 svn revision（`svn info --show-item revision`，svn ≥ 1.9）。
     fn svn_info_rev(ws: &Path) -> String {
         let out = StdCommand::new("svn")
-            .args(["info", "--show-item", "revision", &ws.to_string_lossy()])
+            .args([
+                "info",
+                "--show-item",
+                "revision",
+                &svn_fs_path(ws).to_string_lossy(),
+            ])
             .output()
             .expect("svn info");
         assert!(
@@ -1585,12 +1620,16 @@ mod tests {
             eprintln!("skip: svn 不可用");
             return;
         }
-        let dir = tempfile::tempdir().expect("临时目录");
+        // The Windows svn CLI rejects the runner's short-name `%TEMP%` path
+        // (`RUNNER~1`/`TANWEI~1`) while resolving local import sources.  Keep
+        // this integration fixture under the checked-out workspace instead.
+        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("临时目录");
         let repo_url = make_svn_repo(dir.path(), "svn-repo");
         let trunk = format!("{repo_url}/trunk");
         // 造 r2：再 import 一个文件到 /trunk（r1 只有 hello.txt；r2 加 world.txt）。
         let src2 = dir.path().join("svn-import-src2");
         std::fs::create_dir_all(&src2).expect("建 import 源 2");
+        let src2 = svn_fs_path(&src2);
         std::fs::write(src2.join("world.txt"), "svn-v2\n").expect("写文件 2");
         let imp2 = StdCommand::new("svn")
             .args([
@@ -1609,7 +1648,7 @@ mod tests {
             String::from_utf8_lossy(&imp2.stderr)
         );
 
-        let ws = dir.path().join("ws");
+        let ws = svn_fs_path(&dir.path().join("ws"));
         std::fs::create_dir_all(&ws).expect("建工作区");
         let lb = logbuf(dir.path());
         let trunc = Arc::new(Truncation::new(u64::MAX));

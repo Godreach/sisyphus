@@ -35,8 +35,8 @@ use sisyphus_agent::upgrader::{DownloadError, Downloader, SpawnFailure, Spawner,
 use sisyphus_agent::workspace::Workspace;
 use sisyphus_proto::agent::{
     CacheCommand, CacheSpec, ChannelMessage, CheckoutStep, Handshake, JobAck, JobPhase,
-    JobReported, JobSpec, JobStatus, JobStep, ShellStep, UpgradeCommand, UpgradePhase, Version,
-    WorkspaceCommand, WorkspaceListRequest,
+    JobReported, JobSpec, JobStatus, JobStep, LogSubscribe, ShellStep, UpgradeCommand,
+    UpgradePhase, Version, WorkspaceCommand, WorkspaceListRequest,
     agent_channel_server::{AgentChannel, AgentChannelServer},
     cache_command::Kind as CacheKind,
     channel_message::Kind,
@@ -270,7 +270,6 @@ impl AgentChannel for FakeServer {
         }
 
         let (tx, rx) = mpsc::channel(64);
-        state.sessions.lock().expect("锁").push(tx.clone());
 
         tokio::spawn(async move {
             if tx
@@ -285,6 +284,9 @@ impl AgentChannel for FakeServer {
             {
                 return;
             }
+            // 只有握手回包已排入流后才暴露会话，避免测试把 JobSpec/订阅
+            // 注入到 Agent 的握手等待阶段而被提前消费。
+            state.sessions.lock().expect("锁").push(tx.clone());
             let mut drop_rx = state.drop_signal.subscribe();
             loop {
                 tokio::select! {
@@ -736,6 +738,15 @@ async fn b3_tracer_bullet_full_chain() {
     )))
     .await
     .expect("下发 JobSpec");
+    tx.send(Ok(ChannelMessage {
+        kind: Some(Kind::LogSubscribe(LogSubscribe {
+            job_id: "tracer-job".into(),
+            attempt: 0,
+            from_seq: 0,
+        })),
+    }))
+    .await
+    .expect("订阅 tracer-job 日志");
     // ack（accept）。
     wait_until(|| async {
         state
@@ -776,6 +787,17 @@ async fn b3_tracer_bullet_full_chain() {
     // 重连后补传：job 的全部日志（含离线期间缓冲的 "buffered"）按 seq 幂等重放；
     // 离线期间缓冲的终态（succeeded）经 uplink flush_pending 补发。
     wait_until(|| async { state.handshakes().len() >= 2 }).await;
+    state
+        .last_session_tx()
+        .send(Ok(ChannelMessage {
+            kind: Some(Kind::LogSubscribe(LogSubscribe {
+                job_id: "tracer-job".into(),
+                attempt: 0,
+                from_seq: 0,
+            })),
+        }))
+        .await
+        .expect("重连订阅 tracer-job 日志");
     wait_until(|| async {
         String::from_utf8_lossy(&output_bytes(&state, "tracer-job")).contains("buffered")
     })
@@ -944,7 +966,18 @@ async fn orphan_backfill_after_agent_restart() {
         reported.job_ids
     );
 
-    // 孤儿缓冲补传：fake 收到 orphan-job 的日志（取证）。
+    // 孤儿缓冲补传：Server 显式订阅后 fake 收到 orphan-job 的日志（取证）。
+    state
+        .last_session_tx()
+        .send(Ok(ChannelMessage {
+            kind: Some(Kind::LogSubscribe(LogSubscribe {
+                job_id: "orphan-job".into(),
+                attempt: 0,
+                from_seq: 0,
+            })),
+        }))
+        .await
+        .expect("订阅 orphan-job 日志");
     wait_until(|| async {
         state
             .log_batches()
@@ -959,9 +992,8 @@ async fn orphan_backfill_after_agent_restart() {
         "孤儿缓冲全量补传（取证）：{:?}",
         String::from_utf8_lossy(&orphan_out)
     );
-    // 补传后删除孤儿缓冲（执行丢弃、日志保留作取证后清空）。
-    wait_until(|| async { !orphan_path.exists() }).await;
-    assert!(!orphan_path.exists(), "孤儿缓冲补传后删除");
+    // Server 归档确认前保留孤儿缓冲，避免补传后立即丢失取证正文。
+    assert!(orphan_path.exists(), "孤儿缓冲保留至归档确认");
 
     shutdown_tx.send(true).expect("关闭");
     agent_task.await.expect("agent 退出");

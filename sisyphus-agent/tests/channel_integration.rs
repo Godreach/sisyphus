@@ -28,8 +28,8 @@ use sisyphus_agent::channel::{Backoff, ChannelConfig, PlatformDiskSampler, Stati
 use sisyphus_agent::config::{self, Overrides};
 use sisyphus_proto::agent::{
     CacheCommand, CacheDeleteRequest, CacheList, ChannelMessage, Handshake, JobPhase, JobReported,
-    JobSpec, JobStep, ShellStep, UpgradeCommand, UpgradePhase, Version, WorkspaceCommand,
-    WorkspaceList,
+    JobSpec, JobStep, LogSubscribe, ShellStep, UpgradeCommand, UpgradePhase, Version,
+    WorkspaceCommand, WorkspaceList,
     agent_channel_server::{AgentChannel, AgentChannelServer},
     cache_command::Kind as CacheKind,
     channel_message::Kind,
@@ -168,6 +168,9 @@ impl FakeState {
     fn drop_all_sessions(&self) {
         let _ = self.drop_signal.send(true);
         self.sessions.lock().expect("锁").clear();
+    }
+    fn resume_sessions(&self) {
+        let _ = self.drop_signal.send(false);
     }
 }
 
@@ -848,6 +851,23 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
         .await
     });
     wait_until(|| async { !state.sessions.lock().expect("锁").is_empty() }).await;
+    // `sessions` is registered before the fake server's handshake frame is
+    // sent; wait for JobReported to prove the Agent reader has consumed that
+    // handshake before injecting the subscription frame.
+    wait_until(|| async { !state.reported().is_empty() }).await;
+    // 日志活体/回放是按需订阅的：先订阅 job-1，之后的 append 才会走
+    // 连接 A 的活体上行；若 reader 尚未处理订阅，后续 replay 仍会补齐。
+    state
+        .last_session_tx()
+        .send(Ok(ChannelMessage {
+            kind: Some(Kind::LogSubscribe(LogSubscribe {
+                job_id: "job-1".into(),
+                attempt: 0,
+                from_seq: 0,
+            })),
+        }))
+        .await
+        .expect("订阅 job-1 日志");
     logbuf
         .append("job-1", 0, log_event(b"alpha"))
         .await
@@ -861,6 +881,7 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
     // 断线：fake 断开全部会话 → 连接 A 结束；断线期间缓冲继续累计。
     state.drop_all_sessions();
     conn_a.await.expect("连接 A 结束").expect("连接 A 干净退出");
+    state.resume_sessions();
     logbuf
         .append("job-1", 0, log_event(b"gamma"))
         .await
@@ -906,9 +927,30 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
         )
         .await
     });
-    // 等重连建立 + job-2 孤儿缓冲删除（补传后删）。
-    wait_until(|| async { state.handshakes().len() >= 2 }).await;
-    wait_until(|| async { !logbuf.path("job-2", 0).exists() }).await;
+    // 等重连建立；日志缓冲在 Server 归档确认前保留（ADR-0027），即使
+    // job-2 不在途也不能在订阅补传后立即删除。
+    wait_until(|| async { state.reported().len() >= 2 }).await;
+    let session_b = state.last_session_tx();
+    for job_id in ["job-1", "job-2"] {
+        session_b
+            .send(Ok(ChannelMessage {
+                kind: Some(Kind::LogSubscribe(LogSubscribe {
+                    job_id: job_id.into(),
+                    attempt: 0,
+                    from_seq: 0,
+                })),
+            }))
+            .await
+            .expect("订阅重连日志");
+    }
+    drop(session_b);
+    wait_until(|| async {
+        state
+            .log_batches()
+            .iter()
+            .any(|batch| batch.job_id == "job-2" && batch.start_seq == 0)
+    })
+    .await;
 
     // job-1 全量到达 0..3、无缺无杂（补传是幂等重放：连接 B 从文件头重放
     // 整段——已活体送达的前缀 0,1 会重复上送，Server 按 seq 幂等吸收；故
@@ -938,8 +980,8 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
         vec![0, 1, 2, 3],
         "job-1 日志应全量到达 0..3（不丢、无缺、无杂）：{seen:?}"
     );
-    // job-2 的孤儿事件重放补传后删除——fake 收到了它的日志（取证保留到
-    // 补传完成才删），缓冲文件已不在。
+    // job-2 的孤儿事件也经显式订阅补传；归档确认前缓冲文件保留，避免
+    // Agent 在 Server 尚未确认归档时丢失取证正文。
     assert!(
         state
             .log_batches()
@@ -947,7 +989,10 @@ async fn buffers_logs_while_disconnected_and_backfills_on_reconnect() {
             .any(|b| b.job_id == "job-2" && b.start_seq == 0),
         "孤儿 job-2 的日志应补传（取证）"
     );
-    assert!(!logbuf.path("job-2", 0).exists(), "孤儿 job-2 缓冲删除");
+    assert!(
+        logbuf.path("job-2", 0).exists(),
+        "孤儿 job-2 缓冲保留至归档确认"
+    );
     assert!(
         logbuf.path("job-1", 0).exists(),
         "在途 job-1 的缓冲保留（不删）"

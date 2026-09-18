@@ -31,7 +31,8 @@ use sisyphus_agent::config::{self, Overrides};
 use sisyphus_agent::workspace::Workspace;
 use sisyphus_proto::agent::{
     CancelBuild, ChannelMessage, CheckoutStep, ContainerEnv, ExecutionEnv, Handshake, JobAck,
-    JobPhase, JobSpec, JobStatus, JobStep, LogBatch, ShellStep, Stream, VcsType, Version,
+    JobPhase, JobSpec, JobStatus, JobStep, LogBatch, LogSubscribe, ShellStep, Stream, VcsType,
+    Version,
     agent_channel_server::{AgentChannel, AgentChannelServer},
     channel_message::Kind,
     execution_env::Kind as EnvKind,
@@ -147,7 +148,6 @@ impl AgentChannel for RunnerServer {
         let _ = agent_version;
 
         let (tx, rx) = mpsc::channel(64);
-        state.sessions.lock().expect("锁").push(tx.clone());
 
         tokio::spawn(async move {
             // 回发握手。
@@ -163,6 +163,12 @@ impl AgentChannel for RunnerServer {
             {
                 return;
             }
+            // Register only after the handshake is queued.  Tests use the
+            // presence of a session as the readiness barrier before sending
+            // JobSpec/LogSubscribe frames; registering earlier races the
+            // Agent's handshake reader and can consume the subscription as a
+            // pre-handshake frame.
+            state.sessions.lock().expect("锁").push(tx.clone());
             let mut drop_rx = state.drop_signal.subscribe();
             loop {
                 tokio::select! {
@@ -538,7 +544,21 @@ fn ws_head(ws: &Path) -> String {
 /// 向活动会话下发一帧。
 async fn send_downlink(state: &RunnerState, msg: ChannelMessage) {
     wait_until(|| async { !state.sessions.lock().expect("锁").is_empty() }).await;
-    state.last_session_tx().send(Ok(msg)).await.expect("下发");
+    let subscription = match msg.kind.as_ref() {
+        Some(Kind::JobSpec(spec)) => Some(ChannelMessage {
+            kind: Some(Kind::LogSubscribe(LogSubscribe {
+                job_id: spec.job_id.clone(),
+                attempt: spec.attempt,
+                from_seq: 0,
+            })),
+        }),
+        _ => None,
+    };
+    let tx = state.last_session_tx();
+    tx.send(Ok(msg)).await.expect("下发");
+    if let Some(subscription) = subscription {
+        tx.send(Ok(subscription)).await.expect("订阅日志");
+    }
 }
 
 /// 某 job 的全部输出字节（stdout + stderr 合流，按 seq 序）。
