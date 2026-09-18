@@ -104,7 +104,8 @@ pub async fn sweep(
     sweep_with_s3(pool, artifacts_root, now, retention_days, None).await
 }
 
-async fn sweep_with_s3(
+/// 同 [`sweep`]，并清理 S3 归档及中断后遗留的候选对象。
+pub async fn sweep_with_s3(
     pool: &SqlitePool,
     artifacts_root: &Path,
     now: i64,
@@ -142,6 +143,21 @@ async fn sweep_with_s3(
             Err(e) => tracing::warn!(build_id, error = %e, "保留清理：构建数据裁剪失败"),
         }
     }
+    // 归档行可能已删，但迟到的 CopyObject 仍可在首次 DELETE 后生成对象。
+    // 保留候选 key 登记，后续每日扫描继续幂等删除（S3 不可用则下次重试）。
+    if let Some(s3) = s3 {
+        let orphan_keys = sqlx::query_scalar::<_, String>(
+            "SELECT c.key FROM log_archive_publish_candidates c
+             WHERE NOT EXISTS (SELECT 1 FROM log_archives a WHERE a.job_id=c.job_id AND a.attempt=c.attempt)",
+        )
+        .fetch_all(pool)
+        .await?;
+        for key in orphan_keys {
+            if let Err(error) = s3.delete_object(&key).await {
+                tracing::warn!(key, error = %error, "迟到的日志归档候选对象清理失败，保留登记待重试");
+            }
+        }
+    }
     // 批量 DELETE 后收缩 WAL（ADR-0004「定期 DELETE + PRAGMA
     // wal_checkpoint(TRUNCATE)」）：大批过期行删除会让 -wal 短暂膨胀，
     // checkpoint 把已删页面落回主库并截断 -wal，防单文件无限增长。
@@ -174,10 +190,15 @@ async fn purge_expired_archives(
     let mut report = CleanupReport::default();
     for (job_id, attempt, path, index_path, state, backend, temp_path) in &rows {
         if !delete_archive_bytes(
-            backend,
-            path,
-            index_path,
-            temp_path.as_deref(),
+            pool,
+            ArchiveBytes {
+                job_id: *job_id,
+                attempt: *attempt,
+                backend,
+                path,
+                index_path,
+                temp_path: temp_path.as_deref(),
+            },
             s3,
             &mut report,
         )
@@ -203,17 +224,47 @@ async fn purge_expired_archives(
     Ok(report)
 }
 
+struct ArchiveBytes<'a> {
+    job_id: i64,
+    attempt: i32,
+    backend: &'a str,
+    path: &'a str,
+    index_path: &'a str,
+    temp_path: Option<&'a str>,
+}
+
 async fn delete_archive_bytes(
-    backend: &str,
-    path: &str,
-    index_path: &str,
-    temp_path: Option<&str>,
+    pool: &SqlitePool,
+    archive: ArchiveBytes<'_>,
     s3: Option<&S3Client>,
     report: &mut CleanupReport,
 ) -> Result<bool, StoreError> {
-    if backend == "s3" {
+    // 候选对象属于发布尝试，不属于行当前的后端：pending S3 改走 local
+    // 后也须先回收它们，不能因行级联删除而丢失最后的 S3 key 线索。
+    let candidates = sqlx::query_scalar::<_, String>(
+        "SELECT key FROM log_archive_publish_candidates WHERE job_id=? AND attempt=?",
+    )
+    .bind(archive.job_id)
+    .bind(archive.attempt)
+    .fetch_all(pool)
+    .await?;
+    if !candidates.is_empty() && s3.is_none() {
+        return Ok(false);
+    }
+    if let Some(s3) = s3 {
+        for key in &candidates {
+            if let Err(error) = s3.delete_object(key).await {
+                tracing::warn!(key, error = %error, "S3 日志归档清理失败，保留元数据待重试");
+                return Ok(false);
+            }
+        }
+    }
+    if archive.backend == "s3" {
         let Some(s3) = s3 else { return Ok(false) };
-        for key in [temp_path, Some(path)].into_iter().flatten() {
+        for key in [archive.temp_path, Some(archive.path)]
+            .into_iter()
+            .flatten()
+        {
             if let Err(error) = s3.delete_object(key).await {
                 tracing::warn!(key, error = %error, "S3 日志归档清理失败，保留元数据待重试");
                 return Ok(false);
@@ -221,7 +272,7 @@ async fn delete_archive_bytes(
         }
         return Ok(true);
     }
-    for candidate in [path, index_path] {
+    for candidate in [archive.path, archive.index_path] {
         match tokio::fs::remove_file(candidate).await {
             Ok(()) => report.log_archive_files_deleted += 1,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -276,10 +327,15 @@ async fn purge_build(
     let mut cleaned = Vec::new();
     for (job_id, attempt, path, index_path, backend, temp_path) in &archives {
         if delete_archive_bytes(
-            backend,
-            path,
-            index_path,
-            temp_path.as_deref(),
+            pool,
+            ArchiveBytes {
+                job_id: *job_id,
+                attempt: *attempt,
+                backend,
+                path,
+                index_path,
+                temp_path: temp_path.as_deref(),
+            },
             s3,
             &mut report,
         )

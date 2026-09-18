@@ -64,16 +64,10 @@ struct LogTail {
 }
 
 impl LogTail {
-    /// 从 DB 自游标重读并解码入队；返回新读到的条数。读失败记日志按空
-    /// 处理（下一轮总线事件再试——不炸流）。损坏 chunk 跳过（解码层）。
-    async fn drain_db(&mut self) -> usize {
-        let chunks = match self.state.logs.read_from(self.loc, self.cursor).await {
-            Ok(chunks) => chunks,
-            Err(e) => {
-                tracing::warn!(job_id = self.loc.job_id, error = %e, "日志回放读库失败");
-                return 0;
-            }
-        };
+    /// 从 DB 自游标重读并解码入队；返回新读到的条数。读失败向流报告错误，
+    /// 让 EventSource 重连，而非将失败误判成终态归档已读完。损坏 chunk 跳过。
+    async fn drain_db(&mut self) -> Result<usize, crate::store::StoreError> {
+        let chunks = self.state.logs.read_from(self.loc, self.cursor).await?;
         let mut n = 0;
         for chunk in chunks {
             match logs::decode_chunk(&chunk) {
@@ -95,7 +89,7 @@ impl LogTail {
                 }
             }
         }
-        n
+        Ok(n)
     }
 
     /// 复核任务终态：终态即合成 job_end 入队、置 done（队列发完关流）。
@@ -376,14 +370,22 @@ pub async fn stream(
     let stream = futures::stream::unfold(tail, |mut tail| async move {
         loop {
             if let Some(ev) = tail.queue.pop_front() {
-                return Some((Ok::<_, std::convert::Infallible>(ev), tail));
+                return Some((Ok::<_, std::io::Error>(ev), tail));
             }
             if tail.done {
                 return None; // job_end 已发：关流（flush 后）
             }
             if tail.reread {
                 tail.reread = false;
-                if tail.drain_db().await > 0 {
+                let read_count = match tail.drain_db().await {
+                    Ok(count) => count,
+                    Err(error) => {
+                        tracing::warn!(job_id = tail.loc.job_id, error = %error, "日志回放读取失败，关闭流以便客户端重试");
+                        tail.done = true;
+                        return Some((Err(std::io::Error::other(error.to_string())), tail));
+                    }
+                };
+                if read_count > 0 {
                     // 归档和 SQLite 都按有限批次返回；队列排空后继续从
                     // 新游标读取下一帧，避免历史归档一次性驻留内存。
                     tail.reread = true;

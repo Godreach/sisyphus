@@ -139,14 +139,11 @@ impl LocalLogArchiveStore {
                 }
             }
         }
-        let mut nonce = [0u8; 16];
-        OsRng.fill_bytes(&mut nonce);
-        let nonce = nonce.iter().map(|b| format!("{b:02x}")).collect::<String>();
         let temp_key = object_key(
             prefix,
             ObjectClass::Logs,
             ObjectPhase::Temporary,
-            &format!("{job_id}/{attempt}/{nonce}.slog"),
+            &format!("{job_id}/{attempt}/{}.slog", random_nonce()),
         );
         let index_json =
             serde_json::to_string(index).map_err(|e| StoreError::Invalid(e.to_string()))?;
@@ -202,27 +199,82 @@ impl LocalLogArchiveStore {
                 "日志归档大小或 SHA-256 校验失败".into(),
             ));
         }
-        s3.copy_object_adaptive(
-            &temp_key,
-            &final_key,
-            actual_size,
-            copy_limit,
-            copy_part_size,
+        // 每次完成使用独立的最终 key；只有条件更新获胜者才能把它暴露为 ready。
+        // 旧 PUT URL 可以改写临时对象，但并发/迟到的完成请求不得覆盖或删除获胜者。
+        let candidate_key = format!("{final_key}.{}", random_nonce());
+        let registered = sqlx::query(
+            "INSERT INTO log_archive_publish_candidates (key, job_id, attempt, created_at)
+             SELECT ?, job_id, attempt, ? FROM log_archives
+             WHERE job_id=? AND attempt=? AND state='pending' AND backend='s3' AND path=? AND temp_path=?",
         )
-        .await
-        .map_err(s3_io)?;
-        let (final_size, final_digest) = s3.hash_object(&final_key).await.map_err(s3_io)?;
-        if final_size != actual_size || final_digest != sha {
-            let _ = s3.delete_object(&final_key).await;
-            return Err(StoreError::Conflict("最终日志归档校验失败".into()));
-        }
-        let now = crate::store::now_ms();
-        let updated = sqlx::query("UPDATE log_archives SET state='ready', ready_at=? WHERE job_id=? AND attempt=? AND state='pending' AND backend='s3'")
-            .bind(now).bind(job_id).bind(attempt).execute(&self.pool).await?;
-        if updated.rows_affected() != 1 {
+        .bind(&candidate_key)
+        .bind(crate::store::now_ms())
+        .bind(job_id)
+        .bind(attempt)
+        .bind(&final_key)
+        .bind(&temp_key)
+        .execute(&self.pool)
+        .await?;
+        if registered.rows_affected() != 1 {
             return Err(StoreError::Conflict(
-                "日志归档状态已变化，未确认 ready".into(),
+                "日志归档状态已变化，未开始复制".into(),
             ));
+        }
+        let mut copy_completed = false;
+        let publish_result = async {
+            s3.copy_object_adaptive(
+                &temp_key,
+                &candidate_key,
+                actual_size,
+                copy_limit,
+                copy_part_size,
+            )
+            .await
+            .map_err(s3_io)?;
+            copy_completed = true;
+            let (final_size, final_digest) =
+                s3.hash_object(&candidate_key).await.map_err(s3_io)?;
+            if final_size != actual_size || final_digest != sha {
+                return Err(StoreError::Conflict("最终日志归档校验失败".into()));
+            }
+            let now = crate::store::now_ms();
+            let updated = sqlx::query("UPDATE log_archives SET state='ready', path=?, ready_at=? WHERE job_id=? AND attempt=? AND state='pending' AND backend='s3' AND path=? AND temp_path=?")
+                .bind(&candidate_key).bind(now).bind(job_id).bind(attempt).bind(&final_key).bind(&temp_key)
+                .execute(&self.pool).await?;
+            if updated.rows_affected() != 1 {
+                return Err(StoreError::Conflict(
+                    "日志归档状态已变化，未确认 ready".into(),
+                ));
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = publish_result {
+            match s3.delete_object(&candidate_key).await {
+                Ok(()) => {
+                    // 超时不等于 S3 停止复制；结果不确定时保留 key 供定期清理。
+                    if copy_completed
+                        && let Err(cleanup_error) =
+                            sqlx::query("DELETE FROM log_archive_publish_candidates WHERE key=?")
+                                .bind(&candidate_key)
+                                .execute(&self.pool)
+                                .await
+                    {
+                        tracing::warn!(job_id, attempt, error = %cleanup_error, "候选对象已删除，但登记清理失败");
+                    }
+                }
+                Err(cleanup_error) => {
+                    tracing::warn!(job_id, attempt, error = %cleanup_error, "失败的日志归档候选对象清理失败，保留登记待清理");
+                }
+            }
+            return Err(error);
+        }
+        if let Err(error) = sqlx::query("DELETE FROM log_archive_publish_candidates WHERE key=?")
+            .bind(&candidate_key)
+            .execute(&self.pool)
+            .await
+        {
+            tracing::warn!(job_id, attempt, error = %error, "ready 候选对象登记清理失败，保留至归档清理");
         }
         match s3.delete_object(&temp_key).await {
             Ok(()) => {
@@ -432,6 +484,12 @@ impl LocalLogArchiveStore {
             read_frame_values(Path::new(path), frame).await
         }
     }
+}
+
+fn random_nonce() -> String {
+    let mut nonce = [0u8; 16];
+    OsRng.fill_bytes(&mut nonce);
+    nonce.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn s3_io(error: crate::storage::StorageError) -> StoreError {
