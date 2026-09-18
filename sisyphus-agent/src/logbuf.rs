@@ -47,6 +47,23 @@ use crate::logarchive::{self, SealedArchive};
 /// 缓冲删除宽限默认值（ADR-0013：终态上报成功后延迟固定宽限删除，默认
 /// 1 分钟——宽限内崩溃重启缓冲留作孤儿取证）。
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(60);
+/// 未确认日志缓冲默认容量（ADR-0027）；压力闸门不淘汰正文。
+pub const DEFAULT_CAPACITY_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+
+/// 心跳与接任务闸门共用的持久缓冲快照。
+#[derive(Debug, Clone)]
+pub struct BufferUsage {
+    /// JSONL、封存副本和旁车实际磁盘字节。
+    pub bytes: u64,
+    /// 本机配置的容量。
+    pub capacity_bytes: u64,
+    /// 仍待 Server 确认的 attempt 数。
+    pub pending_archives: u64,
+    /// 达 90% 时停止接任务。
+    pub pressured: bool,
+    /// 最近可用的归档错误（跨重启保留）。
+    pub last_error: Option<String>,
+}
 /// 缓冲文件后缀（jsonl = 每行一个 JSON）。
 const LOGBUF_EXT: &str = ".jsonl";
 const ARCHIVE_PENDING_EXT: &str = ".archive-pending";
@@ -94,6 +111,7 @@ struct DeleteJob {
 pub struct LogBuffer {
     dir: PathBuf,
     grace: Duration,
+    capacity_bytes: u64,
     /// 打开中的 (job_id, attempt) → 写句柄。每 job 由 runner 唯一写者驱动；
     /// 此处防同 (job, attempt) 重复 open（重试竞态）并回收句柄供删除。
     open: Arc<Mutex<HashMap<(String, i32), JobBuffer>>>,
@@ -117,18 +135,72 @@ impl LogBuffer {
                 if job.delay.is_zero() {
                     remove_file_best_effort(&job.path);
                 } else {
-                    tokio::time::sleep(job.delay).await;
-                    remove_file_best_effort(&job.path);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(job.delay).await;
+                        remove_file_best_effort(&job.path);
+                    });
                 }
             }
         });
         Self {
             dir,
             grace,
+            capacity_bytes: DEFAULT_CAPACITY_BYTES,
             open: Arc::new(Mutex::new(HashMap::new())),
             live: Arc::new(RwLock::new(None)),
             subscriptions: Arc::new(RwLock::new(HashSet::new())),
             delete_tx,
+        }
+    }
+
+    /// 设置本机容量；正文未经确认永不因容量淘汰。
+    pub fn with_capacity_bytes(mut self, bytes: u64) -> Self {
+        self.capacity_bytes = bytes.max(1);
+        self
+    }
+
+    /// 读取实际磁盘占用；采样失败由调用者关闭接任务闸门。
+    pub fn usage(&self) -> std::io::Result<BufferUsage> {
+        let mut bytes = 0u64;
+        let mut last_error = None;
+        for dir in [self.dir.clone(), self.dir.join("archives")] {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            for entry in entries {
+                let entry = entry?;
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e),
+                };
+                if metadata.is_file() {
+                    bytes = bytes.saturating_add(metadata.len());
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".archive-error")
+                    {
+                        last_error = std::fs::read_to_string(entry.path()).ok();
+                    }
+                }
+            }
+        }
+        Ok(BufferUsage {
+            bytes,
+            capacity_bytes: self.capacity_bytes,
+            pending_archives: self.pending_archives().len() as u64,
+            pressured: (bytes as u128) * 10 >= (self.capacity_bytes as u128) * 9,
+            last_error,
+        })
+    }
+
+    pub(crate) fn record_archive_error(&self, job: &str, attempt: i32, error: &str) {
+        let path = self.dir.join(format!("{job}-{attempt}.archive-error"));
+        if let Err(e) = std::fs::write(path, error) {
+            tracing::warn!(error = %e, "归档错误持久化失败");
         }
     }
 
@@ -146,7 +218,17 @@ impl LogBuffer {
     pub(crate) fn mark_archive_pending(&self, job_id: &str, attempt: i32) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         let path = self.archive_pending_path(job_id, attempt);
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let mut file = match OpenOptions::new().create_new(true).write(true).open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        write!(file, "{now}")?;
         file.sync_all()
     }
 
@@ -418,9 +500,11 @@ impl LogBuffer {
     /// worker 删除。发送失败（worker 已退出）记警告——删除是维护动作，失败
     /// 只留孤儿文件，不阻塞数据路径。
     pub fn clear_deferred(&self, job_id: &str, attempt: i32) {
+        // 已确认的 attempt 不再进入后台扫描；只让源正文保留读取宽限。
+        remove_file_best_effort(&self.archive_pending_path(job_id, attempt));
+        remove_file_best_effort(&self.dir.join(format!("{job_id}-{attempt}.archive-error")));
         self.release_handle(job_id, attempt);
-        // Server 已确认后本地封存副本不再需要；marker 与源 JSONL 留到宽限
-        // 结束再删，保证确认前/崩溃窗口仍可恢复。
+        // Server 已确认后本地封存副本不再需要；源 JSONL 留到宽限结束。
         remove_file_best_effort(
             &self
                 .dir
@@ -433,14 +517,19 @@ impl LogBuffer {
                 .join("archives")
                 .join(format!("{job_id}-{attempt}.json")),
         );
-        for path in [
-            self.path(job_id, attempt),
-            self.archive_pending_path(job_id, attempt),
-        ] {
-            let _ = self.delete_tx.try_send(DeleteJob {
-                path,
+        if self
+            .delete_tx
+            .try_send(DeleteJob {
+                path: self.path(job_id, attempt),
                 delay: self.grace,
-            });
+            })
+            .is_err()
+        {
+            tracing::warn!(
+                job_id,
+                attempt,
+                "已确认日志删除队列已满，保留正文待运维清理"
+            );
         }
     }
 
@@ -676,6 +765,23 @@ mod tests {
                 data: data.to_vec(),
             })),
         }
+    }
+
+    #[tokio::test]
+    async fn capacity_pressure_preserves_unconfirmed_logs_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let buf = LogBuffer::new(dir.path().to_path_buf(), Duration::ZERO).with_capacity_bytes(100);
+        buf.append("42", 1, output_event(&[b'x'; 100]))
+            .await
+            .unwrap();
+        buf.mark_archive_pending("42", 1).unwrap();
+        assert!(buf.usage().unwrap().pressured);
+        drop(buf);
+        let recovered =
+            LogBuffer::new(dir.path().to_path_buf(), Duration::ZERO).with_capacity_bytes(100);
+        assert!(recovered.usage().unwrap().pressured);
+        assert_eq!(recovered.usage().unwrap().pending_archives, 1);
+        assert_eq!(recovered.replay("42", 1).await.unwrap().len(), 1);
     }
 
     fn seq_of(msg: &ChannelMessage) -> u64 {

@@ -577,7 +577,7 @@ pub fn job_spec_message(job: &JobRow, spec: &ResolvedJobSpec) -> sisyphus_proto:
         job_name: spec.job_name.clone(),
         build_number: spec.build_number,
         attempt: spec.attempt,
-        log_limit_bytes: 0, // 默认 50MB 由 Agent 侧裁决（ADR-0013）
+        log_limit_bytes: 0, // 默认 1 GiB 由 Agent 侧裁决（ADR-0027）
         steps,
         env,
         exec_env,
@@ -810,6 +810,24 @@ async fn session_loop(
                     crate::metrics::record_grpc_disconnect("disabled");
                     break;
                 }
+                if let Some(usage) = heartbeat.log_buffer {
+                    let report = crate::store::agent_log_buffers::LogBufferReport {
+                        bytes: usage.bytes.min(i64::MAX as u64) as i64,
+                        capacity_bytes: usage.capacity_bytes.min(i64::MAX as u64) as i64,
+                        pending_archives: usage.pending_archives.min(i64::MAX as u64) as i64,
+                        pressured: usage.pressured
+                            || usage.capacity_bytes == 0
+                            || (usage.bytes as u128) * 10 >= (usage.capacity_bytes as u128) * 9,
+                        last_error: (!usage.last_error.is_empty()).then_some(usage.last_error),
+                        reported_at: now_ms(),
+                    };
+                    if let Err(error) =
+                        crate::store::agent_log_buffers::report(&state.pool, agent_id, &report)
+                            .await
+                    {
+                        tracing::warn!(agent_id, error = %error, "日志缓冲报告落库失败");
+                    }
+                }
             }
             Some(Kind::JobAck(ack)) => {
                 // 任务回执：槽位占用确认 / 拒绝释放（调度侧落库裁决）。
@@ -833,7 +851,14 @@ async fn session_loop(
                     if phase.is_terminal()
                         && let Ok(Some(job)) = JobRepo::new(state.pool.clone()).get(job_id).await
                         && job.agent_id == Some(agent_id)
-                        && let Err(e) = state.log_archives.mark_pending(job.id, job.attempt).await
+                        && let Err(e) = state
+                            .log_archives
+                            .record_execution_end(
+                                job.id,
+                                job.attempt,
+                                status.execution_finished_at_ms,
+                            )
+                            .await
                     {
                         tracing::warn!(agent = %agent, job_id, error = %e, "登记终态日志归档 pending 失败");
                     }

@@ -266,6 +266,13 @@ async fn valid_token_establishes_session_and_marks_online() {
     // 发送心跳（带磁盘占用）→ 落库可查。
     tx.send(ChannelMessage {
         kind: Some(Kind::Heartbeat(Heartbeat {
+            log_buffer: Some(sisyphus_proto::agent::LogBufferUsage {
+                bytes: 90,
+                capacity_bytes: 100,
+                pending_archives: 2,
+                pressured: true,
+                last_error: "archive unavailable".into(),
+            }),
             disk: Some(DiskUsage {
                 volumes: vec![sisyphus_proto::agent::VolumeUsage {
                     mount_point: "/".into(),
@@ -296,11 +303,24 @@ async fn valid_token_establishes_session_and_marks_online() {
     })
     .await;
 
+    wait_until(|| async { !h.state.agents.has_slots(id).await.unwrap() }).await;
+    assert!(
+        h.state
+            .agents
+            .match_candidates(None, &[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
     // 会话期间停用：下一帧踢线（任何帧都复核 token 仍有效——停用心跳
     // 不生效 → 会话断开 → 对端流 EOF）。
     h.state.agents.set_disabled(id, true).await.expect("停用");
     tx.send(ChannelMessage {
-        kind: Some(Kind::Heartbeat(Heartbeat { disk: None })),
+        kind: Some(Kind::Heartbeat(Heartbeat {
+            disk: None,
+            log_buffer: None,
+        })),
     })
     .await
     .expect("send");

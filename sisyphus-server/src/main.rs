@@ -42,6 +42,9 @@ struct Args {
     /// 扫描清理过期构建数据，构建记录永久保留）
     #[arg(long)]
     retention_days: Option<i64>,
+    /// 独立日志归档保留期（天，默认 30）
+    #[arg(long)]
+    log_retention_days: Option<i64>,
     /// /metrics 端点鉴权开关（CLI 覆盖层，默认开，ADR-0019：Prometheus
     /// 抓取可关，仅限可信内网）
     #[arg(long)]
@@ -95,6 +98,7 @@ impl From<&Args> for Overrides {
             registration_enabled: args.registration_enabled.map(|b| b.to_string()),
             master_key_path: args.master_key_path.clone(),
             retention_days: args.retention_days.map(|n| n.to_string()),
+            log_retention_days: args.log_retention_days.map(|n| n.to_string()),
             metrics_auth: args.metrics_auth.map(|b| b.to_string()),
             s3_endpoint: None,
             s3_region: None,
@@ -267,12 +271,14 @@ async fn main() {
     let cleanup_pool = pool.clone();
     let cleanup_artifacts = config.data_dir.join(sisyphus_server::config::ARTIFACTS_DIR);
     let cleanup_retention = config.retention_days;
+    let cleanup_log_retention = config.log_retention_days;
     let cleanup_s3 = state.s3.clone();
     let cleanup_task = tokio::spawn(async move {
-        sisyphus_server::store::run_daily_cleanup_with_s3(
+        sisyphus_server::store::cleanup::run_daily_cleanup_with_log_retention(
             cleanup_pool,
             cleanup_artifacts,
             cleanup_retention,
+            cleanup_log_retention,
             cleanup_s3,
         )
         .await;

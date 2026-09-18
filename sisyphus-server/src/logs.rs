@@ -23,9 +23,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::{LogChunk, LogLocation};
 
-/// per-job 日志上限默认值（ADR-0013：Server 全局配置，默认 50 MB；v1 无
+/// per-job 日志上限默认值（ADR-0027：默认 1 GiB；v1 无
 /// 覆盖面，截断标记事件的 `limit_bytes` 取此值）。
-pub const DEFAULT_LOG_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
+pub const DEFAULT_LOG_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// 输出流标记（stdout/stderr 合流，ADR-0013）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

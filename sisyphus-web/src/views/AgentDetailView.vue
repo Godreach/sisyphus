@@ -34,9 +34,10 @@ import {
 } from 'naive-ui'
 
 import { agentsApi } from '@/api/client'
+import { logArchivesApi } from '@/api/logArchives'
 import { describeSubmitError } from '@/api/errors'
 import { ApiError } from '@/api/http'
-import type { AgentResponse, CacheEntry, WorkspaceEntry } from '@/api/types'
+import type { AgentResponse, ArchiveStatus, CacheEntry, WorkspaceEntry } from '@/api/types'
 import {
   agentBadgeState,
   agentStateLabelKey,
@@ -64,6 +65,23 @@ const cache = ref<CacheEntry[] | null>(null)
 const cacheKey = ref('')
 /** 清理面反馈（成功/错误）。 */
 const cleanupMsg = ref('')
+const archives = ref<ArchiveStatus[]>([])
+const archiveError = ref('')
+const lostReasons = ref<Record<string, string>>({})
+
+async function refreshArchives(): Promise<void> {
+  try {
+    archives.value = await logArchivesApi.backlog(agentName.value)
+    archiveError.value = ''
+  } catch (error) { archiveError.value = describeSubmitError(error) }
+}
+
+async function markLost(archive: ArchiveStatus): Promise<void> {
+  try {
+    await logArchivesApi.markLost(archive, lostReasons.value[`${archive.job_id}/${archive.attempt}`] ?? '')
+    await refreshArchives()
+  } catch (error) { archiveError.value = describeSubmitError(error) }
+}
 
 onMounted(load)
 
@@ -74,6 +92,7 @@ async function load(): Promise<void> {
   adminOnly.value = false
   try {
     agent.value = await agentsApi.get(agentName.value)
+    void refreshArchives()
   } catch (err) {
     agent.value = null
     if (err instanceof ApiError && err.status === 403) {
@@ -304,6 +323,34 @@ const cacheRowKey = (e: CacheEntry): string => e.key
           class="agent-volume-table"
         />
         <p v-else class="form-hint">{{ t('agents.diskNotReported') }}</p>
+      </section>
+
+      <section class="detail-section">
+        <h2>{{ t('logArchive.title') }}</h2>
+        <n-alert v-if="agent.log_buffer?.pressured" type="warning">{{ t('logArchive.pressure') }}</n-alert>
+        <n-descriptions v-if="agent.log_buffer" :column="1">
+          <n-descriptions-item :label="t('logArchive.buffer')">
+            {{ formatBytes(agent.log_buffer.bytes) }} / {{ formatBytes(agent.log_buffer.capacity_bytes) }}
+          </n-descriptions-item>
+          <n-descriptions-item :label="t('logArchive.backlog')">{{ agent.log_buffer.pending_archives }}</n-descriptions-item>
+          <n-descriptions-item :label="t('logArchive.lastReport')">{{ formatDateTime(agent.log_buffer.reported_at) }}</n-descriptions-item>
+          <n-descriptions-item v-if="agent.log_buffer.last_error" :label="t('logArchive.error')">{{ agent.log_buffer.last_error }}</n-descriptions-item>
+        </n-descriptions>
+        <n-button @click="load()">{{ t('logArchive.refresh') }}</n-button>
+        <n-alert v-if="archiveError" type="error">{{ archiveError }}</n-alert>
+        <n-card v-for="item in archives" :key="`${item.job_id}/${item.attempt}`" size="small">
+          <p>{{ item.pipeline_name }} #{{ item.build_number }} / {{ item.job_name }} / {{ item.attempt }}</p>
+          <p>{{ t(item.state === 'pending' ? 'logArchive.pending' : item.lost_reason === 'retention_expired' ? 'logArchive.expired' : 'logArchive.lost') }} — {{ item.lost_reason }}</p>
+          <p>{{ t('logArchive.lastInfo', { seq: item.last_seq ?? '—', size: formatBytes(item.size) }) }}</p>
+          <p>{{ t('logArchive.lastReport') }}: {{ item.last_seen_at ? formatDateTime(item.last_seen_at) : '—' }}</p>
+          <template v-if="item.state === 'pending'">
+            <n-input v-model:value="lostReasons[`${item.job_id}/${item.attempt}`]" :placeholder="t('logArchive.reason')" />
+            <n-popconfirm @positive-click="markLost(item)">
+              <template #trigger><n-button type="error" :disabled="!lostReasons[`${item.job_id}/${item.attempt}`]?.trim()">{{ t('logArchive.markLost') }}</n-button></template>
+              {{ t('logArchive.confirmLost') }}
+            </n-popconfirm>
+          </template>
+        </n-card>
       </section>
 
       <!-- 工作区 / 缓存清理（经通道转发 Agent 侧既有指令；危险操作 NPopconfirm）。 -->

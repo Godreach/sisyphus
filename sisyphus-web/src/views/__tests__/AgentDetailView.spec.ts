@@ -128,6 +128,19 @@ describe('AgentDetailView 详情（标签 + 槽位 + 磁盘 + 工作区/缓存�
     expect(String(fetchMock.mock.calls[0]![0])).toBe('/api/v1/agents/demo')
   })
 
+  it('展示日志缓冲压力、归档积压和最后错误', async () => {
+    setRoute('GET', '/api/v1/agents/demo', jsonResponse(200, agent('demo', {
+      log_buffer: { bytes: 90, capacity_bytes: 100, pending_archives: 2,
+        pressured: true, last_error: 'archive offline', reported_at: 1700000000000 },
+    })))
+    setRoute('GET', '/api/v1/log-archives', jsonResponse(200, []))
+    mountView()
+    await waitForAgent()
+    expect(wrapper!.text()).toContain('日志归档')
+    expect(wrapper!.text()).toContain('停止接收新任务')
+    expect(wrapper!.text()).toContain('archive offline')
+  })
+
   it('磁盘三口径：卷级 total/free（NDataTable）+ 缓存占用 + 工作区占用（NStatistic/formatBytes）', async () => {
     setRoute(
       'GET',

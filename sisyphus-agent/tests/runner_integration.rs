@@ -697,6 +697,77 @@ async fn runs_shell_step_and_reports_success_with_step_events_and_seq() {
     server_task.abort();
 }
 
+#[tokio::test]
+async fn buffer_pressure_rejects_new_jobs_without_deleting_unconfirmed_logs() {
+    let dir = tempfile::tempdir().unwrap();
+    let logdir = dir.path().join("logbuf");
+    std::fs::create_dir_all(&logdir).unwrap();
+    let pending = logdir.join("42-1.jsonl");
+    // 稀疏文件只测试实际占用记账，不分配 18 GiB 测试内存。
+    std::fs::File::create(&pending)
+        .unwrap()
+        .set_len(18 * 1024 * 1024 * 1024)
+        .unwrap();
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    let (shutdown, _, task) = spawn_agent(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
+    send_downlink(
+        &state,
+        shell_spec("job-pressure", "pipe", "job", "exit 0", vec![], vec![], 0),
+    )
+    .await;
+    let ack = await_ack(&state, "job-pressure", false).await;
+    assert!(ack.error.contains("log buffer pressure"));
+    assert!(pending.exists());
+    assert!(!state.statuses().iter().any(|s| s.job_id == "job-pressure"));
+    shutdown.send(true).unwrap();
+    task.await.unwrap();
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn archive_failure_preserves_result_and_releases_slot_for_the_next_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = runner_state(Some("sisa_abc"));
+    let (addr, server_task) = spawn_fake(state.clone()).await;
+    // 未配置 HTTP 归档面：三次即时上传必败，不允许误报归档成功。
+    let (shutdown, _, task) = spawn_agent(dir.path(), format!("http://{addr}"), Some("sisa_abc"));
+    send_downlink(
+        &state,
+        shell_spec("job-archive", "pipe", "job", "exit 0", vec![], vec![], 0),
+    )
+    .await;
+    let terminal = await_terminal(&state, "job-archive").await;
+    assert_eq!(terminal.phase(), JobPhase::JobSucceeded);
+    assert_eq!(terminal.exit_code, Some(0));
+    assert!(terminal.execution_finished_at_ms.is_some());
+    assert!(dir.path().join("logbuf/job-archive-0.jsonl").exists());
+    assert!(
+        dir.path()
+            .join("logbuf/job-archive-0.archive-pending")
+            .exists()
+    );
+    send_downlink(
+        &state,
+        shell_spec("job-next", "pipe", "job", "exit 7", vec![], vec![], 0),
+    )
+    .await;
+    let next = await_terminal(&state, "job-next").await;
+    assert_eq!(next.phase(), JobPhase::JobFailed);
+    assert_eq!(next.exit_code, Some(7));
+    assert_eq!(
+        state
+            .statuses()
+            .iter()
+            .filter(|s| s.job_id == "job-archive" && s.phase() == JobPhase::JobSucceeded)
+            .count(),
+        1
+    );
+    shutdown.send(true).unwrap();
+    task.await.unwrap();
+    server_task.abort();
+}
+
 /// AC: shell 步骤非零退出 → 终态 failed + 退出码。
 #[tokio::test]
 async fn shell_step_failure_reports_failed_with_exit_code() {

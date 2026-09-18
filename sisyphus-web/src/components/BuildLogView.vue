@@ -31,6 +31,8 @@ import {
   type BuildLogModel,
 } from '@/model/buildLog'
 import { formatBytes, formatDuration } from '@/utils/format'
+import { logArchivesApi } from '@/api/logArchives'
+import type { ArchiveStatus } from '@/api/types'
 
 const props = defineProps<{
   project: string
@@ -46,6 +48,22 @@ const model = ref<BuildLogModel>(createLogModel())
 const connectionStatus = ref<LogStreamConnectionStatus>('connecting')
 
 let connection: LogStreamConnection | null = null
+const archive = ref<ArchiveStatus | null>(null)
+let archiveGeneration = 0
+let archiveTimer: ReturnType<typeof setInterval> | null = null
+
+async function refreshArchive(): Promise<void> {
+  const generation = archiveGeneration
+  const path = logUrl.value.replace(/^\/api\/v1\//, '').replace(/\/stream\?.*$/, '/status')
+  try {
+    const status = await logArchivesApi.status(path)
+    if (generation !== archiveGeneration) return
+    const becameReady = archive.value?.state === 'pending' && status?.state === 'ready'
+    archive.value = status
+    if (status?.state === 'lost') connection?.close()
+    else if (becameReady) openStream()
+  } catch { /* 旧 Server 无独立状态 API 时保留 SSE 的兼容读取。 */ }
+}
 
 const logUrl = computed(() =>
   buildLogStreamUrl(
@@ -63,6 +81,9 @@ const allExpanded = computed(() => model.value.steps.every((s) => !s.collapsed))
 const hasLog = computed(() => model.value.steps.length > 0 || model.value.preamble.length > 0)
 
 function openStream(): void {
+  archiveGeneration++
+  archive.value = null
+  if (archiveTimer != null) clearInterval(archiveTimer)
   connection?.close()
   stick = true
   model.value = createLogModel()
@@ -74,6 +95,8 @@ function openStream(): void {
       connectionStatus.value = status
     },
   )
+  void refreshArchive()
+  archiveTimer = setInterval(() => void refreshArchive(), 10_000)
 }
 
 // 自动跟随：stick=true 时每次事件推进都滚到底；用户上滚（离底 >32px）
@@ -139,6 +162,8 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  archiveGeneration++
+  if (archiveTimer != null) clearInterval(archiveTimer)
   connection?.close()
   connection = null
 })
@@ -158,6 +183,15 @@ onBeforeUnmount(() => {
         {{ allExpanded ? t('buildLog.collapseAll') : t('buildLog.expandAll') }}
       </button>
     </header>
+
+    <div v-if="archive?.state === 'pending'" class="state-note" role="status">
+      {{ t('logArchive.pending') }}
+    </div>
+    <div v-if="archive?.state === 'lost'" class="state-note" role="alert">
+      {{ t(archive.lost_reason === 'retention_expired' ? 'logArchive.expired' : 'logArchive.lost') }}
+      — {{ archive.lost_reason }}
+      <p>{{ t('logArchive.lastInfo', { seq: archive.last_seq ?? '—', size: formatBytes(archive.size) }) }}</p>
+    </div>
 
     <!-- 退化态：SSE 日志端点尚未交付（Spec B4 缺端点纪律：显式标注）。 -->
     <div v-if="connectionStatus === 'degraded'" class="state-note" role="status">

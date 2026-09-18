@@ -208,6 +208,22 @@ pub(crate) async fn agent_archive_grant(
         .await?
         .filter(|job| job.agent_id == Some(agent.agent_id) && job.attempt == attempt)
         .ok_or_else(|| ApiError::resource_not_found(format!("任务 {job_id} 不存在")))?;
+    if state
+        .log_archives
+        .status(job_id, attempt)
+        .await?
+        .is_some_and(|archive| archive.state == "lost")
+    {
+        return Ok(Json(ArchiveGrantResponse {
+            backend: "local",
+            state: "lost",
+            url: None,
+        }));
+    }
+    state
+        .log_archives
+        .record_execution_end(job_id, attempt, request.index.execution_finished_at_ms)
+        .await?;
     if state.log_archive_backend == LogArchiveBackend::Local {
         return Ok(Json(ArchiveGrantResponse {
             backend: "local",
@@ -323,6 +339,10 @@ pub(crate) async fn agent_archive_upload(
         )
     })?;
     let root = state.log_archives.root().join("tmp");
+    state
+        .log_archives
+        .record_execution_end(job_id, attempt, index.execution_finished_at_ms)
+        .await?;
     tokio::fs::create_dir_all(&root)
         .await
         .map_err(|e| ApiError::internal("创建日志归档临时目录", &e))?;
@@ -428,6 +448,21 @@ pub async fn stream(
         Some(last) => last.saturating_add(1),
         None => parse_seq(query.from.as_deref(), "from")?,
     };
+
+    if let Some(archive) = state.log_archives.status(job.id, attempt).await?
+        && archive.state == "lost"
+    {
+        let event = LogUnavailableEvent {
+            kind: "log_unavailable".into(),
+            reason: archive
+                .lost_reason
+                .unwrap_or_else(|| "permanently_lost".into()),
+        };
+        return Ok(Sse::new(futures::stream::iter([Ok::<_, std::io::Error>(
+            sse_unavailable(&event),
+        )]))
+        .into_response());
+    }
 
     // 订阅 Agent 先于历史读取（窗口无漏）：首名观看者触发一次上游订阅，
     // 后续浏览器复用同一 broadcast；Agent 离线时保留观看者状态供重连恢复。
@@ -611,6 +646,16 @@ pub async fn download(
     let build = load_build(&state, &access.project.id, &pipeline, number).await?;
     let job = load_job(&state, &build, &job_name, attempt).await?;
     let loc = logs::location(build.id, job.id, attempt);
+    if let Some(archive) = state.log_archives.status(job.id, attempt).await?
+        && archive.state == "lost"
+    {
+        return Err(ApiError::conflict(format!(
+            "日志不可用：{}",
+            archive
+                .lost_reason
+                .unwrap_or_else(|| "permanently_lost".into())
+        )));
+    }
     if let Some(stream) = state
         .log_archives
         .stream_plain(job.id, attempt)
@@ -652,7 +697,7 @@ pub async fn download(
 
 /// 按构建行 + 任务名 + attempt 定位任务行（重跑同任务占新行 attempt+1，
 /// name+attempt 唯一）；不存在 404。
-async fn load_job(
+pub(super) async fn load_job(
     state: &AppState,
     build: &BuildRow,
     job_name: &str,

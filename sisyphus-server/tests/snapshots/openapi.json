@@ -1732,6 +1732,7 @@
             "schema": {
               "type": "string",
               "enum": [
+                "log_archive_lost",
                 "login_success",
                 "login_failure",
                 "logout",
@@ -2427,6 +2428,155 @@
           },
           "422": {
             "description": "输入校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/log-archives": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "管理员查看待归档及丢失记录。",
+        "operationId": "backlog",
+        "parameters": [
+          {
+            "name": "agent",
+            "in": "query",
+            "description": "构建机名。",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ArchiveStatus"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/log-archives/{job_id}/{attempt}/lost": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "管理员确认永久丢失，原因写入审计。",
+        "operationId": "mark_lost",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "attempt",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LostRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -4361,6 +4511,108 @@
         }
       }
     },
+    "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/jobs/{job}/attempts/{attempt}/logs/status": {
+      "get": {
+        "tags": [
+          "builds"
+        ],
+        "summary": "项目 viewer 查看独立归档状态。",
+        "operationId": "status",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "job",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "attempt",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ArchiveStatus"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/jobs/{job}/attempts/{attempt}/logs/stream": {
       "get": {
         "tags": [
@@ -5867,6 +6119,17 @@
             "format": "int64",
             "description": "最近心跳时间（Unix 毫秒；从未在线为空）。"
           },
+          "log_buffer": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LogBufferReport",
+                "description": "日志归档积压与压力（离线后保留最后报告）。"
+              }
+            ]
+          },
           "max_concurrency": {
             "type": "integer",
             "format": "int32",
@@ -5932,6 +6195,104 @@
           "has_offline_agent": {
             "type": "boolean",
             "description": "存在启用但离线的 Agent。"
+          }
+        }
+      },
+      "ArchiveStatus": {
+        "type": "object",
+        "description": "日志状态与最后可用信息，不暴露正文路径或签名 URL。",
+        "required": [
+          "job_id",
+          "attempt",
+          "state",
+          "backend",
+          "size",
+          "job_name",
+          "build_number",
+          "pipeline_name"
+        ],
+        "properties": {
+          "agent_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "负责的 Agent。"
+          },
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "执行轮次。"
+          },
+          "backend": {
+            "type": "string",
+            "description": "后端。"
+          },
+          "build_number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "构建号。"
+          },
+          "execution_finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "固定执行结束时刻。"
+          },
+          "job_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "任务行。"
+          },
+          "job_name": {
+            "type": "string",
+            "description": "任务名。"
+          },
+          "last_seen_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Agent 最后心跳。"
+          },
+          "last_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "最后可用序号。"
+          },
+          "lost_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "标记时刻。"
+          },
+          "lost_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "丢失或清理原因。"
+          },
+          "pipeline_name": {
+            "type": "string",
+            "description": "Pipeline。"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "最后声明的归档大小。"
+          },
+          "state": {
+            "type": "string",
+            "description": "pending / ready / lost。"
           }
         }
       },
@@ -7633,6 +7994,63 @@
         "enum": [
           "admin"
         ]
+      },
+      "LogBufferReport": {
+        "type": "object",
+        "description": "最近心跳上报的缓冲压力及待归档量。",
+        "required": [
+          "bytes",
+          "capacity_bytes",
+          "pending_archives",
+          "pressured",
+          "reported_at"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "实际缓冲字节。"
+          },
+          "capacity_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "本机容量配置。"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "最近可用的错误。"
+          },
+          "pending_archives": {
+            "type": "integer",
+            "format": "int64",
+            "description": "待确认 attempt 数。"
+          },
+          "pressured": {
+            "type": "boolean",
+            "description": "压力或采样故障时不可派发。"
+          },
+          "reported_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "最后收到报告的 Server 时刻。"
+          }
+        }
+      },
+      "LostRequest": {
+        "type": "object",
+        "description": "不可恢复或强制清理必须填写原因。",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "可审计的原因。"
+          }
+        }
       },
       "MeResponse": {
         "type": "object",

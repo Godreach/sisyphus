@@ -33,6 +33,8 @@ pub(crate) struct FrameIndex {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ArchiveIndex {
+    #[serde(default)]
+    pub execution_finished_at_ms: Option<i64>,
     pub job_id: String,
     pub attempt: i32,
     pub first_seq: Option<u64>,
@@ -149,6 +151,11 @@ fn seal_with_frame_bytes(
     let compressed_bytes = out.metadata()?.len();
     let sha256 = sha256_path(archive_path)?;
     let index = ArchiveIndex {
+        execution_finished_at_ms: std::fs::read_to_string(
+            buffer_path.with_extension("archive-pending"),
+        )
+        .ok()
+        .and_then(|value| value.parse().ok()),
         job_id: job_id.into(),
         attempt,
         first_seq,
@@ -292,7 +299,7 @@ impl LogArchiveIo for RealLogArchiveIo {
             url: Option<String>,
         }
         let grant: Grant = response.json().await.map_err(|e| e.to_string())?;
-        if grant.state == "ready" {
+        if grant.state == "ready" || grant.state == "lost" {
             return Ok(());
         }
         if grant.backend == "s3" {
@@ -379,6 +386,7 @@ pub(crate) fn spawn_retry_worker(
                     Ok(archive) => archive,
                     Err(error) => {
                         tracing::warn!(job = %job_id, attempt, error = %error, "待归档日志重新封存失败");
+                        logbuf.record_archive_error(&job_id, attempt, &error.to_string());
                         continue;
                     }
                 };
@@ -389,6 +397,7 @@ pub(crate) fn spawn_retry_worker(
                     }
                     Err(error) => {
                         tracing::warn!(job = %job_id, attempt, error = %error, "待归档日志后台重试失败");
+                        logbuf.record_archive_error(&job_id, attempt, &error);
                     }
                 }
             }
@@ -399,6 +408,56 @@ pub(crate) fn spawn_retry_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ConfirmedArchive;
+
+    #[async_trait::async_trait]
+    impl LogArchiveIo for ConfirmedArchive {
+        async fn upload(&self, _: &str, _: i32, _: &SealedArchive) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_recovers_pending_archive_and_confirmation_stops_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let original =
+            crate::logbuf::LogBuffer::new(dir.path().to_path_buf(), std::time::Duration::ZERO);
+        original.mark_archive_pending("42", 1).unwrap();
+        let end = original
+            .seal_archive("42", 1)
+            .unwrap()
+            .index
+            .execution_finished_at_ms;
+        assert!(end.is_some());
+        drop(original);
+        let recovered =
+            crate::logbuf::LogBuffer::new(dir.path().to_path_buf(), std::time::Duration::ZERO);
+        assert_eq!(
+            recovered
+                .seal_archive("42", 1)
+                .unwrap()
+                .index
+                .execution_finished_at_ms,
+            end
+        );
+        let worker = spawn_retry_worker(
+            recovered.clone(),
+            Arc::new(RwLock::new(vec![])),
+            Arc::new(ConfirmedArchive),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if recovered.pending_archives().is_empty() && !recovered.path("42", 1).exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        worker.abort();
+    }
 
     #[tokio::test]
     async fn agent_uploads_log_to_temporary_s3_url_then_confirms_with_server() {

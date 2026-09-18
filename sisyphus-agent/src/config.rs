@@ -52,6 +52,8 @@ pub struct Config {
     /// 缓存容量上限（ADR-0012：per-Agent，单位 GiB；0 = 不限，默认 20）。
     /// Agent 本地配置——磁盘容量是机器的运维属性，不参与调度决策。
     pub cache_capacity_gib: u64,
+    /// 日志缓冲容量（GiB，默认 20）；90% 时停止接新任务，不淘汰未确认正文。
+    pub log_buffer_capacity_gib: u64,
 }
 
 impl Config {
@@ -114,6 +116,11 @@ impl Config {
                 .cache_capacity_gib
                 .or(env.cache_capacity_gib)
                 .unwrap_or(DEFAULT_CACHE_CAPACITY_GIB),
+            log_buffer_capacity_gib: cli
+                .log_buffer_capacity_gib
+                .or(env.log_buffer_capacity_gib)
+                .unwrap_or(20)
+                .max(1),
         })
     }
 
@@ -167,6 +174,8 @@ pub struct Overrides {
     pub log_file: Option<PathBuf>,
     /// 缓存容量上限覆盖（ADR-0012：GiB，0 = 不限）。
     pub cache_capacity_gib: Option<u64>,
+    /// 持久日志缓冲容量（GiB）。
+    pub log_buffer_capacity_gib: Option<u64>,
 }
 
 impl Overrides {
@@ -181,6 +190,8 @@ impl Overrides {
             log_level: get("SISYPHUS_LOG_LEVEL"),
             log_file: get("SISYPHUS_LOG_FILE").map(PathBuf::from),
             cache_capacity_gib: get("SISYPHUS_CACHE_CAPACITY_GIB")
+                .and_then(|v| v.parse::<u64>().ok()),
+            log_buffer_capacity_gib: get("SISYPHUS_LOG_BUFFER_CAPACITY_GIB")
                 .and_then(|v| v.parse::<u64>().ok()),
         }
     }

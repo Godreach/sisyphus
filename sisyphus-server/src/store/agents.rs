@@ -577,6 +577,12 @@ impl AgentRepo {
         if !agent.online || agent.disabled {
             return Ok(false);
         }
+        if super::agent_log_buffers::latest(&self.pool, id)
+            .await?
+            .is_some_and(|usage| usage.pressured)
+        {
+            return Ok(false);
+        }
         let active = crate::store::jobs::JobRepo::new(self.pool.clone())
             .active_by_agent(id)
             .await?;

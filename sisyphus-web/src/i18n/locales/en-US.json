@@ -419,6 +419,22 @@
     "triggerConflict": "Cannot trigger (409): only one build per pipeline runs at a time; try again later.",
     "backToProjects": "Back to projects"
   },
+  "logArchive": {
+    "title": "Log archives",
+    "pending": "Archive pending: the Agent retains logs and retries in the background. The build result is unchanged.",
+    "lost": "Logs permanently lost",
+    "expired": "Logs removed by independent retention",
+    "lastInfo": "Last available information: seq {seq}, archive size {size}",
+    "pressure": "Log buffer pressure: new jobs are paused; running jobs continue.",
+    "buffer": "Log buffer / capacity",
+    "backlog": "Pending archive attempts",
+    "lastReport": "Last available report",
+    "error": "Archive error",
+    "refresh": "Refresh archive status",
+    "reason": "Reason for permanent loss or forced deletion (required)",
+    "markLost": "Mark permanently lost and clean up",
+    "confirmLost": "This irreversible action is audited. The Agent will delete confirmed-lost local logs after reconnecting."
+  },
   "buildLog": {
     "title": "Log",
     "showLog": "Show log",

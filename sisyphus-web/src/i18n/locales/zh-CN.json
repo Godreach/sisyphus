@@ -419,6 +419,22 @@
     "triggerConflict": "无法触发（409）：同一条流水线同时只跑一条构建，请稍后重试。",
     "backToProjects": "返回项目库"
   },
+  "logArchive": {
+    "title": "日志归档",
+    "pending": "待归档：Agent 保留日志并在后台重试，构建结果不受影响。",
+    "lost": "日志永久丢失",
+    "expired": "日志已按独立保留期清理",
+    "lastInfo": "最后可用信息：seq {seq}，归档大小 {size}",
+    "pressure": "日志缓冲达到压力阈值，停止接收新任务；运行中任务继续执行。",
+    "buffer": "日志缓冲 / 容量",
+    "backlog": "待归档 attempt 数",
+    "lastReport": "最后可用报告",
+    "error": "归档错误",
+    "refresh": "刷新归档状态",
+    "reason": "永久失联或强制删除的原因（必填）",
+    "markLost": "标记永久丢失并清理",
+    "confirmLost": "此操作不可撤销并写入审计；Agent 重连后将清理已确认丢失的本地日志。"
+  },
   "buildLog": {
     "title": "日志",
     "showLog": "查看日志",

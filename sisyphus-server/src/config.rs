@@ -138,6 +138,8 @@ pub struct Config {
     /// 日志与产物共享的 per-build 保留期天数（ADR-0013/0004：默认 30 天，
     /// 每日低频扫描清理过期构建的日志 chunk 与产物，构建记录永久保留）。
     pub retention_days: i64,
+    /// 独立日志归档保留期，默认从 attempt 执行结束起 30 天。
+    pub log_retention_days: i64,
     /// `/metrics` 端点鉴权开关（ADR-0019：默认开；config `[metrics] auth =
     /// false` 可关——仅限可信内网，文档注明）。
     pub metrics_auth: bool,
@@ -166,6 +168,8 @@ pub struct Overrides {
     pub master_key_path: Option<String>,
     /// 保留期天数覆盖（文本形态；整数语义在 merge 缝收口，ADR-0013）。
     pub retention_days: Option<String>,
+    /// 日志归档保留期覆盖。
+    pub log_retention_days: Option<String>,
     /// `/metrics` 鉴权开关覆盖（文本形态；布尔语义在 merge 缝收口，
     /// ADR-0019——开关类配置拼错必须启动失败）。
     pub metrics_auth: Option<String>,
@@ -318,6 +322,8 @@ pub struct RetentionFile {
     /// per-build 保留期天数（默认 30 天；每日低频扫描清理过期构建的日志
     /// chunk 与产物文件 + 元数据，构建记录永久保留）。
     pub retention_days: Option<i64>,
+    /// 日志归档独立保留期（默认 30）。
+    pub log_retention_days: Option<i64>,
 }
 
 /// `[metrics]` 段（ADR-0019，票 B5-T7：/metrics 端点鉴权开关）。
@@ -491,6 +497,7 @@ poll_interval_minutes = 5
 # 清理过期构建的日志 chunk 与产物文件 + 元数据（含空目录回收）；构建记录
 # （状态/号/时长）永久保留。删产物不碰 backups/ 迁移备份目录。
 retention_days = 30
+log_retention_days = 30
 
 [metrics]
 # /metrics 端点鉴权开关（默认 true，ADR-0019）：true = 需认证（Bearer PAT 任意
@@ -566,6 +573,7 @@ impl Overrides {
             registration_enabled: get("SISYPHUS_REGISTRATION_ENABLED"),
             master_key_path: get("SISYPHUS_MASTER_KEY_PATH"),
             retention_days: get("SISYPHUS_RETENTION_DAYS"),
+            log_retention_days: get("SISYPHUS_LOG_RETENTION_DAYS"),
             metrics_auth: get("SISYPHUS_METRICS_AUTH"),
             s3_endpoint: get("SISYPHUS_S3_ENDPOINT"),
             s3_region: get("SISYPHUS_S3_REGION"),
@@ -672,6 +680,11 @@ pub fn merge(
         &env.retention_days,
         file.retention.retention_days,
     )?;
+    let log_retention_days = merge_retention_days(
+        &cli.log_retention_days,
+        &env.log_retention_days,
+        file.retention.log_retention_days,
+    )?;
 
     // /metrics 鉴权开关：CLI > env > 文件 > 默认（ADR-0019 默认开）。
     // CLI/env 层是文本（布尔语义在 merge 收口——复用 parse_bool，开关类
@@ -715,6 +728,7 @@ pub fn merge(
         orphan_grace_minutes,
         poll_interval_minutes,
         retention_days,
+        log_retention_days,
         metrics_auth,
         s3,
         log_archive_backend,
@@ -1030,6 +1044,29 @@ mod tests {
     }
 
     #[test]
+    fn log_retention_is_independent_of_artifact_retention() {
+        let file = parse_toml("[retention]\nretention_days = 7\n").unwrap();
+        let cfg = merge(
+            PathBuf::from("data"),
+            &Overrides::default(),
+            &Overrides::default(),
+            &file,
+        )
+        .unwrap();
+        assert_eq!(cfg.log_retention_days, 30);
+        let cli = Overrides {
+            log_retention_days: Some("14".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            merge(PathBuf::from("data"), &cli, &Overrides::default(), &file)
+                .unwrap()
+                .log_retention_days,
+            14
+        );
+    }
+
+    #[test]
     fn artifact_transfer_limits_are_configurable_and_validated() {
         const MIB: u64 = 1024 * 1024;
         const GIB: u64 = 1024 * MIB;
@@ -1103,6 +1140,7 @@ mod tests {
         let file = FileConfig {
             retention: RetentionFile {
                 retention_days: Some(14),
+                ..Default::default()
             },
             ..FileConfig::default()
         };
@@ -1139,6 +1177,7 @@ mod tests {
         let file_zero = FileConfig {
             retention: RetentionFile {
                 retention_days: Some(0),
+                ..Default::default()
             },
             ..FileConfig::default()
         };

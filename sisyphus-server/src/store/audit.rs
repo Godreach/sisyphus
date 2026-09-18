@@ -75,12 +75,15 @@ pub enum AuditEvent {
     /// 非机密配置字段 + password_changed 布尔——密码值永不落审计，值形态在
     /// 审计路径不存在）。全局资源、全局 admin 档（ADR-0014）。
     SmtpConfigChanged,
+    /// 管理员确认未归档日志永久丢失。
+    LogArchiveLost,
 }
 
 impl AuditEvent {
     /// 全部事件类型（契约单点：`as_str` 映射 + [`Self::parse`] 识别 +
     /// OpenAPI enum 生成的共同来源——新增事件类型只改这里与 [`Self::as_str`]）。
-    pub const ALL: [AuditEvent; 24] = [
+    pub const ALL: [AuditEvent; 25] = [
+        Self::LogArchiveLost,
         Self::LoginSuccess,
         Self::LoginFailure,
         Self::Logout,
@@ -110,6 +113,7 @@ impl AuditEvent {
     /// 落库 / 查询过滤文本（契约值；filter 参数按此匹配）。
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::LogArchiveLost => "log_archive_lost",
             Self::LoginSuccess => "login_success",
             Self::LoginFailure => "login_failure",
             Self::Logout => "logout",

@@ -69,8 +69,8 @@ use crate::stepio::{Truncation, emit_step, run_streamed_step, step_event};
 use crate::upgrader::DrainGate;
 use crate::workspace::{self, Workspace};
 
-/// per-job 日志上限默认值（ADR-0013：`log_limit_bytes = 0` → 50 MB）。
-const DEFAULT_LOG_LIMIT: u64 = 50 * 1024 * 1024;
+/// per-job 日志上限默认值（ADR-0027：`log_limit_bytes = 0` → 1 GiB）。
+const DEFAULT_LOG_LIMIT: u64 = 1024 * 1024 * 1024;
 
 // ============================================================
 // 上行链路（JobAck / JobStatus 活体发送 + 离线终态缓冲）
@@ -125,8 +125,10 @@ impl RunnerUplink {
         phase: JobPhase,
         exit_code: Option<i32>,
         detail: &str,
+        execution_finished_at_ms: i64,
     ) {
         let status = JobStatus {
+            execution_finished_at_ms: Some(execution_finished_at_ms),
             job_id: job_id.to_string(),
             phase: phase as i32,
             exit_code,
@@ -309,6 +311,18 @@ impl Handle {
     /// 处理一帧 JobSpec：排空态拒收 → 去重 → ack → 起任务执行。
     async fn handle_job(&mut self, spec: JobSpec) {
         let job_id = spec.job_id.clone();
+        if self.logbuf.usage().map_or(true, |usage| usage.pressured) {
+            self.uplink
+                .send(ChannelMessage {
+                    kind: Some(Kind::JobAck(JobAck {
+                        job_id,
+                        accepted: false,
+                        error: "log buffer pressure: new jobs paused".into(),
+                    })),
+                })
+                .await;
+            return;
+        }
         // 排空态（ADR-0017 升级排空）：拒收新任务，ack accepted=false，不占槽位。
         // TOCTOU（闸门置位与本检查竞态）由 upgrader 的 wait_drained 兜住——已入
         // 在途集的任务仍被等空，故正确性不破；仅极罕见地多收一个任务。
@@ -545,6 +559,7 @@ async fn run_job(
     uplink
         .send(ChannelMessage {
             kind: Some(Kind::JobStatus(JobStatus {
+                execution_finished_at_ms: None,
                 job_id: job_id.clone(),
                 phase: JobPhase::JobRunning as i32,
                 exit_code: None,
@@ -682,6 +697,7 @@ async fn archive_then_report(
     detail: &str,
 ) {
     // 终态前先把本地持久缓冲封存为独立 gzip 帧归档；归档失败不改写执行结果，
+    let execution_finished_at_ms = now_ms();
     // 源缓冲仍保留，供后台重试/运维取证（ADR-0027）。
     // 先落盘终态意图，封存过程崩溃后 worker 仍能识别并重试；即使
     // marker 写入失败，也继续尝试封存，完成的 archive index 可供扫描恢复。
@@ -694,6 +710,7 @@ async fn archive_then_report(
                 upload_archive_immediate(log_archive_io, job_id, attempt, &archive).await
             {
                 tracing::warn!(job = %job_id, attempt, error = %error, "日志归档上传失败，保留本地缓冲");
+                logbuf.record_archive_error(job_id, attempt, &error);
                 false
             } else {
                 true
@@ -701,11 +718,12 @@ async fn archive_then_report(
         }
         Err(error) => {
             tracing::warn!(job = %job_id, attempt, error = %error, "日志归档封存失败，保留本地缓冲");
+            logbuf.record_archive_error(job_id, attempt, &error.to_string());
             false
         }
     };
     uplink
-        .report_terminal(job_id, phase, exit_code, detail)
+        .report_terminal(job_id, phase, exit_code, detail, execution_finished_at_ms)
         .await;
     // 终态上报成功后延迟宽限删除日志缓冲（ADR-0013：宽限内崩溃重启缓冲留作
     // 孤儿补传取证；宽限到期由 logbuf 删除 worker 清理）。
@@ -729,9 +747,12 @@ async fn upload_archive_immediate(
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        match io.upload(job_id, attempt, archive).await {
-            Ok(()) => return Ok(()),
-            Err(error) => last = error,
+        match tokio::time::timeout(Duration::from_secs(30), io.upload(job_id, attempt, archive))
+            .await
+        {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(error)) => last = error,
+            Err(_) => last = "日志归档即时上传超时，转后台重试".into(),
         }
     }
     Err(last)
@@ -1168,7 +1189,7 @@ fn collect_secrets(spec: &JobSpec) -> Vec<Vec<u8>> {
     out
 }
 
-/// per-job 日志上限（ADR-0013：`log_limit_bytes <= 0` → 默认 50 MB）。
+/// per-job 日志上限（ADR-0027：`log_limit_bytes <= 0` → 默认 1 GiB）。
 fn log_limit_bytes(raw: i64) -> u64 {
     if raw <= 0 {
         DEFAULT_LOG_LIMIT
@@ -1269,8 +1290,8 @@ mod tests {
 
     #[test]
     fn log_limit_default_when_zero_or_negative() {
-        assert_eq!(log_limit_bytes(0), DEFAULT_LOG_LIMIT);
-        assert_eq!(log_limit_bytes(-1), DEFAULT_LOG_LIMIT);
+        assert_eq!(log_limit_bytes(0), 1024 * 1024 * 1024);
+        assert_eq!(log_limit_bytes(-1), 1024 * 1024 * 1024);
         assert_eq!(log_limit_bytes(1024), 1024);
     }
 

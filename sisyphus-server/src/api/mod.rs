@@ -32,6 +32,7 @@ pub mod deletions;
 pub mod docs;
 pub mod error;
 pub mod health;
+pub mod log_archives;
 pub mod logs;
 pub mod members;
 pub mod metrics;
@@ -500,6 +501,9 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         // 中间件把关「谁在说话」；概览是全局运行态，无项目权限细分）。静态段
         // 置于业务端点之后，与 /audit 同级（非项目域全局资源）。
         .route("/overview", get(overview::get))
+        .route("/log-archives", get(log_archives::backlog))
+        .route("/log-archives/{job_id}/{attempt}/lost", post(log_archives::mark_lost))
+        .route("/projects/{name}/pipelines/{pipeline}/builds/{number}/jobs/{job}/attempts/{attempt}/logs/status", get(log_archives::status))
         // 层序（route_layer 后加者在外、先跑）：认证（401）在外层把关
         // 「谁在说话」（cookie 会话 / Bearer PAT 双通道，票 B2b-T3）；
         // CSRF（403）在其内层，只拦「已过认证且以 cookie 认证」的非安全

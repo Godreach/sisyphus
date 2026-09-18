@@ -247,6 +247,7 @@ async fn ack(tx: &mpsc::Sender<ChannelMessage>, job_id: &str) {
 async fn report(tx: &mpsc::Sender<ChannelMessage>, job_id: &str, phase: JobPhase) {
     tx.send(ChannelMessage {
         kind: Some(Kind::JobStatus(ProtoJobStatus {
+            execution_finished_at_ms: None,
             job_id: job_id.into(),
             phase: phase as i32,
             exit_code: Some(if matches!(phase, JobPhase::JobSucceeded) {

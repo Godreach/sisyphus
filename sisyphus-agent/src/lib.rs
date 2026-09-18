@@ -148,7 +148,11 @@ impl Agent {
             cache: cache_tx,
         };
         let receipts = ReceiptLog::default();
-        let logbuf = LogBuffer::new(config.logbuf_dir(), DEFAULT_GRACE);
+        let logbuf = LogBuffer::new(config.logbuf_dir(), DEFAULT_GRACE).with_capacity_bytes(
+            config
+                .log_buffer_capacity_gib
+                .saturating_mul(1024 * 1024 * 1024),
+        );
         let in_flight = Arc::new(RwLock::new(Vec::new()));
         let runner_uplink = runner::RunnerUplink::new();
         // Handle 持一份工作区状态克隆（与组合根共享内部；run_connection 用根上那份）。

@@ -268,7 +268,7 @@ export function openLogStream(
       }
       // Agent 重连后同一 SSE 流会继续收到按 seq 回放；清除离线提示，
       // 不要求浏览器重新建立第二条观看者订阅。
-      if (event.type !== 'log_unavailable') onStatus('open')
+      onStatus('open')
       onEvent(event)
     })
   }

@@ -582,6 +582,175 @@ async fn log_archive_grant_only_signs_a_temporary_log_object() {
 }
 
 #[tokio::test]
+async fn administrator_marks_pending_logs_lost_with_audit_and_no_execution_change() {
+    let h = harness().await;
+    JobRepo::new(h.app.pool.clone())
+        .transition(
+            h.job_a,
+            sisyphus_server::store::jobs::JobStatus::Succeeded,
+            Some(0),
+            None,
+            1700000000000,
+        )
+        .await
+        .unwrap();
+    let (_, index) = two_frame_log_archive(h.job_a);
+    let grant_path = format!("/api/v1/agent/log-archives/{}/1/upload-url", h.job_a);
+    assert_eq!(
+        agent_post_json(
+            &h,
+            &grant_path,
+            &serde_json::json!({"index":index}).to_string()
+        )
+        .await
+        .status(),
+        200
+    );
+    let lost_path = format!("/api/v1/log-archives/{}/1/lost", h.job_a);
+    let response = common::req_with_cookie(
+        &h.app,
+        "POST",
+        &lost_path,
+        Some(r#"{"reason":"Agent disk permanently destroyed"}"#.into()),
+        Some(&h.cookie),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let response =
+        common::req_with_cookie(&h.app, "GET", "/api/v1/log-archives", None, Some(&h.cookie)).await;
+    let list = common::body_json(response).await;
+    assert_eq!(list[0]["state"], "lost");
+    assert_eq!(list[0]["lost_reason"], "Agent disk permanently destroyed");
+    assert_eq!(list[0]["last_seq"], 1);
+    assert_eq!(
+        JobRepo::new(h.app.pool.clone())
+            .get(h.job_a)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        sisyphus_server::store::jobs::JobStatus::Succeeded
+    );
+    let response = common::req_with_cookie(
+        &h.app,
+        "GET",
+        "/api/v1/audit?event=log_archive_lost",
+        None,
+        Some(&h.cookie),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    let audit = common::body_json(response).await;
+    assert!(
+        audit
+            .to_string()
+            .contains("Agent disk permanently destroyed")
+    );
+    let grant = agent_post_json(
+        &h,
+        &grant_path,
+        &serde_json::json!({"index":index}).to_string(),
+    )
+    .await;
+    assert_eq!(
+        common::body_json(grant).await["state"],
+        "lost",
+        "确认丢失后禁止补传复活"
+    );
+}
+
+#[tokio::test]
+async fn log_retention_starts_at_execution_end_and_retries_do_not_extend_it() {
+    let h = harness().await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let day = 24 * 60 * 60 * 1000;
+    let (_, mut index) = two_frame_log_archive(h.job_a);
+    index["execution_finished_at_ms"] = serde_json::json!(now - 31 * day);
+    let path = format!("/api/v1/agent/log-archives/{}/1/upload-url", h.job_a);
+    let body = serde_json::json!({"index":index}).to_string();
+    assert_eq!(agent_post_json(&h, &path, &body).await.status(), 200);
+    assert_eq!(agent_post_json(&h, &path, &body).await.status(), 200);
+    sisyphus_server::store::cleanup::sweep_with_log_retention(
+        &h.app.pool,
+        &h._dir.path().join("artifacts"),
+        now,
+        365,
+        30,
+        h.app.state.s3.as_deref(),
+    )
+    .await
+    .unwrap();
+    let list = common::body_json(
+        common::req_with_cookie(&h.app, "GET", "/api/v1/log-archives", None, Some(&h.cookie)).await,
+    )
+    .await;
+    assert_eq!(list[0]["state"], "lost");
+    assert_eq!(list[0]["lost_reason"], "retention_expired");
+    assert_eq!(list[0]["execution_finished_at"], now - 31 * day);
+    assert_eq!(
+        common::body_json(agent_post_json(&h, &path, &body).await).await["state"],
+        "lost"
+    );
+}
+
+#[tokio::test]
+async fn artifact_cleanup_cannot_remove_a_log_with_a_longer_independent_retention() {
+    let h = harness().await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let day = 24 * 60 * 60 * 1000;
+    let (_, mut index) = two_frame_log_archive(h.job_a);
+    index["execution_finished_at_ms"] = serde_json::json!(now - 2 * day);
+    let path = format!("/api/v1/agent/log-archives/{}/1/upload-url", h.job_a);
+    let body = serde_json::json!({"index":index}).to_string();
+    assert_eq!(agent_post_json(&h, &path, &body).await.status(), 200);
+    // 旧 SQLite 日志到期会触发原 per-build 清理，但不得跨越新日志保留期。
+    sqlx::query(
+        "INSERT INTO logs (build_id,job_id,attempt,start_seq,end_seq,step,stream,data,created_at)
+        VALUES (?, ?, 1, 0, 0, -1, '', X'1f8b', ?)",
+    )
+    .bind(h.build.id)
+    .bind(h.job_a)
+    .bind(now - 2 * day)
+    .execute(&h.app.pool)
+    .await
+    .unwrap();
+    sisyphus_server::store::cleanup::sweep_with_log_retention(
+        &h.app.pool,
+        &h._dir.path().join("artifacts"),
+        now,
+        1,
+        30,
+        h.app.state.s3.as_deref(),
+    )
+    .await
+    .unwrap();
+    let list = common::body_json(
+        common::req_with_cookie(&h.app, "GET", "/api/v1/log-archives", None, Some(&h.cookie)).await,
+    )
+    .await;
+    assert_eq!(list[0]["state"], "pending");
+    // 手动清理立即撤销归档资格，之后补传只收到清理确认。
+    sisyphus_server::store::delete_build_data_with_s3(
+        &h.app.pool,
+        &h._dir.path().join("artifacts"),
+        h.build.id,
+        h.app.state.s3.as_deref(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        common::body_json(agent_post_json(&h, &path, &body).await).await["state"],
+        "lost"
+    );
+}
+
+#[tokio::test]
 async fn configured_local_log_backend_keeps_server_upload_when_s3_exists() {
     let h = harness_with_limits_and_backend(
         sisyphus_server::api::ArtifactTransferLimits::default(),

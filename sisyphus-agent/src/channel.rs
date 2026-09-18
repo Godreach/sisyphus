@@ -633,6 +633,7 @@ pub async fn run_connection(
     let disk = cfg.disk.clone();
     let workspace_hb = workspace.clone();
     let cache_hb = cache.clone();
+    let logbuf_hb = logbuf.clone();
     let heartbeat = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(heartbeat_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -642,7 +643,23 @@ pub async fn run_connection(
             usage.workspace_bytes = workspace_hb.workspace_bytes();
             usage.cache_bytes = cache_hb.cache_bytes();
             let msg = ChannelMessage {
-                kind: Some(Kind::Heartbeat(Heartbeat { disk: Some(usage) })),
+                kind: Some(Kind::Heartbeat(Heartbeat {
+                    disk: Some(usage),
+                    log_buffer: Some(match logbuf_hb.usage() {
+                        Ok(usage) => sisyphus_proto::agent::LogBufferUsage {
+                            bytes: usage.bytes,
+                            capacity_bytes: usage.capacity_bytes,
+                            pending_archives: usage.pending_archives,
+                            pressured: usage.pressured,
+                            last_error: usage.last_error.unwrap_or_default(),
+                        },
+                        Err(error) => sisyphus_proto::agent::LogBufferUsage {
+                            pressured: true,
+                            last_error: error.to_string(),
+                            ..Default::default()
+                        },
+                    }),
+                })),
             };
             if heartbeat_tx.send(msg).await.is_err() {
                 break;

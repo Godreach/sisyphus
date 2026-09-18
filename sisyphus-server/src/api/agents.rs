@@ -110,6 +110,8 @@ pub struct AgentResponse {
     /// 磁盘占用（ADR-0019：卷级/缓存/工作区最近采样；从未上报为空）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_usage: Option<DiskUsageDto>,
+    /// 日志归档积压与压力（离线后保留最后报告）。
+    pub log_buffer: Option<crate::store::agent_log_buffers::LogBufferReport>,
     /// 握手上报的 Agent 版本（ADR-0017；从未握手为空）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_version: Option<VersionDto>,
@@ -1015,6 +1017,7 @@ async fn to_response(state: &AppState, row: AgentRow) -> Result<AgentResponse, A
     let upgrade_phase = row.upgrade_phase.clone();
     let upgrade_error = row.upgrade_error.clone();
     Ok(AgentResponse {
+        log_buffer: crate::store::agent_log_buffers::latest(&state.pool, row.id).await?,
         name: row.name,
         online: row.online,
         disabled: row.disabled,

@@ -509,6 +509,7 @@ async fn report(
 ) {
     tx.send(ChannelMessage {
         kind: Some(Kind::JobStatus(ProtoJobStatus {
+            execution_finished_at_ms: None,
             job_id: job_id.into(),
             phase: phase as i32,
             exit_code,

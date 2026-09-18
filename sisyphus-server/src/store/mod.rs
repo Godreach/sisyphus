@@ -8,6 +8,7 @@
 //! （[`LogStore`](traits::LogStore) / [`ArtifactStore`](traits::ArtifactStore)）
 //! 只定形不实现，随消费批次落同一缝。
 
+pub mod agent_log_buffers;
 pub mod agents;
 pub mod artifacts;
 pub mod audit;
@@ -43,6 +44,7 @@ pub use cleanup::{
     CLEANUP_INTERVAL, CleanupReport, delete_build_data, delete_build_data_with_s3,
     run_daily_cleanup, run_daily_cleanup_with_s3, sweep,
 };
+pub use log_archives::ArchiveStatus;
 pub(crate) use log_archives::{ArchiveIndex, LocalLogArchiveStore};
 pub use logs::SqliteLogStore;
 pub use s3_identity::{S3BackendIdentity, S3IdentityRepo};
@@ -337,6 +339,7 @@ mod tests {
         // 模拟旧库升级：抹掉迁移标记与业务表，使下一次 bootstrap 见到待应用迁移。
         let pool = open_raw_pool_for_test(dir.path()).await;
         for stmt in [
+            "DROP TABLE agent_log_buffers",
             "DROP TABLE log_archive_publish_candidates",
             "DROP TABLE log_archives",
             "DROP TABLE artifact_deletions",

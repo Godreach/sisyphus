@@ -433,6 +433,7 @@ async fn overview_and_metrics_report_true_state() {
     for spec in &specs {
         tx.send(ChannelMessage {
             kind: Some(Kind::JobStatus(ProtoJobStatus {
+                execution_finished_at_ms: None,
                 job_id: spec.job_id.clone(),
                 phase: sisyphus_proto::agent::JobPhase::JobSucceeded as i32,
                 exit_code: Some(0),

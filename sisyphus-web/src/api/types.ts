@@ -192,6 +192,7 @@ export interface VersionDto {
 
 /** Agent 管理视图（后端 `AgentResponse`，ADR-0017/0019 字段镜像）。 */
 export interface AgentResponse {
+  log_buffer?: LogBufferReport | null
   name: string
   online: boolean
   disabled: boolean
@@ -218,6 +219,32 @@ export interface AgentResponse {
   memory_usage: number | null
   created_at: number
   updated_at: number
+}
+
+export interface LogBufferReport {
+  bytes: number
+  capacity_bytes: number
+  pending_archives: number
+  pressured: boolean
+  last_error: string | null
+  reported_at: number
+}
+
+export interface ArchiveStatus {
+  job_id: number
+  attempt: number
+  state: 'pending' | 'ready' | 'lost'
+  backend: string
+  size: number
+  last_seq: number | null
+  execution_finished_at: number | null
+  lost_reason: string | null
+  lost_at: number | null
+  agent_name: string | null
+  last_seen_at: number | null
+  job_name: string
+  build_number: number
+  pipeline_name: string
 }
 
 /** 建 Agent 条目响应：token 与注册码明文仅此一次返回（后端

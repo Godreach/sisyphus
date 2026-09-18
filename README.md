@@ -38,6 +38,8 @@ sisyphus-agent --server-url http://<server>:50051 --api-url http://<server>:8080
 
 注册成功后 token 落盘，Agent 常驻领取任务。
 
+日志归档失败恢复、缓冲容量保护、永久丢失审计与独立保留期配置见 [日志归档运维](docs/log-archive-operations.md)。
+
 ### 前端开发
 
 ```bash

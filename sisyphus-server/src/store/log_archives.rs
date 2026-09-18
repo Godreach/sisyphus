@@ -14,6 +14,45 @@ use crate::storage::{ObjectClass, ObjectPhase, S3Client, object_key};
 
 use super::StoreError;
 
+/// 日志状态与最后可用信息，不暴露正文路径或签名 URL。
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema, sqlx::FromRow)]
+pub struct ArchiveStatus {
+    /// 任务行。
+    pub job_id: i64,
+    /// 执行轮次。
+    pub attempt: i32,
+    /// pending / ready / lost。
+    pub state: String,
+    /// 后端。
+    pub backend: String,
+    /// 最后声明的归档大小。
+    pub size: i64,
+    /// 最后可用序号。
+    pub last_seq: Option<i64>,
+    /// 固定执行结束时刻。
+    pub execution_finished_at: Option<i64>,
+    /// 丢失或清理原因。
+    pub lost_reason: Option<String>,
+    /// 标记时刻。
+    pub lost_at: Option<i64>,
+    /// 负责的 Agent。
+    pub agent_name: Option<String>,
+    /// Agent 最后心跳。
+    pub last_seen_at: Option<i64>,
+    /// 任务名。
+    pub job_name: String,
+    /// 构建号。
+    pub build_number: i64,
+    /// Pipeline。
+    pub pipeline_name: String,
+}
+
+const STATUS_QUERY: &str = "SELECT a.job_id, a.attempt, a.state, a.backend, a.size, a.last_seq,
+    a.execution_finished_at, a.lost_reason, a.lost_at, g.name AS agent_name, g.last_seen_at,
+    j.name AS job_name, b.number AS build_number, b.pipeline_name
+    FROM log_archives a JOIN jobs j ON j.id=a.job_id JOIN builds b ON b.id=j.build_id
+    LEFT JOIN agents g ON g.id=j.agent_id";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ArchiveFrameIndex {
     pub start_seq: u64,
@@ -24,6 +63,8 @@ pub(crate) struct ArchiveFrameIndex {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ArchiveIndex {
+    #[serde(default)]
+    pub execution_finished_at_ms: Option<i64>,
     pub job_id: String,
     pub attempt: i32,
     pub first_seq: Option<u64>,
@@ -42,6 +83,59 @@ pub(crate) struct LocalLogArchiveStore {
 }
 
 impl LocalLogArchiveStore {
+    pub async fn status(
+        &self,
+        job: i64,
+        attempt: i32,
+    ) -> Result<Option<ArchiveStatus>, StoreError> {
+        Ok(sqlx::QueryBuilder::<sqlx::Sqlite>::new(STATUS_QUERY)
+            .push(" WHERE a.job_id=")
+            .push_bind(job)
+            .push(" AND a.attempt=")
+            .push_bind(attempt)
+            .build_query_as()
+            .fetch_optional(&self.pool)
+            .await?)
+    }
+
+    pub async fn backlog(&self, agent: Option<&str>) -> Result<Vec<ArchiveStatus>, StoreError> {
+        Ok(sqlx::QueryBuilder::<sqlx::Sqlite>::new(STATUS_QUERY)
+            .push(" WHERE a.state IN ('pending', 'lost') AND (")
+            .push_bind(agent)
+            .push(" IS NULL OR g.name=")
+            .push_bind(agent)
+            .push(") ORDER BY a.created_at, a.job_id LIMIT 500")
+            .build_query_as()
+            .fetch_all(&self.pool)
+            .await?)
+    }
+
+    /// 丢失标记与审计同事务提交；不改执行结果、不误伤 ready。
+    pub async fn mark_lost(
+        &self,
+        job: i64,
+        attempt: i32,
+        reason: &str,
+        actor: &str,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let now = super::now_ms();
+        let changed = sqlx::query("UPDATE log_archives SET state='lost', lost_reason=?, lost_at=?
+            WHERE job_id=? AND attempt=? AND state='pending'
+            AND EXISTS (SELECT 1 FROM jobs WHERE id=job_id AND status NOT IN ('queued', 'running', 'unknown'))")
+            .bind(reason).bind(now).bind(job).bind(attempt).execute(&mut *tx).await?;
+        if changed.rows_affected() != 1 {
+            return Err(StoreError::Conflict(
+                "只有待归档日志可以标记永久丢失".into(),
+            ));
+        }
+        let detail =
+            serde_json::json!({"job_id":job,"attempt":attempt,"reason":reason}).to_string();
+        sqlx::query("INSERT INTO audit_log (ts, actor, event_type, project_name, detail) VALUES (?, ?, 'log_archive_lost', NULL, ?)")
+            .bind(now).bind(actor).bind(detail).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
     pub(crate) fn new(pool: SqlitePool, root: PathBuf) -> Self {
         Self {
             pool,
@@ -83,6 +177,30 @@ impl LocalLogArchiveStore {
         Ok(())
     }
 
+    /// 执行结束的固定时钟锚点；重复报告、归档补传不能延长保留期。
+    pub async fn record_execution_end(
+        &self,
+        job_id: i64,
+        attempt: i32,
+        ended: Option<i64>,
+    ) -> Result<(), StoreError> {
+        self.mark_pending(job_id, attempt).await?;
+        let now = crate::store::now_ms();
+        let ended = ended.filter(|value| *value > 0).unwrap_or(now).min(now);
+        sqlx::query(
+            "UPDATE log_archives SET execution_finished_at =
+            CASE WHEN execution_finished_at IS NULL THEN ? ELSE MIN(execution_finished_at, ?) END
+            WHERE job_id=? AND attempt=?",
+        )
+        .bind(ended)
+        .bind(ended)
+        .bind(job_id)
+        .bind(attempt)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// 为 S3 直传登记只可写的临时 key；重试复用待归档许可，ready 不再签发 PUT。
     pub async fn grant_s3(
         &self,
@@ -92,6 +210,8 @@ impl LocalLogArchiveStore {
         index: &ArchiveIndex,
     ) -> Result<Option<String>, StoreError> {
         validate_index(index, index.compressed_bytes, &index.sha256)?;
+        self.record_execution_end(job_id, attempt, index.execution_finished_at_ms)
+            .await?;
         if index.compressed_bytes > i64::MAX as u64 {
             return Err(StoreError::Invalid("日志归档大小超出存储范围".into()));
         }
@@ -323,12 +443,19 @@ impl LocalLogArchiveStore {
         tokio::fs::create_dir_all(&self.root).await?;
         let final_path = self.final_path(job_id, attempt);
         let index_path = self.index_path(job_id, attempt);
+        // 与丢失/清理动作串行：先取得 SQLite 写锁，避免清理之后迟到 rename。
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE log_archives SET state=state WHERE job_id=? AND attempt=?")
+            .bind(job_id)
+            .bind(attempt)
+            .execute(&mut *tx)
+            .await?;
         if let Some((state, size, sha256)) = sqlx::query_as::<_, (String, i64, String)>(
             "SELECT state, size, sha256 FROM log_archives WHERE job_id = ? AND attempt = ?",
         )
         .bind(job_id)
         .bind(attempt)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?
         {
             if state == "lost" {
@@ -359,7 +486,8 @@ impl LocalLogArchiveStore {
         .bind(job_id).bind(attempt).bind(final_path.to_string_lossy().as_ref()).bind(index_path.to_string_lossy().as_ref())
         .bind(expected_size as i64).bind(expected_sha256)
         .bind(index.first_seq.map(|v| v as i64)).bind(index.last_seq.map(|v| v as i64)).bind(now).bind(now)
-        .execute(&self.pool).await?;
+        .execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 

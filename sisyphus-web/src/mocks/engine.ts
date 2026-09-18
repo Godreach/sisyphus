@@ -20,6 +20,7 @@ import type {
   TriggerSourceDto,
 } from '@/api/types'
 import type { LogStreamEvent } from '@/api/sse'
+type SequencedLogEvent = Exclude<LogStreamEvent, { type: 'log_unavailable' }>
 import { AGENTS, findPipeline, mulberry32, nextBuildNumber } from './db'
 
 /** 动态构建内存态。 */
@@ -53,7 +54,7 @@ interface DynBuild {
   jobs: DynJob[]
   artifacts: ArtifactResponse[]
   /** 日志事件流（key = `${job}:${attempt}`，seq 从 1 起连续递增）。 */
-  logs: Map<string, LogStreamEvent[]>
+  logs: Map<string, SequencedLogEvent[]>
   cancelled: boolean
   failPlan: boolean
   /** 阶段名（触发时从定义快照，后续定义编辑不影响本次运行）。 */
@@ -91,7 +92,7 @@ function adjustAgentLoad(agentId: number | null, delta: number): void {
   agent.active_jobs = Math.max(0, agent.active_jobs + delta)
 }
 
-function appendLog(build: DynBuild, job: string, attempt: number, event: LogStreamEvent): void {
+function appendLog(build: DynBuild, job: string, attempt: number, event: SequencedLogEvent): void {
   const key = logKey(job, attempt)
   let log = build.logs.get(key)
   if (log == null) {
@@ -133,7 +134,7 @@ export function logHistory(
   number: number,
   job: string,
   attempt: number,
-): LogStreamEvent[] {
+): SequencedLogEvent[] {
   return BUILDS.get(`${project}/${pipeline}`)?.get(number)?.logs.get(logKey(job, attempt)) ?? []
 }
 

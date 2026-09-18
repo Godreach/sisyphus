@@ -307,6 +307,7 @@ async fn full_duplex_dispatch_and_terminal() {
     for spec in &specs {
         tx.send(ChannelMessage {
             kind: Some(Kind::JobStatus(ProtoJobStatus {
+                execution_finished_at_ms: None,
                 job_id: spec.job_id.clone(),
                 phase: sisyphus_proto::agent::JobPhase::JobSucceeded as i32,
                 exit_code: Some(0),

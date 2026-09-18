@@ -42,6 +42,9 @@ struct Args {
     /// SISYPHUS_CACHE_CAPACITY_GIB 设置）
     #[arg(long)]
     cache_capacity_gib: Option<u64>,
+    /// 日志缓冲容量（GiB，默认 20；SISYPHUS_LOG_BUFFER_CAPACITY_GIB）
+    #[arg(long)]
+    log_buffer_capacity_gib: Option<u64>,
 }
 
 impl From<&Args> for Overrides {
@@ -54,6 +57,7 @@ impl From<&Args> for Overrides {
             log_level: args.log_level.clone(),
             log_file: args.log_file.clone(),
             cache_capacity_gib: args.cache_capacity_gib,
+            log_buffer_capacity_gib: args.log_buffer_capacity_gib,
         }
     }
 }
