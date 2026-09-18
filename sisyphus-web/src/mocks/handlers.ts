@@ -3,7 +3,8 @@
 // 核心链路 + 触发/取消/重跑。同一套 handlers 供 dev worker（authEnforced=true，
 // 会话 cookie 生效）与 vitest node 模式（authEnforced=false，直连不校验）。
 //
-// - 后端每就绪一个端点即删除对应 handler（ADR-0024 handler 生命周期）。
+// - 后端每就绪一个端点即删除对应 handler（ADR-0024 handler 生命周期）；创建期
+//   SCM 探测是 demo-only 例外（票 #138）：真实后端虽已就绪，demo 仍需 MSW 闭环。
 // - 动态构建走 engine.ts；fixture 构建走 db.ts；两者在列表/详情处合并
 //   （同号动态优先——from_failed 重跑会以动态态接管同号构建）。
 // - 错误态 fixture：`error-demo` 项目全部端点 500；概览支持 `?_mock_error=1`。
@@ -22,6 +23,8 @@ import type {
   CreateProjectRequest,
   MemberAssignment,
   ProjectResponse,
+  ScmBranchesRequest,
+  ScmProbeRequest,
   UpdateProjectRequest,
 } from '@/api/types'
 import type { MeResponse } from '@/api/http'
@@ -59,6 +62,15 @@ function validationError(errors: { path: string; message: string }[]) {
   const items = errors.map(({ path, message }) => ({ path, message }))
   return HttpResponse.json(
     { code: 'VALIDATION_FAILED', message: '项目输入校验失败', detail: { errors: items } },
+    { status: 422 },
+  )
+}
+
+/** SCM 探测校验 422（server api/scm.rs 的错误消息与项目创建校验不同）。 */
+function scmValidationError(errors: { path: string; message: string }[]) {
+  const items = errors.map(({ path, message }) => ({ path, message }))
+  return HttpResponse.json(
+    { code: 'VALIDATION_FAILED', message: 'SCM 探测输入校验失败', detail: { errors: items } },
     { status: 422 },
   )
 }
@@ -115,6 +127,41 @@ function guard(options: MockHandlerOptions, request: Request) {
 /** 错误态 fixture：error-demo 项目全端点 500（演示整页报错/重试）。 */
 function isErrorFixture(name: string): boolean {
   return name === 'error-demo'
+}
+
+/** 创建期 SCM 探测 fixture（与 server/api/scm.rs 的错误码和响应字段同形）。
+ *  fixture URL 让 demo 与契约测试可以稳定覆盖成功、空仓库、失败和凭据错误，
+ * 但永远不把 username/password 写入响应或错误消息。 */
+function scmProbeFailure(
+  url: string,
+  username?: string | null,
+  password?: string | null,
+): ReturnType<typeof jsonError> | null {
+  if (url.includes('private') && Boolean(username?.trim() || password)) {
+    return jsonError(422, 'SCM_PROBE_FAILED', '认证失败：凭据或权限不足，请检查 SCM 凭据与仓库访问权限')
+  }
+  if (url.includes('missing') || url.includes('fail')) {
+    return jsonError(422, 'SCM_PROBE_FAILED', '仓库不存在或不可达，请检查仓库 URL')
+  }
+  return null
+}
+
+function scmHead(scmType: string | undefined, url: string): string | null {
+  if (scmType === 'none') return null
+  if (url.includes('empty')) return null
+  if (scmType === 'svn') return '42'
+  return 'abc123deadbeef'
+}
+
+function scmBranches(url: string) {
+  if (url.includes('empty')) return { branches: [], default_branch: null }
+  return {
+    branches: [
+      { name: 'main', head: 'abc123deadbeef' },
+      { name: 'dev', head: 'def456' },
+    ],
+    default_branch: 'main',
+  }
 }
 
 /** fixture + 动态构建合并（同号动态优先——from_failed 重跑以动态态接管）。
@@ -288,6 +335,39 @@ export function createHandlers(options: MockHandlerOptions) {
       }
       db.PROJECTS.push(project)
       return HttpResponse.json(project, { status: 201 })
+    }),
+
+    // ----- 创建期 SCM 探测（后端 api/scm.rs，票 #138）-----
+    // 测试连接和默认分支预填都必须由 demo 的 MSW 闭环承接；请求体中的
+    // ad-hoc 凭据只用于选择 fixture，绝不回显到响应或错误消息。
+    scmProbe: http.post('/api/v1/projects/scm-probe', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const globalDenied = globalAdminGuard(request)
+      if (globalDenied != null) return globalDenied
+      await delay(180)
+      const body = (await request.json()) as ScmProbeRequest
+      if (body.scm_type !== 'none' && body.scm_url.trim() === '') {
+        return scmValidationError([{ path: 'scm_url', message: '仓库 URL 不能为空' }])
+      }
+      const failed = scmProbeFailure(body.scm_url, body.username, body.password)
+      if (failed != null) return failed
+      return HttpResponse.json({ head: scmHead(body.scm_type, body.scm_url) })
+    }),
+
+    scmBranches: http.post('/api/v1/projects/scm-branches', async ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const globalDenied = globalAdminGuard(request)
+      if (globalDenied != null) return globalDenied
+      await delay(180)
+      const body = (await request.json()) as ScmBranchesRequest
+      if (body.scm_url.trim() === '') {
+        return scmValidationError([{ path: 'scm_url', message: '仓库 URL 不能为空' }])
+      }
+      const failed = scmProbeFailure(body.scm_url, body.username, body.password)
+      if (failed != null) return failed
+      return HttpResponse.json(scmBranches(body.scm_url))
     }),
 
     // ----- 概览（后端 api/overview.rs，ADR-0019）-----

@@ -2,8 +2,8 @@
 // - 列表：GET /projects（可见性过滤），点击进项目详情
 // - 新建：POST /projects（git/svn + 仓库 URL + git 默认分支），成功收表单
 //   并刷新列表；403（非全局 admin）就地展示
-// - 测试连接不阻塞保存：端点未交付 → 按钮禁用 + 提示态，保存不依赖该动作
-// - ls-remote 预填端点未交付 → 分支字段手动输入 + 提示
+// - 测试连接不阻塞保存：探测失败就地提示，保存不依赖该动作
+// - ls-remote 预填成功时回填默认分支；失败时仍可手动输入
 // 视图在 onMounted 即发列表请求：mount 须在设置 fetch mock 之后。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'

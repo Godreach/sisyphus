@@ -120,4 +120,110 @@ describe('项目域 mock 契约（票 #108）', () => {
     expect((await json('/users/directory', 'GET', undefined, 'bob')).status).toBe(403)
     expect((await json('/users/directory', 'GET', undefined, 'alice')).status).toBe(200)
   })
+
+  it('创建期 Git 探测返回 head 与分支清单/默认分支，响应不含凭据', async () => {
+    const credentials = {
+      scm_type: 'git',
+      scm_url: 'https://example.com/demo.git',
+      username: 'alice',
+      password: 'secret-token',
+    }
+    const probe = await json('/projects/scm-probe', 'POST', credentials)
+    expect(probe.status).toBe(200)
+    const probeBody = await probe.json()
+    expect(probeBody).toEqual({ head: 'abc123deadbeef' })
+    expect(JSON.stringify(probeBody)).not.toContain(credentials.password)
+
+    const branches = await json('/projects/scm-branches', 'POST', {
+      scm_url: credentials.scm_url,
+      username: credentials.username,
+      password: credentials.password,
+    })
+    expect(branches.status).toBe(200)
+    expect(await branches.json()).toEqual({
+      branches: [
+        { name: 'main', head: 'abc123deadbeef' },
+        { name: 'dev', head: 'def456' },
+      ],
+      default_branch: 'main',
+    })
+  })
+
+  it('创建期 SVN 与无 SCM 探测返回后端同形 head', async () => {
+    const svn = await json('/projects/scm-probe', 'POST', {
+      scm_type: 'svn',
+      scm_url: 'https://svn.example.com/repo/trunk',
+    })
+    expect(svn.status).toBe(200)
+    expect(await svn.json()).toEqual({ head: '42' })
+
+    const none = await json('/projects/scm-probe', 'POST', {
+      scm_type: 'none',
+      scm_url: '',
+    })
+    expect(none.status).toBe(200)
+    expect(await none.json()).toEqual({ head: null })
+  })
+
+  it('空 Git 仓库返回 null head 与空分支清单，不伪造默认分支', async () => {
+    const probe = await json('/projects/scm-probe', 'POST', {
+      scm_type: 'git',
+      scm_url: 'https://example.com/empty.git',
+    })
+    expect(probe.status).toBe(200)
+    expect(await probe.json()).toEqual({ head: null })
+
+    const branches = await json('/projects/scm-branches', 'POST', {
+      scm_url: 'https://example.com/empty.git',
+    })
+    expect(branches.status).toBe(200)
+    expect(await branches.json()).toEqual({ branches: [], default_branch: null })
+  })
+
+  it('探测失败、凭据错误与空 URL 使用后端错误形态且不回显密码', async () => {
+    const failed = await json('/projects/scm-probe', 'POST', {
+      scm_type: 'git',
+      scm_url: 'https://example.com/missing.git',
+    })
+    expect(failed.status).toBe(422)
+    expect(await failed.json()).toEqual({
+      code: 'SCM_PROBE_FAILED',
+      message: '仓库不存在或不可达，请检查仓库 URL',
+      detail: null,
+    })
+
+    const secret = 'super-secret-token'
+    const credentialError = await json('/projects/scm-probe', 'POST', {
+      scm_type: 'git',
+      scm_url: 'https://example.com/private.git',
+      username: 'alice',
+      password: secret,
+    })
+    expect(credentialError.status).toBe(422)
+    const credentialBody = JSON.stringify(await credentialError.json())
+    expect(credentialBody).toContain('认证失败：凭据或权限不足，请检查 SCM 凭据与仓库访问权限')
+    expect(credentialBody).not.toContain(secret)
+
+    const emptyUrl = await json('/projects/scm-branches', 'POST', { scm_url: '' })
+    expect(emptyUrl.status).toBe(422)
+    expect(await emptyUrl.json()).toEqual({
+      code: 'VALIDATION_FAILED',
+      message: 'SCM 探测输入校验失败',
+      detail: { errors: [{ path: 'scm_url', message: '仓库 URL 不能为空' }] },
+    })
+  })
+
+  it('创建期 SCM 探测仅允许全局管理员', async () => {
+    const response = await json(
+      '/projects/scm-probe',
+      'POST',
+      {
+        scm_type: 'git',
+        scm_url: 'https://example.com/demo.git',
+      },
+      'alice',
+    )
+    expect(response.status).toBe(403)
+    expect(await response.json()).toEqual({ code: 'FORBIDDEN', message: '非全局管理员', detail: null })
+  })
 })
