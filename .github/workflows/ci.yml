@@ -101,6 +101,9 @@ jobs:
       - name: vue-tsc 类型检查
         run: npm run typecheck
 
+      - name: 前后端 API 清单防漂移
+        run: npm run api:check
+
       - name: vitest 行为测试
         run: npm test
 
@@ -180,4 +183,3 @@ jobs:
 
       - name: Build（release，原生）
         run: cargo build --release -p sisyphus-${{ matrix.crate }}
-

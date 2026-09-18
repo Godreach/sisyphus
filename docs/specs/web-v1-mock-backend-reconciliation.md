@@ -1,160 +1,68 @@
-# mock handler 与后端实现对账清单（票 #113 AC3）
+# 前后端 mock 接口对账基线（票 #144）
 
-日期：2026-09-01
-关联：spec #100 验收门 / ADR-0024 契约 mock 开发模式 / 票 #102/#104/#105/#108
+日期：2026-09-19
+关联：ADR-0024 契约 mock 开发模式 / spec #100 AC3 / 票 #134—#143
 
-## 目的
+## 当前结论
 
-spec #100 整体验收门的 AC3：mock handler 与后端实现状态对账清单成文——逐 handler 标注后端是否已实现（已切真 / 待后端），并回答「后端已实现端点的 handler 是否已删」。
+本清单以 `sisyphus-server/tests/snapshots/openapi.json` 为 server 路由事实源，以运行时 `createHandlers()` 暴露的 MSW method/path 为 mock 事实源。动态路径参数名统一为 `:param` 后比较；参数所在分段、静态路径和 HTTP method 仍须完全一致。
 
-## 对账口径（ADR-0024 handler 生命周期）
+| 对账项 | 数量 | 结论 |
+|---|---:|---|
+| server OpenAPI 端点 | 92 | 已纳入版本化基线 |
+| 前端 MSW handler | 71 | 已纳入版本化基线 |
+| handler 有 server 对应 | 71 | 全部对应 |
+| handler 对应的 server 缺失 | 0 | 票 #134—#143 已补齐历史缺口 |
+| server 已有、mock 未补 | 21 | 均为下述刻意排除项，无未登记漂移 |
 
-ADR-0024 定的策略是 **handler 生命周期 = 后端就绪即删**：后端每实现一个端点，对应 handler 删除，`npm run dev`（proxy 连真后端）路径自动落到真后端，mock 层随后端进度**收敛为零**。
+完整的逐端点基线在 `sisyphus-web/src/mocks/apiInventory.ts`。它把端点分成 `sharedApiEndpoints`（71 个，两边共有）和 `serverOnlyApiEndpoints`（21 个，仅 server）；比在文档中复制 92 行更适合作为可执行的单一维护入口。
 
-**v1 现状：收敛未启动——53 个 handler 全保留。** 这是有意偏离「即删」终态，根因是 demo 模式（`npm run demo`，`VITE_ENABLE_MOCK=1`，无本机后端）与 vitest node 模式都依赖**全量 handler 集**才能跑：
+## 为什么 demo/test 模式仍保留全量浏览器 mock
 
-- `npm run dev`（mock 关闭）→ `/api` proxy 到真后端，handler 不挂载——此路径已切真。
-- `npm run demo`（mock 开）→ MSW worker 挂全量 handler，无后端——demo 是 spec #100 验收关键词「mock 环境当 demo 演示看不出是假的」的主载体，其存在要求全量 handler。
-- vitest → MSW node 模式挂全量 handler——组件挂载测试经真实 http client 打 MSW。
+ADR-0024 的长期方向是后端就绪后收敛 mock，但当前 demo 与隔离前端测试仍需要 71 个浏览器消费端点全部可用：
 
-故「即删」是 demo 退役（或改跑真后端 + seed）后的 **post-v1 终态**，v1 期 handler 全保留。本对账的**可执行输出**是后端仍欠的契约先行端点（见「契约先行清单」），而非删 handler。
+- `npm run dev`：默认不启动 MSW，`/api` 由 Vite proxy 转发到真实 server；这是日常真实后端模式。
+- `npm run demo`：通过 `VITE_ENABLE_MOCK=1` 启动 MSW worker，不要求本机 server；用于产品演示和设计验收。
+- vitest：通过 MSW node server 挂载同一套 handlers，组件经真实 HTTP client 验证契约，不为每个测试另写 fetch stub。
+- production build：默认不启用 MSW；只有显式 mock 开关才会进入 mock 模式。
 
-## 对账总表（53 handler，按域分组）
+因此“真实后端已实现”不再等于“立即删除 handler”。删除某个 shared handler 必须同时意味着 demo/test 不再需要该浏览器契约，或 demo 已迁移到真实 server + seed；否则会破坏离线演示与组件测试。
 
-状态列：✓ 后端已实现（dev 模式已切真，demo/vitest 仍走 mock）｜✗ 契约先行（后端待实现）。
+## server 已有但 mock 未补（21 个）
 
-### 认证 / 会话（auth.rs / tokens.rs）
+这些端点不属于当前浏览器 demo/test 的消费面，所以明确保留在 `serverOnlyApiEndpoints`，不是遗漏。
 
-| 方法 | 路径 | handler | 后端 | 状态 |
-|---|---|---|---|---|
-| POST | /auth/login | login | auth.rs:218 | ✓ |
-| POST | /auth/logout | logout | auth.rs:306 | ✓ |
-| GET | /auth/me | me | auth.rs:340 | ✓ |
-| POST | /auth/setup | setup | auth.rs:106 | ✓ |
-| GET | /auth/tokens | tokensList | tokens.rs:156 | ✓ |
-| POST | /auth/tokens | tokenCreate | tokens.rs:89 | ✓ |
-| DELETE | /auth/tokens/:id | tokenRevoke | tokens.rs:176 | ✓ |
+| 类别 | 数量 | 端点范围 | 不 mock 的原因 |
+|---|---:|---|---|
+| Agent 协议面 | 10 | `/api/v1/agent/register`、Agent 产物上传/下载/发布、升级包下载 | Agent 进程消费，不由浏览器调用 |
+| 触发器管理 | 4 | pipelines 下 triggers 的 GET/POST/PATCH | v1 前端尚无触发器管理 UI |
+| 日志正文 | 2 | attempt logs 下载与 SSE stream | demo 走 `eventSource.ts` 替身；REST handler 只覆盖归档状态 |
+| SMTP 配置 | 2 | `GET/PUT /api/v1/config/smtp` | v1 前端尚无 SMTP 配置 UI |
+| 认证自助面 | 2 | `POST /api/v1/auth/register`、`POST /api/v1/auth/password` | v1 前端无自助注册/改密 UI |
+| 运维探针 | 1 | `GET /healthz` | 运维消费，不属于 SPA API |
 
-### 概览 / 收藏（overview.rs；favorites 后端整域缺失）
+## 可执行防漂移检查
 
-| 方法 | 路径 | handler | 后端 | 状态 |
-|---|---|---|---|---|
-| GET | /overview | overview | overview.rs:112 | ✓ |
-| GET | /user/pipeline-favorites | favoritesList | — | ✗（#104 契约先行，favorites 后端整域不存在）|
-| PUT | /user/pipeline-favorites/:project/:pipeline | favoriteAdd | — | ✗（同上）|
-| DELETE | /user/pipeline-favorites/:project/:pipeline | favoriteRemove | — | ✗（同上）|
+在 `sisyphus-web/` 运行：
 
-### 项目 / 成员 / SCM（projects.rs / members.rs / scm.rs）
+```bash
+npm run api:check
+```
 
-| 方法 | 路径 | handler | 后端 | 状态 |
-|---|---|---|---|---|
-| GET | /projects | projectsList | projects.rs:114 | ✓ |
-| POST | /projects | projectCreate | projects.rs:139 | ✓ |
-| GET | /projects/:name | projectGet | projects.rs:231 | ✓ |
-| PATCH | /projects/:name | projectPatch | — | ✗（#108 契约先行，后端有意缺口：项目编辑级联语义未裁定）|
-| GET | /projects/:name/members | projectMembersList | members.rs:97 | ✓ |
-| PUT | /projects/:name/members | projectMembersReplace | members.rs:121 | ✓ |
-| GET | /users/directory | usersDirectory | users.rs:270 | ✓ |
-| PUT | /projects/:name/scm-credential | projectScmCredential | scm.rs:220 | ✓ |
-| POST | /projects/:name/test-connection | projectTestConnection | scm.rs:187 | ✓ |
+该命令会：
 
-> 注：`POST /projects/scm-probe`、`POST /projects/scm-branches`（项目创建表单的测试连接/分支预填）后端已实现（scm.rs:119 / scm.rs:147），但 **handler 未挂**——后端先就绪，按「即删」纪律不挂 handler。见下「后端已实现但 handler 未挂」。
+1. 从 committed OpenAPI snapshot 提取 server method/path；
+2. 实例化 `createHandlers()` 提取真实 MSW method/path；
+3. 分别与 `sharedApiEndpoints + serverOnlyApiEndpoints`、`sharedApiEndpoints` 比较；
+4. 失败时逐条输出“缺失（基线有、实际无）”和“新增（实际有、基线无）”。
 
-### 流水线定义 / 清单 / 统计（pipelines.rs）
+前端 `npm run check` 和 GitHub Actions 的 `frontend` job 都运行该检查。server 源码与 OpenAPI snapshot 的一致性继续由 `sisyphus-server/tests/openapi_snapshot.rs` 守护；两道门组合后，server 路由或 mock handler 的新增、删除、method/path 变化都会在质量门中显式出现。
 
-| 方法 | 路径 | handler | 后端 | 状态 |
-|---|---|---|---|---|
-| GET | /projects/:name/pipelines/:pipeline | pipelineDefinition | pipelines.rs:68 | ✓ |
-| PUT | /projects/:name/pipelines/:pipeline | pipelineDefinitionSave | pipelines.rs:109 | ✓ |
-| GET | /pipelines | pipelinesList | — | ✗（#105 契约先行：跨项目权威清单，后端无 GET /pipelines）|
-| GET | /projects/:name/pipelines/:pipeline/stats | pipelineStats | — | ✗（#102 契约先行：流水线统计端点，后端无 stats）|
+## 有意变更接口时
 
-### 构建 / 产物（builds.rs / artifacts.rs / logs.rs）
+1. 更新 server 路由/utoipa 注解或 MSW handler；若 server 契约变化，按 server README 重写并评审 OpenAPI snapshot。
+2. 运行 `npm run api:check`，阅读具体差异，确认对应任务票及端点应属于 shared 还是 server-only。
+3. 更新 `apiInventory.ts` 的相应基线，并同步本文数量/分类。
+4. 运行 `npm run check`、相关 server 测试和既有 demo/smoke 验证。
 
-| 方法 | 路径 | handler | 后端 | 状态 |
-|---|---|---|---|---|
-| GET | …/builds | buildList | builds.rs:500 | ✓ |
-| GET | …/builds/:number | buildDetail | builds.rs:542 | ✓ |
-| POST | …/builds | trigger | builds.rs:349 | ✓ |
-| POST | …/builds/:number/cancel | cancel | builds.rs:402 | ✓ |
-| POST | …/builds/:number/rerun | rerun | builds.rs:437 | ✓ |
-| DELETE | …/builds/:number | removeBuild | builds.rs:590 | ✓ |
-| GET | …/builds/:number/artifacts | artifacts | artifacts.rs:248 | ✓ |
-| GET | …/builds/:number/artifacts/:artifact | artifactDownload | artifacts.rs:291 | ✓ |
-
-> 注：构建日志 SSE / 下载（`logs.rs` download + stream）后端已实现，前端经 `eventSource.ts` SSE 替身在 demo 走通——非 REST handler 面，不入本表。
-
-### 构建机 / 升级（agents.rs / upgrade_packages.rs）
-
-| 方法 | 路径 | handler | 后端 | 状态 |
-|---|---|---|---|---|
-| GET | /agents | agentsList | agents.rs:499 | ✓ |
-| GET | /agents/:name | agentDetail | agents.rs:524 | ✓ |
-| PATCH | /agents/:name | agentPatch | agents.rs:553 | ✓ |
-| POST | /agents/:name/workspace/list | agentWorkspaceList | agents.rs:799 | ✓ |
-| POST | /agents/:name/workspace/clean | agentWorkspaceClean | agents.rs:853 | ✓ |
-| POST | /agents/:name/cache/list | agentCacheList | agents.rs:887 | ✓ |
-| POST | /agents/:name/cache/delete | agentCacheDelete | agents.rs:936 | ✓ |
-| GET | /upgrade-packages | upgradePackagesList | upgrade_packages.rs:159 | ✓ |
-| POST | /upgrade-packages | upgradePackageUpload | upgrade_packages.rs:67 | ✓ |
-| DELETE | /upgrade-packages/:name | upgradePackageDelete | upgrade_packages.rs:180 | ✓ |
-| POST | /agents/upgrade | agentsUpgradeAll | agents.rs:626 | ✓ |
-| POST | /agents/:name/upgrade | agentsUpgradeOne | agents.rs:703 | ✓ |
-| POST | /agents | agentCreate | agents.rs:312 | ✓ |
-
-### 机密 / 审计 / 用户（secrets.rs / audit.rs / users.rs）
-
-| 方法 | 路径 | handler | 后端 | 状态 |
-|---|---|---|---|---|
-| GET | /projects/:name/secrets | secretsList | secrets.rs:123 | ✓ |
-| PUT | /projects/:name/secrets/:secret | secretPut | secrets.rs:69 | ✓ |
-| DELETE | /projects/:name/secrets/:secret | secretDelete | secrets.rs:152 | ✓ |
-| GET | /audit | auditList | audit.rs:87 | ✓ |
-| GET | /users | usersList | users.rs:100 | ✓ |
-| POST | /users | userCreate | users.rs:122 | ✓ |
-| PATCH | /users/:name | userPatch | users.rs:167 | ✓ |
-| PUT | /users/:name/password | userResetPassword | users.rs:219 | ✓ |
-
-## 契约先行清单（后端待实现，6 端点 / 4 域）
-
-这 6 个 handler 无后端对应——demo/vitest 走 mock 可用，`npm run dev`（proxy 真后端）会 404/穿透。后端照契约票实现后，dev 模式自动切真（demo/vitest 仍走 mock 直到 demo 退役）。
-
-| 端点 | 契约票 | 说明 |
-|---|---|---|
-| GET /api/v1/pipelines | #105（P1）| 跨项目权威流水线清单（替代前端探测 main/release 凑数）；响应 `{ items: [{ project, pipeline, updated_at }], total }`，服务端 (project, pipeline) 字典序。|
-| GET /api/v1/projects/:name/pipelines/:pipeline/stats | #102 | 流水线统计（窗口成功率/平均耗时/最近构建）；口径与构建列表同源聚合。|
-| PATCH /api/v1/projects/:name | #108 | 编辑项目（scm_url 整段替换、svn 无分支校验）；后端有意缺口——项目编辑/删除的级联语义（流水线删除 vs 构建历史）未裁定。|
-| GET /api/v1/user/pipeline-favorites | #104（W8）| 用户级收藏清单（按会话用户归属，latest_build 服务端 join 单请求成行）。|
-| PUT /api/v1/user/pipeline-favorites/:project/:pipeline | #104（W8）| 收藏流水线。|
-| DELETE /api/v1/user/pipeline-favorites/:project/:pipeline | #104（W8）| 取消收藏。|
-
-> favorites 整域（3 端点）后端源码完全不存在——是当前最大的契约缺口。工作台「收藏的流水线」右栏（#104）+ 流水线页星标入口（#105）均依赖之。
-
-## 后端已实现但 handler 未挂（「即删」纪律在 demo 下的可见代价）
-
-| 端点 | 后端 | 前端消费 | demo 影响 |
-|---|---|---|---|
-| POST /api/v1/projects/scm-probe | scm.rs:119 | ProjectsView 项目创建表单「测试连接」（返回 head）| demo 模式无 mock 兜底 → MSW `onUnhandledRequest: 'bypass'` → vite proxy 无后端 → 请求失败，测试连接按钮报错（项目创建本身 POST /projects 有 handler，不受影响）。|
-| POST /api/v1/projects/scm-branches | scm.rs:147 | ProjectsView 项目创建表单「预填默认分支」| 同上。|
-
-这两个端点后端先就绪，按 ADR-0024「后端就绪即删」纪律**不挂 handler**。smoke 经 `page.route` 内联 mock 守该动作的渲染面（断言 head + 预填分支文案），但 demo 体验在该动作上断档——这是「即删」纪律在无后端 demo 下的可见代价，记录在案。
-
-## 后端已实现但 v1 前端未消费（无对应 handler，非对账面）
-
-下列后端端点 v1 前端无 UI / 无 mock（不入 53 handler 对账），记录以备后端实现状态全景：
-
-- `POST /auth/register`（auth.rs:159，注册开关默认关）、`POST /auth/password`（auth.rs:371，改密）——v1 无自助注册/改密 UI。
-- `POST /agent/register`（agents.rs:403，注册码换 agent token）、`POST /agent/artifacts/*`、`GET /agent/upgrade-packages/:name`（agent-token 面）——Agent 侧通道，前端不经 REST 消费。
-- `GET/POST /projects/:name/pipelines/:pipeline/triggers`、`GET/PATCH …/triggers/:kind`（triggers.rs）——v1 无触发器管理 UI。
-- `GET/PUT /config/smtp`（smtp_config.rs）——v1 无 SMTP 配置 UI。
-- `GET /healthz`、`GET /metrics`（infra 面）——运维面，前端不经 SPA 消费。
-
-## 后端有意缺口（v1 前端未消费，后端阶段裁定）
-
-- `PATCH/PUT /api/v1/projects/:name`——见契约先行清单（#108）。
-- `DELETE /api/v1/projects/:name`——项目删除级联语义（流水线删除 vs 构建历史）未裁定，后端 deferred。v1 前端无删除项目 UI。
-- `DELETE /api/v1/projects/:name/pipelines/:pipeline/triggers/:kind`——触发器删除同上级联 concern，后端 deferred。v1 前端无触发器 UI。
-
-## 收敛建议（post-v1）
-
-「mock 层收敛为零」的触发条件是 demo 退役或改跑真后端 + seed。届时按本表 ✓ 列逐 handler 删除（dev 模式已切真，删 handler 不影响 dev；demo/vitest 在退役前仍需全量）。契约先行 6 端点先由后端照契约票实现，再纳入收敛。
+不要为了让检查变绿而自动重写基线；基线变化本身就是接口评审面。

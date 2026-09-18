@@ -53,7 +53,7 @@
 
 ## AC3：mock handler 与后端实现对账
 
-见专文 [web-v1-mock-backend-reconciliation.md](web-v1-mock-backend-reconciliation.md)。结论：53 handler 全保留（demo + vitest 依赖全量 mock 集，「即删」是 post-v1 终态）；49 后端已实现、6 契约先行（GET /pipelines、GET …/stats、PATCH /projects/:name、GET/PUT/DELETE /user/pipeline-favorites）。
+见专文 [web-v1-mock-backend-reconciliation.md](web-v1-mock-backend-reconciliation.md)。票 #144 收口后的结论：71 个 handler 全部有 server 对应，server 缺失为 0；server 另有 21 个按用途刻意不做浏览器 mock 的端点。`npm run api:check` 与 CI 会对 OpenAPI snapshot、MSW handler 和版本化基线做 method/path 防漂移校验。
 
 ## AC4：demo「mock 环境当 demo 演示看不出是假的」验收
 
