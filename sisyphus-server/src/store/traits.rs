@@ -154,6 +154,11 @@ pub trait ArtifactStore {
     /// 流式打开一份产物（HTTP 下载响应体）。
     async fn open(&self, build_id: i64, name: &str) -> Result<ByteStream, StoreError>;
 
+    /// 按元数据寻址读取正文，允许内部存储键包含任务 attempt。
+    async fn open_meta(&self, meta: &ArtifactMeta) -> Result<ByteStream, StoreError> {
+        self.open(meta.build_id, &meta.name).await
+    }
+
     /// 对照当前后端检查正文是否仍然可用。
     async fn inspect_state(&self, meta: &ArtifactMeta) -> Result<ArtifactState, StoreError>;
 }
@@ -176,4 +181,16 @@ pub trait ArtifactMetaRepo {
         name: &str,
         state: ArtifactState,
     ) -> Result<(), StoreError>;
+
+    /// 按任务 attempt 更新正文状态，避免同构建同名产物互相影响。
+    async fn set_state_for_job(
+        &self,
+        build_id: i64,
+        _job_id: i64,
+        _attempt: i32,
+        name: &str,
+        state: ArtifactState,
+    ) -> Result<(), StoreError> {
+        self.set_state(build_id, name, state).await
+    }
 }

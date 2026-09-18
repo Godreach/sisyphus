@@ -10,6 +10,8 @@
     "artifact_upload_empty",
     "artifact_upload_duplicate",
     "artifact_upload_absolute",
+    "artifact_download_path_not_relative",
+    "artifact_download_target_overlap",
     "cache_key_empty",
     "cache_key_too_long",
     "cache_key_workspace",
@@ -495,6 +497,71 @@
                   {
                     "name": "DIST",
                     "path": "dist-debug"
+                  }
+                ],
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "artifact_download_path_not_relative"
+      ],
+      "id": "artifact_download_path_not_relative",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "artifact_downloads": [
+                  {
+                    "job": "build",
+                    "name": "dist",
+                    "path": "out/../escape"
+                  }
+                ],
+                "name": "compile",
+                "steps": []
+              }
+            ],
+            "name": "build"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "expectedCodes": [
+        "artifact_download_target_overlap"
+      ],
+      "id": "artifact_download_target_overlap",
+      "json": {
+        "env": [],
+        "name": "demo",
+        "parameters": [],
+        "stages": [
+          {
+            "jobs": [
+              {
+                "artifact_downloads": [
+                  {
+                    "job": "build-linux",
+                    "name": "dist",
+                    "path": "restore"
+                  },
+                  {
+                    "job": "build-windows",
+                    "name": "dist",
+                    "path": "restore/bin"
                   }
                 ],
                 "name": "compile",

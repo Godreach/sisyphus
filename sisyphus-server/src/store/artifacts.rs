@@ -10,7 +10,8 @@
 //! - **元数据层**（[`SqliteArtifactMetaRepo`]）：`artifacts` 表记录后端、
 //!   build/job/attempt 归属、正文状态、路径、大小和校验和。历史行迁移为
 //!   `local/ready` 且保留原 30 天清理；旧 schema 无法恢复的 job/attempt
-//!   保持空。现有 `(build, name)` 覆盖语义在目录产物集批次前保持兼容。
+//!   保持空。带任务归属的行按 `(build, job, attempt, name)` 隔离；无归属的
+//!   legacy 行继续保持 `(build, name)` 覆盖兼容。
 //!
 //! Agent 上传端点（`api::artifacts`，agent token 鉴权）消费两层：字节流经
 //! [`ArtifactStore::store`] 落盘、返回的元数据行经 [`ArtifactMetaRepo::record`]
@@ -74,6 +75,24 @@ impl LocalDiskArtifactStore {
         &self.root
     }
 
+    /// 按任务 attempt 隔离磁盘正文，同时保留对外产物名。
+    pub async fn store_for_job(
+        &self,
+        build_id: i64,
+        job_id: i64,
+        attempt: i32,
+        public_name: &str,
+        content: ByteStream,
+    ) -> Result<ArtifactMeta, StoreError> {
+        // 产物名上限 128 字节，内部键不能简单拼接前缀后再过同一上限；
+        // 用摘要保留稳定、短且不含路径分隔符的任务隔离键。
+        let digest = format!("{:x}", Sha256::digest(public_name.as_bytes()));
+        let storage_name = format!(".j{job_id}-{attempt}-{}", &digest[..16]);
+        let mut meta = self.store(build_id, &storage_name, content).await?;
+        meta.name = public_name.to_string();
+        Ok(meta)
+    }
+
     /// 产物的磁盘路径：`<root>/<build_id>/<name>`（调用侧已过名校验）。
     fn artifact_path(&self, build_id: i64, name: &str) -> PathBuf {
         self.root.join(build_id.to_string()).join(name)
@@ -94,11 +113,27 @@ impl ArtifactStore for LocalDiskArtifactStore {
         self.open_stream(build_id, name).await
     }
 
+    async fn open_meta(&self, meta: &ArtifactMeta) -> Result<ByteStream, StoreError> {
+        let file = tokio::fs::File::open(self.root.join(&meta.path)).await?;
+        let stream = futures::stream::unfold(file, |mut file| async move {
+            let mut buf = vec![0u8; IO_CHUNK];
+            match file.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    Some((Ok(buf), file))
+                }
+                Err(e) => Some((Err(e), file)),
+            }
+        });
+        Ok(stream.boxed())
+    }
+
     async fn inspect_state(&self, meta: &ArtifactMeta) -> Result<ArtifactState, StoreError> {
         if meta.backend != ArtifactBackend::Local {
             return Err(StoreError::Invalid("本地存储不能检查非本地产物".into()));
         }
-        match tokio::fs::metadata(self.artifact_path(meta.build_id, &meta.name)).await {
+        match tokio::fs::metadata(self.root.join(&meta.path)).await {
             Ok(m) if m.is_file() && m.len() == meta.size => Ok(ArtifactState::Ready),
             Ok(_) => Ok(ArtifactState::Missing),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ArtifactState::Missing),
@@ -376,6 +411,51 @@ impl ArtifactRow {
 }
 
 impl SqliteArtifactMetaRepo {
+    /// 按任务 attempt 查询 pending/ready 元数据，避免同名产物跨任务串读。
+    pub async fn find_including_pending_for_job(
+        &self,
+        build_id: i64,
+        job_id: i64,
+        attempt: i32,
+        name: &str,
+    ) -> Result<Option<ArtifactMeta>, StoreError> {
+        let row = sqlx::query_as::<_, ArtifactRow>(
+            "SELECT build_id, job_id, attempt, backend, state, name, path, size, sha256,
+                    created_at FROM artifacts
+             WHERE build_id = ? AND job_id = ? AND attempt = ? AND name = ?",
+        )
+        .bind(build_id)
+        .bind(job_id)
+        .bind(attempt)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(ArtifactRow::into_meta).transpose()
+    }
+
+    /// 按构建内来源任务与 attempt 精确定位依赖产物。
+    pub async fn find_for_job(
+        &self,
+        build_id: i64,
+        job_id: i64,
+        attempt: i32,
+        name: &str,
+    ) -> Result<Option<ArtifactMeta>, StoreError> {
+        let row = sqlx::query_as::<_, ArtifactRow>(
+            "SELECT build_id, job_id, attempt, backend, state, name, path, size, sha256,
+                    created_at FROM artifacts
+             WHERE build_id = ? AND job_id = ? AND attempt = ? AND name = ?
+               AND state != 'pending'",
+        )
+        .bind(build_id)
+        .bind(job_id)
+        .bind(attempt)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(ArtifactRow::into_meta).transpose()
+    }
+
     /// 创建不可变清单；同一 attempt 重试必须提供完全相同的条目。
     pub async fn create_set(
         &self,
@@ -612,14 +692,14 @@ impl SqliteArtifactMetaRepo {
         Ok(total.max(0) as u64)
     }
 
-    /// 记录或替换 multipart 会话（同 build/name 的重试复用一个槽位）。
+    /// 记录或替换 multipart 会话（同 build/job/attempt/name 的重试复用一个槽位）。
     pub async fn record_multipart(&self, row: &MultipartUploadRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO artifact_multipart_uploads
                 (build_id, name, job_id, attempt, object_key, upload_id, size,
                  part_size, completed, expires_at, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (build_id, name) DO UPDATE SET
+            ON CONFLICT (build_id, job_id, attempt, name) DO UPDATE SET
                job_id = excluded.job_id, attempt = excluded.attempt,
                object_key = excluded.object_key, upload_id = excluded.upload_id,
                size = excluded.size, part_size = excluded.part_size,
@@ -646,14 +726,18 @@ impl SqliteArtifactMetaRepo {
     pub async fn find_multipart(
         &self,
         build_id: i64,
+        job_id: i64,
+        attempt: i32,
         name: &str,
     ) -> Result<Option<MultipartUploadRow>, StoreError> {
         let row = sqlx::query_as::<_, MultipartUploadDbRow>(
             "SELECT build_id, name, job_id, attempt, object_key, upload_id, size,
                     part_size, completed, expires_at
-             FROM artifact_multipart_uploads WHERE build_id = ? AND name = ?",
+             FROM artifact_multipart_uploads WHERE build_id = ? AND job_id = ? AND attempt = ? AND name = ?",
         )
         .bind(build_id)
+        .bind(job_id)
+        .bind(attempt)
         .bind(name)
         .fetch_optional(&self.pool)
         .await?;
@@ -677,9 +761,17 @@ impl SqliteArtifactMetaRepo {
     }
 
     /// 删除已完成/已 abort 的 multipart 会话。
-    pub async fn delete_multipart(&self, build_id: i64, name: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM artifact_multipart_uploads WHERE build_id = ? AND name = ?")
+    pub async fn delete_multipart(
+        &self,
+        build_id: i64,
+        job_id: i64,
+        attempt: i32,
+        name: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM artifact_multipart_uploads WHERE build_id = ? AND job_id = ? AND attempt = ? AND name = ?")
             .bind(build_id)
+            .bind(job_id)
+            .bind(attempt)
             .bind(name)
             .execute(&self.pool)
             .await?;
@@ -724,13 +816,17 @@ impl SqliteArtifactMetaRepo {
     pub async fn mark_multipart_completed(
         &self,
         build_id: i64,
+        job_id: i64,
+        attempt: i32,
         name: &str,
     ) -> Result<(), StoreError> {
         sqlx::query(
             "UPDATE artifact_multipart_uploads SET completed = 1
-             WHERE build_id = ? AND name = ?",
+             WHERE build_id = ? AND job_id = ? AND attempt = ? AND name = ?",
         )
         .bind(build_id)
+        .bind(job_id)
+        .bind(attempt)
         .bind(name)
         .execute(&self.pool)
         .await?;
@@ -771,8 +867,8 @@ impl From<MultipartUploadDbRow> for MultipartUploadRow {
 
 impl ArtifactMetaRepo for SqliteArtifactMetaRepo {
     async fn record(&self, meta: &ArtifactMeta) -> Result<(), StoreError> {
-        // (build, name) 唯一 + 覆盖语义：重跑/重试同名再传以最新为准（与
-        // 字节层 rename 覆盖同语义）。retention 自落库时刻起保留期（全局
+        // 带任务归属的行按 (build, job, attempt, name) 唯一；legacy 行继续
+        // 保持 (build, name) 覆盖兼容。retention 自落库时刻起保留期（全局
         // 配置，默认 30 天，ADR-0013/B5-T6）。
         let now = crate::store::now_ms();
         // S3 新产物默认永久保留（ADR-0026）；本地仍按全局天数。
@@ -780,30 +876,53 @@ impl ArtifactMetaRepo for SqliteArtifactMetaRepo {
             ArtifactBackend::S3 => i64::MAX,
             ArtifactBackend::Local => now + self.retention_days * 24 * 60 * 60 * 1000,
         };
-        sqlx::query(
-            "INSERT INTO artifacts
+        // 旧调用面没有任务归属，沿用历史 (build, name) 覆盖语义；新任务行
+        // 使用完整四元组约束，允许同构建不同任务声明同名产物。
+        if meta.job_id.is_none() || meta.attempt.is_none() {
+            sqlx::query("DELETE FROM artifacts WHERE build_id = ? AND name = ? AND job_id IS NULL")
+                .bind(meta.build_id)
+                .bind(&meta.name)
+                .execute(&self.pool)
+                .await?;
+        }
+        let query = if meta.job_id.is_some() && meta.attempt.is_some() {
+            sqlx::query(
+                "INSERT INTO artifacts
                 (build_id, job_id, attempt, backend, state, name, path, size, sha256,
                  created_at, retention_until)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (build_id, name) DO UPDATE SET
+             ON CONFLICT (build_id, job_id, attempt, name) DO UPDATE SET
                job_id = excluded.job_id, attempt = excluded.attempt,
                backend = excluded.backend, state = excluded.state,
                path = excluded.path, size = excluded.size, sha256 = excluded.sha256,
                created_at = excluded.created_at, retention_until = excluded.retention_until",
-        )
-        .bind(meta.build_id)
-        .bind(meta.job_id)
-        .bind(meta.attempt)
-        .bind(meta.backend.as_str())
-        .bind(meta.state.as_str())
-        .bind(&meta.name)
-        .bind(&meta.path)
-        .bind(meta.size as i64)
-        .bind(&meta.sha256)
-        .bind(now)
-        .bind(retention_until)
-        .execute(&self.pool)
-        .await?;
+            )
+        } else {
+            sqlx::query(
+                "INSERT INTO artifacts
+                (build_id, job_id, attempt, backend, state, name, path, size, sha256,
+                 created_at, retention_until)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (build_id, job_id, attempt, name) DO UPDATE SET
+               backend = excluded.backend, state = excluded.state,
+               path = excluded.path, size = excluded.size, sha256 = excluded.sha256,
+               created_at = excluded.created_at, retention_until = excluded.retention_until",
+            )
+        };
+        query
+            .bind(meta.build_id)
+            .bind(meta.job_id)
+            .bind(meta.attempt)
+            .bind(meta.backend.as_str())
+            .bind(meta.state.as_str())
+            .bind(&meta.name)
+            .bind(&meta.path)
+            .bind(meta.size as i64)
+            .bind(&meta.sha256)
+            .bind(now)
+            .bind(retention_until)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -848,6 +967,28 @@ impl ArtifactMetaRepo for SqliteArtifactMetaRepo {
             .bind(name)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    async fn set_state_for_job(
+        &self,
+        build_id: i64,
+        job_id: i64,
+        attempt: i32,
+        name: &str,
+        state: ArtifactState,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE artifacts SET state = ?
+             WHERE build_id = ? AND job_id = ? AND attempt = ? AND name = ?",
+        )
+        .bind(state.as_str())
+        .bind(build_id)
+        .bind(job_id)
+        .bind(attempt)
+        .bind(name)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }
@@ -1027,6 +1168,49 @@ mod tests {
         repo.record(&meta).await.expect("record 1");
         repo.record(&meta).await.expect("record 2（幂等覆盖）");
         assert_eq!(repo.list_by_build(1).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn same_name_from_different_jobs_is_scoped_by_job_and_attempt() {
+        let (_dir, store, repo) = fixture().await;
+        sqlx::query("INSERT INTO jobs (id, build_id, stage_index, name, status, attempt, labels, timeout_minutes, retry_count, allow_failure) VALUES (11, 1, 0, 'linux', 'succeeded', 1, '[]', 0, 0, 0), (12, 1, 0, 'windows', 'succeeded', 1, '[]', 0, 0, 0)")
+            .execute(&repo.pool)
+            .await
+            .expect("建来源任务");
+        let first = store
+            .store_for_job(1, 11, 1, "bundle", bytes_stream(b"linux"))
+            .await
+            .expect("linux 产物");
+        let second = store
+            .store_for_job(1, 12, 1, "bundle", bytes_stream(b"windows"))
+            .await
+            .expect("windows 产物");
+        let mut first = first;
+        first.job_id = Some(11);
+        first.attempt = Some(1);
+        let mut second = second;
+        second.job_id = Some(12);
+        second.attempt = Some(1);
+        repo.record(&first).await.expect("记录 linux");
+        repo.record(&second).await.expect("记录 windows");
+
+        assert_eq!(repo.list_by_build(1).await.unwrap().len(), 2);
+        assert_eq!(
+            repo.find_for_job(1, 11, 1, "bundle")
+                .await
+                .unwrap()
+                .unwrap()
+                .sha256,
+            sha256_hex(b"linux")
+        );
+        assert_eq!(
+            repo.find_for_job(1, 12, 1, "bundle")
+                .await
+                .unwrap()
+                .unwrap()
+                .sha256,
+            sha256_hex(b"windows")
+        );
     }
 
     #[tokio::test]

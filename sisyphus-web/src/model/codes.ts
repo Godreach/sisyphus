@@ -14,6 +14,8 @@ export const VALIDATION_CODES = [
   "artifact_upload_empty",
   "artifact_upload_duplicate",
   "artifact_upload_absolute",
+  "artifact_download_path_not_relative",
+  "artifact_download_target_overlap",
   "cache_key_empty",
   "cache_key_too_long",
   "cache_key_workspace",

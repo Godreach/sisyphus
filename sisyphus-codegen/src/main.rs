@@ -146,7 +146,7 @@ mod tests {
     /// `ALL_CODES` 与 model `ValidationCode` 变体数一致（防 model 加规则后漏登记）。
     #[test]
     fn all_codes_count_matches_enum() {
-        // 15 条规则——若 model 加规则，此处需同步更新 `ALL_CODES`。
-        assert_eq!(samples::ALL_CODES.len(), 15);
+        // 17 条规则——若 model 加规则，此处需同步更新 `ALL_CODES`。
+        assert_eq!(samples::ALL_CODES.len(), 17);
     }
 }

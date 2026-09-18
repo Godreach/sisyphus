@@ -64,6 +64,12 @@ pub enum SchedError {
     Shutdown,
 }
 
+enum DependencyState {
+    Ready,
+    Pending,
+    Failed(String),
+}
+
 impl std::fmt::Display for SchedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -453,6 +459,25 @@ impl Scheduler {
     /// 无槽位）。幂等：行状态条件更新保证单实例循环下不重复下发。
     pub async fn match_pass(&self, now: i64) -> Result<(), StoreError> {
         for job in self.jobs.pending_pool().await? {
+            match self.artifact_dependency_state(&job).await? {
+                DependencyState::Pending => {
+                    self.jobs
+                        .set_waiting(job.id, Some("等待依赖产物 ready"))
+                        .await?;
+                    continue;
+                }
+                DependencyState::Failed(detail) => {
+                    self.jobs
+                        .transition(job.id, JobStatus::Failed, None, Some(&detail), now)
+                        .await?;
+                    if let Some(updated) = self.jobs.get(job.id).await? {
+                        self.engine.on_job_terminal(&updated, now).await?;
+                    }
+                    tracing::warn!(job_id = job.id, detail = %detail, "依赖产物不可用");
+                    continue;
+                }
+                DependencyState::Ready => {}
+            }
             let required: Vec<String> = serde_json::from_str(&job.labels).unwrap_or_default();
             let candidates = self.agents.match_candidates(None, &required).await?;
             if candidates.is_empty() {
@@ -491,6 +516,72 @@ impl Scheduler {
             }
         }
         Ok(())
+    }
+
+    /// 依赖产物门控：消费者只有在同构建来源任务的某个成功 attempt 已发布
+    /// ready 产物集/文件后才进入 Agent 匹配。来源仍在执行时保持 queued；来源
+    /// 已终态但正文被删除或上传失败则把消费者置为明确失败，避免派发后才发现。
+    async fn artifact_dependency_state(&self, job: &JobRow) -> Result<DependencyState, StoreError> {
+        let Some(spec_json) = job.spec_json.as_deref() else {
+            return Ok(DependencyState::Ready);
+        };
+        let Some(downloads) = serde_json::from_str::<serde_json::Value>(spec_json)
+            .ok()
+            .and_then(|v| v.get("artifact_downloads").cloned())
+            .and_then(|v| v.as_array().cloned())
+        else {
+            return Ok(DependencyState::Ready);
+        };
+        for download in downloads {
+            let Some(source_name) = download.get("job").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(name) = download.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let sources = sqlx::query_as::<_, (i64, i32, String)>(
+                "SELECT id, attempt, status FROM jobs WHERE build_id = ? AND name = ? ORDER BY attempt DESC",
+            )
+            .bind(job.build_id)
+            .bind(source_name)
+            .fetch_all(&self.pool)
+            .await?;
+            if sources.is_empty() {
+                return Ok(DependencyState::Failed(format!(
+                    "来源任务 {source_name} 不存在"
+                )));
+            }
+            let mut pending = false;
+            let mut terminal = true;
+            for (source_id, attempt, status) in &sources {
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM artifacts WHERE build_id = ? AND job_id = ? AND attempt = ? AND name = ? AND state = 'ready')
+                     OR EXISTS(SELECT 1 FROM artifact_sets WHERE build_id = ? AND job_id = ? AND attempt = ? AND name = ? AND state = 'ready')",
+                )
+                .bind(job.build_id).bind(source_id).bind(attempt).bind(name)
+                .bind(job.build_id).bind(source_id).bind(attempt).bind(name)
+                .fetch_one(&self.pool)
+                .await?;
+                if *status == "succeeded" && exists {
+                    pending = false;
+                    terminal = false;
+                    break;
+                }
+                if status == "queued" || status == "running" || status == "unknown" {
+                    pending = true;
+                    terminal = false;
+                }
+            }
+            if pending {
+                return Ok(DependencyState::Pending);
+            }
+            if terminal {
+                return Ok(DependencyState::Failed(format!(
+                    "依赖产物尚未 ready：任务 {source_name} 的产物 {name}"
+                )));
+            }
+        }
+        Ok(DependencyState::Ready)
     }
 
     /// 等待原因标注：缺标签 / 无在线 Agent / 在线 Agent 无空槽（ADR-0019
@@ -1014,6 +1105,78 @@ mod tests {
         );
         let reason = jobs[0].waiting_detail.as_deref().expect("等待原因");
         assert!(reason.contains("gpu=nvidia"), "缺失标签标注：{reason}");
+    }
+
+    #[tokio::test]
+    async fn artifact_dependency_gates_dispatch_until_ready_and_fails_terminal_missing() {
+        let t = fixture(vec![], vec!["sisyphus/os=linux"]).await;
+        let build = start_build(&t).await;
+        let producer = t
+            .sched
+            .jobs
+            .insert(crate::store::jobs::NewJob {
+                build_id: build.id,
+                stage_index: 0,
+                name: "producer".into(),
+                attempt: 1,
+                spec_json: Some("{}".into()),
+                agent_id: None,
+                labels: vec![],
+                timeout_minutes: 0,
+                retry_count: 0,
+                allow_failure: false,
+            })
+            .await
+            .expect("生产任务");
+        let consumer = t
+            .sched
+            .jobs
+            .insert(crate::store::jobs::NewJob {
+                build_id: build.id,
+                stage_index: 0,
+                name: "compile".into(),
+                attempt: 1,
+                spec_json: Some(
+                    serde_json::json!({
+                        "artifact_downloads": [{"job": "producer", "name": "bundle", "path": "in"}]
+                    })
+                    .to_string(),
+                ),
+                agent_id: None,
+                labels: vec![],
+                timeout_minutes: 0,
+                retry_count: 0,
+                allow_failure: false,
+            })
+            .await
+            .expect("消费任务");
+
+        assert!(matches!(
+            t.sched.artifact_dependency_state(&consumer).await.unwrap(),
+            DependencyState::Pending
+        ));
+        t.sched
+            .jobs
+            .transition(producer.id, JobStatus::Succeeded, None, None, t.now())
+            .await
+            .expect("生产成功");
+        assert!(matches!(
+            t.sched.artifact_dependency_state(&consumer).await.unwrap(),
+            DependencyState::Failed(_)
+        ));
+        sqlx::query(
+            "INSERT INTO artifacts (build_id, job_id, attempt, backend, state, name, path, size, sha256, created_at, retention_until)
+             VALUES (?, ?, 1, 'local', 'ready', 'bundle', '1/bundle', 1, 'abc', 0, 0)",
+        )
+        .bind(build.id)
+        .bind(producer.id)
+        .execute(&t.pool)
+        .await
+        .expect("发布产物");
+        assert!(matches!(
+            t.sched.artifact_dependency_state(&consumer).await.unwrap(),
+            DependencyState::Ready
+        ));
     }
 
     /// AC：job 超时（分钟，0=无限）从下发计时，超时走取消路径终态 timeout。

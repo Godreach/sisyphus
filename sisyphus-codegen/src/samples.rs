@@ -28,8 +28,8 @@ pub struct Sample {
     pub snapshot: bool,
 }
 
-/// 15 条规则码的规范序（`codes.ts` 的 `VALIDATION_CODES` 与 fixtures `rules` 同序）。
-pub const ALL_CODES: [ValidationCode; 15] = [
+/// 17 条规则码的规范序（`codes.ts` 的 `VALIDATION_CODES` 与 fixtures `rules` 同序）。
+pub const ALL_CODES: [ValidationCode; 17] = [
     ValidationCode::RequiredParameterDefault,
     ValidationCode::EnumChoices,
     ValidationCode::WhenWorkspace,
@@ -40,6 +40,8 @@ pub const ALL_CODES: [ValidationCode; 15] = [
     ValidationCode::ArtifactUploadEmpty,
     ValidationCode::ArtifactUploadDuplicate,
     ValidationCode::ArtifactUploadAbsolute,
+    ValidationCode::ArtifactDownloadPathNotRelative,
+    ValidationCode::ArtifactDownloadTargetOverlap,
     ValidationCode::CacheKeyEmpty,
     ValidationCode::CacheKeyTooLong,
     ValidationCode::CacheKeyWorkspace,
@@ -439,6 +441,45 @@ pub fn samples() -> Vec<Sample> {
         pipeline: p,
         valid: false,
         expected_codes: &[ValidationCode::ArtifactUploadDuplicate],
+        snapshot: false,
+    });
+
+    // 下载目标必须留在 workspace 内。
+    let mut p = base();
+    p.stages[0].jobs[0]
+        .artifact_downloads
+        .push(ArtifactDownload {
+            job: "build".into(),
+            name: "dist".into(),
+            path: "out/../escape".into(),
+        });
+    out.push(Sample {
+        id: "artifact_download_path_not_relative",
+        pipeline: p,
+        valid: false,
+        expected_codes: &[ValidationCode::ArtifactDownloadPathNotRelative],
+        snapshot: false,
+    });
+
+    // 同一任务的下载目标不得相同或互为父子路径。
+    let mut p = base();
+    p.stages[0].jobs[0].artifact_downloads = vec![
+        ArtifactDownload {
+            job: "build-linux".into(),
+            name: "dist".into(),
+            path: "restore".into(),
+        },
+        ArtifactDownload {
+            job: "build-windows".into(),
+            name: "dist".into(),
+            path: "restore/bin".into(),
+        },
+    ];
+    out.push(Sample {
+        id: "artifact_download_target_overlap",
+        pipeline: p,
+        valid: false,
+        expected_codes: &[ValidationCode::ArtifactDownloadTargetOverlap],
         snapshot: false,
     });
 

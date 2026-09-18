@@ -131,6 +131,28 @@ function validateJob(errors: ValidationError[], path: string, job: Job): void {
       })
     }
   })
+
+  // 产物下载目标必须留在 workspace 内；多个目标不得相同或互为父子路径。
+  const downloadTargets: string[][] = []
+  ;(job.artifact_downloads ?? []).forEach((d, di: number) => {
+    const target = workspaceRelativeComponents(d.path)
+    if (target === undefined) {
+      errors.push({
+        path: `${path}.artifact_downloads[${di}].path`,
+        code: 'artifact_download_path_not_relative',
+        message: '产物下载目标必须是 workspace 相对路径且不得包含父目录',
+      })
+      return
+    }
+    if (downloadTargets.some((previous) => startsWithComponents(target, previous) || startsWithComponents(previous, target))) {
+      errors.push({
+        path: `${path}.artifact_downloads[${di}].path`,
+        code: 'artifact_download_target_overlap',
+        message: '同一任务的产物下载目标不能相同或互为父子路径',
+      })
+    }
+    downloadTargets.push(target)
+  })
   const uploadNames = new Set<string>()
   ;(job.artifact_uploads ?? []).forEach((u, ui: number) => {
     const folded = u.name.toLocaleLowerCase('en-US')
@@ -185,6 +207,26 @@ function validateCache(errors: ValidationError[], path: string, cache: CacheSpec
 // 绝对路径判定（与 Rust `is_absolute` 同：`/` 或 `\` 起首）。
 function isAbsolute(p: string): boolean {
   return p.startsWith('/') || p.startsWith('\\')
+}
+
+function workspaceRelativeComponents(p: string): string[] | undefined {
+  if (p.trim() === '') return undefined
+  const normalized = p.replaceAll('\\', '/')
+  if (
+    normalized.startsWith('/') ||
+    (normalized.length >= 2 && /^[A-Za-z]$/.test(normalized[0]) && normalized[1] === ':')
+  ) return undefined
+  const components: string[] = []
+  for (const component of normalized.split('/')) {
+    if (component === '' || component === '.') continue
+    if (component === '..') return undefined
+    components.push(component)
+  }
+  return components.length > 0 ? components : undefined
+}
+
+function startsWithComponents(path: string[], prefix: string[]): boolean {
+  return prefix.length <= path.length && prefix.every((component, index) => path[index] === component)
 }
 
 // UTF-8 字节长度（与 Rust `str::len` 同——Rust 按 UTF-8 字节计，TS `.length` 按

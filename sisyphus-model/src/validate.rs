@@ -39,6 +39,10 @@ pub enum ValidationCode {
     ArtifactUploadDuplicate,
     /// 产物上传路径必须是 workspace 相对路径。
     ArtifactUploadAbsolute,
+    /// 产物下载目标必须是 workspace 相对路径且不得越界。
+    ArtifactDownloadPathNotRelative,
+    /// 同一任务的产物下载目标不得相同或互为父子路径。
+    ArtifactDownloadTargetOverlap,
     /// 缓存 key 不能为空（ADR-0012）。
     CacheKeyEmpty,
     /// 缓存 key 长度超过上限 255。
@@ -200,6 +204,32 @@ fn validate_job(errors: &mut Vec<ValidationError>, path: &str, job: &Job) {
         }
     }
 
+    // 产物下载目标必须留在 workspace 内；同任务的多个恢复目标不得重叠，
+    // 否则整体替换其中一个目标会删除或覆盖另一个目标。
+    let mut download_targets: Vec<Vec<String>> = Vec::new();
+    for (di, download) in job.artifact_downloads.iter().enumerate() {
+        let field = format!("{path}.artifact_downloads[{di}].path");
+        let Some(target) = workspace_relative_components(&download.path) else {
+            errors.push(ValidationError::new(
+                field,
+                "产物下载目标必须是 workspace 相对路径且不得包含父目录",
+                ValidationCode::ArtifactDownloadPathNotRelative,
+            ));
+            continue;
+        };
+        if download_targets
+            .iter()
+            .any(|previous| target.starts_with(previous) || previous.starts_with(&target))
+        {
+            errors.push(ValidationError::new(
+                field,
+                "同一任务的产物下载目标不能相同或互为父子路径",
+                ValidationCode::ArtifactDownloadTargetOverlap,
+            ));
+        }
+        download_targets.push(target);
+    }
+
     // 缓存声明（ADR-0012）
     for (ci, cache) in job.caches.iter().enumerate() {
         validate_cache(errors, &format!("{path}.caches[{ci}]"), cache);
@@ -254,6 +284,31 @@ fn validate_cache(errors: &mut Vec<ValidationError>, path: &str, cache: &CacheSp
 
 fn is_absolute(p: &str) -> bool {
     p.starts_with('/') || p.starts_with('\\')
+}
+
+/// 跨平台解析 workspace 相对路径。Pipeline 可能在与 Agent 不同的平台保存，
+/// 因此同时接受两种分隔符并显式拒绝 Unix 根、UNC/反斜杠根、Windows 盘符与
+/// 任意 `..` 分量；`.` 与重复分隔符归一化后用于目标重叠判断。
+fn workspace_relative_components(path: &str) -> Option<Vec<String>> {
+    if path.trim().is_empty() {
+        return None;
+    }
+    let normalized = path.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    if normalized.starts_with('/')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+    {
+        return None;
+    }
+    let mut components = Vec::new();
+    for component in normalized.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => return None,
+            value => components.push(value.to_string()),
+        }
+    }
+    (!components.is_empty()).then_some(components)
 }
 
 /// 从 Pipeline 提取需要展开的变量引用集合（保存校验用）。
@@ -611,6 +666,73 @@ mod tests {
             errs.iter()
                 .any(|e| e.code == ValidationCode::ArtifactUploadAbsolute)
         );
+    }
+
+    #[test]
+    fn rejects_artifact_download_targets_outside_workspace() {
+        let mut p = base_pipeline();
+        p.stages[0].jobs[0].artifact_downloads = vec![
+            ArtifactDownload {
+                job: "compile-linux".into(),
+                name: "bin".into(),
+                path: "/absolute/bin".into(),
+            },
+            ArtifactDownload {
+                job: "compile-windows".into(),
+                name: "bin".into(),
+                path: "output/../escape".into(),
+            },
+        ];
+
+        let errs = validate(&p).unwrap_err();
+        assert_eq!(
+            errs.iter()
+                .filter(|e| e.code == ValidationCode::ArtifactDownloadPathNotRelative)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn rejects_equal_or_nested_artifact_download_targets() {
+        let mut p = base_pipeline();
+        p.stages[0].jobs[0].artifact_downloads = vec![
+            ArtifactDownload {
+                job: "compile-linux".into(),
+                name: "bundle".into(),
+                path: "restore".into(),
+            },
+            ArtifactDownload {
+                job: "compile-windows".into(),
+                name: "bundle".into(),
+                path: "restore/bin".into(),
+            },
+        ];
+
+        let errs = validate(&p).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.code == ValidationCode::ArtifactDownloadTargetOverlap)
+        );
+    }
+
+    #[test]
+    fn accepts_sibling_artifact_download_targets() {
+        let mut p = base_pipeline();
+        p.stages[0].jobs[0].artifact_downloads = vec![
+            ArtifactDownload {
+                job: "compile-linux".into(),
+                name: "bundle".into(),
+                path: "restore/linux".into(),
+            },
+            ArtifactDownload {
+                job: "compile-windows".into(),
+                name: "bundle".into(),
+                path: "restore/windows".into(),
+            },
+        ];
+
+        assert!(validate(&p).is_ok());
     }
 
     #[test]

@@ -386,7 +386,7 @@ pub async fn agent_create_set(
     ensure_declared_upload(&state, &job, &req.name).await?;
     if state
         .artifact_meta
-        .find_including_pending(job.build_id, &req.name)
+        .find_including_pending_for_job(job.build_id, job.id, job.attempt, &req.name)
         .await?
         .is_some()
     {
@@ -698,7 +698,7 @@ pub async fn agent_upload(
         ensure_declared_upload(&state, &job, &name).await?;
         if state
             .artifact_meta
-            .find(job.build_id, &name)
+            .find_for_job(job.build_id, job.id, job.attempt, &name)
             .await?
             .is_some()
         {
@@ -732,7 +732,25 @@ pub async fn agent_upload(
             )
             .await
     } else {
-        state.artifacts.store(job.build_id, &name, stream).await
+        // 保持首个/同任务上传的历史磁盘布局；仅在构建内已有其它任务同名
+        // 产物时切换到任务隔离键，兼容旧运维脚本与已有本地产物。
+        let collision = state
+            .artifact_meta
+            .list_by_build(job.build_id)
+            .await?
+            .into_iter()
+            .any(|meta| {
+                meta.name == name
+                    && (meta.job_id != Some(job.id) || meta.attempt != Some(job.attempt))
+            });
+        if collision {
+            state
+                .artifacts
+                .store_for_job(job.build_id, job.id, job.attempt, &name, stream)
+                .await
+        } else {
+            state.artifacts.store(job.build_id, &name, stream).await
+        }
     };
     let mut meta = stored.map_err(|e| ApiError::conflict(e.to_string()))?;
     meta.job_id = Some(job.id);
@@ -793,7 +811,7 @@ pub async fn agent_upload_url(
     let (tmp_key, final_key) = artifact_object_keys(s3.prefix(), &job, &name);
     let existing = state
         .artifact_meta
-        .find_including_pending(job.build_id, &name)
+        .find_including_pending_for_job(job.build_id, job.id, job.attempt, &name)
         .await?;
     if existing
         .as_ref()
@@ -826,7 +844,7 @@ pub async fn agent_upload_url(
         let now = crate::store::now_ms();
         let upload_id = match state
             .artifact_meta
-            .find_multipart(job.build_id, &name)
+            .find_multipart(job.build_id, job.id, job.attempt, &name)
             .await?
         {
             Some(existing)
@@ -851,7 +869,7 @@ pub async fn agent_upload_url(
                         .map_err(|e| ApiError::internal("清理旧临时对象", &e))?;
                     state
                         .artifact_meta
-                        .delete_multipart(job.build_id, &name)
+                        .delete_multipart(job.build_id, job.id, job.attempt, &name)
                         .await?;
                 }
                 let upload_id = s3
@@ -899,7 +917,7 @@ pub async fn agent_upload_url(
     }
     if let Some(existing) = state
         .artifact_meta
-        .find_multipart(job.build_id, &name)
+        .find_multipart(job.build_id, job.id, job.attempt, &name)
         .await?
     {
         if !existing.completed {
@@ -912,7 +930,7 @@ pub async fn agent_upload_url(
             .map_err(|e| ApiError::internal("清理旧临时对象", &e))?;
         state
             .artifact_meta
-            .delete_multipart(job.build_id, &name)
+            .delete_multipart(job.build_id, job.id, job.attempt, &name)
             .await?;
     }
     let url = s3
@@ -965,7 +983,7 @@ pub async fn agent_complete(
 
     if let Some(meta) = state
         .artifact_meta
-        .find_including_pending(job.build_id, &name)
+        .find_including_pending_for_job(job.build_id, job.id, job.attempt, &name)
         .await?
         && meta.state == ArtifactState::Ready
         && meta.backend == ArtifactBackend::S3
@@ -992,7 +1010,7 @@ pub async fn agent_complete(
     enforce_transfer_limits(&state, &job, &name, req.size).await?;
     let pending = state
         .artifact_meta
-        .find_including_pending(job.build_id, &name)
+        .find_including_pending_for_job(job.build_id, job.id, job.attempt, &name)
         .await?
         .filter(|meta| {
             meta.state == ArtifactState::Pending
@@ -1028,7 +1046,7 @@ pub async fn agent_complete(
         }
         let session = state
             .artifact_meta
-            .find_multipart(job.build_id, &name)
+            .find_multipart(job.build_id, job.id, job.attempt, &name)
             .await?
             .filter(|session| {
                 session.upload_id == upload_id
@@ -1065,7 +1083,7 @@ pub async fn agent_complete(
             }
             state
                 .artifact_meta
-                .mark_multipart_completed(session.build_id, &session.name)
+                .mark_multipart_completed(session.build_id, job.id, job.attempt, &session.name)
                 .await?;
         }
     } else if !req.parts.is_empty() {
@@ -1151,7 +1169,7 @@ pub async fn agent_complete(
     if req.upload_id.is_some() {
         state
             .artifact_meta
-            .delete_multipart(job.build_id, &name)
+            .delete_multipart(job.build_id, job.id, job.attempt, &name)
             .await?;
     }
     Ok((
@@ -1245,17 +1263,43 @@ pub async fn agent_download(
         return Ok(Json(set_response(&state, set, entries).await?).into_response());
     }
 
-    let meta = state
-        .artifact_meta
-        .find(build_id, &name)
-        .await?
-        .ok_or_else(|| {
-            // 「依赖产物尚不存在」的清晰报错（票 #74 AC）：Agent 侧据此
-            // 任务失败，不静默空等。
-            ApiError::resource_not_found(format!(
-                "依赖产物尚不存在：任务 {source_job} 的产物 {name} 未上传"
-            ))
-        })?;
+    let mut source_attempts: Vec<&crate::store::jobs::JobRow> = jobs
+        .iter()
+        .filter(|candidate| candidate.name == source_job)
+        .collect();
+    if source_attempts.is_empty() {
+        return Err(ApiError::resource_not_found(format!(
+            "来源任务 {source_job} 不存在"
+        )));
+    }
+    source_attempts.sort_by_key(|candidate| std::cmp::Reverse(candidate.attempt));
+    let mut meta = None;
+    for source in source_attempts {
+        if let Some(found) = state
+            .artifact_meta
+            .find_for_job(build_id, source.id, source.attempt, &name)
+            .await?
+            && found.state != ArtifactState::Pending
+        {
+            meta = Some(found);
+            break;
+        }
+    }
+    // 迁移前的本地历史产物没有任务归属，只能按构建/名称兼容读取；新上传
+    // 一旦带有归属就不会走此回退，避免跨任务同名串读。
+    if meta.is_none()
+        && let Some(legacy) = state.artifact_meta.find(build_id, &name).await?
+        && legacy.job_id.is_none()
+    {
+        meta = Some(legacy);
+    }
+    let meta = meta.ok_or_else(|| {
+        // 「依赖产物尚不存在」的清晰报错（票 #74 AC）：Agent 侧据此
+        // 任务失败，不静默空等。
+        ApiError::resource_not_found(format!(
+            "依赖产物尚不存在：任务 {source_job} 的产物 {name} 未上传"
+        ))
+    })?;
     if name.starts_with(".set-") {
         return Err(ApiError::resource_not_found(
             "目录产物只能在整组 ready 后读取",
@@ -1308,11 +1352,24 @@ pub async fn list(
                 .await
                 .map_err(|e| ApiError::internal("产物状态检查", &e))?;
             if observed != entry.meta.state {
-                state
-                    .artifact_meta
-                    .set_state(entry.meta.build_id, &entry.meta.name, observed)
-                    .await
-                    .map_err(|e| ApiError::internal("产物状态更新", &e))?;
+                if let (Some(job_id), Some(attempt)) = (entry.meta.job_id, entry.meta.attempt) {
+                    state
+                        .artifact_meta
+                        .set_state_for_job(
+                            entry.meta.build_id,
+                            job_id,
+                            attempt,
+                            &entry.meta.name,
+                            observed,
+                        )
+                        .await
+                } else {
+                    state
+                        .artifact_meta
+                        .set_state(entry.meta.build_id, &entry.meta.name, observed)
+                        .await
+                }
+                .map_err(|e| ApiError::internal("产物状态更新", &e))?;
                 entry.meta.state = observed;
             }
         }
@@ -1361,11 +1418,26 @@ pub async fn download(
     if artifact.starts_with(".set-") {
         return Err(ApiError::resource_not_found("产物不存在"));
     }
-    let meta = state
+    let matches: Vec<_> = state
         .artifact_meta
-        .find(build.id, &artifact)
+        .list_by_build(build.id)
         .await?
-        .ok_or_else(|| ApiError::resource_not_found(format!("产物 {artifact} 不存在")))?;
+        .into_iter()
+        .filter(|meta| meta.name == artifact)
+        .collect();
+    let meta = match matches.as_slice() {
+        [] => {
+            return Err(ApiError::resource_not_found(format!(
+                "产物 {artifact} 不存在"
+            )));
+        }
+        [meta] => meta.clone(),
+        _ => {
+            return Err(ApiError::conflict(format!(
+                "产物 {artifact} 存在多个任务版本，请使用任务范围接口"
+            )));
+        }
+    };
     artifact_response(&state, meta).await
 }
 
@@ -1537,7 +1609,11 @@ async fn set_response(
     let mut availability = ArtifactStateDto::Ready;
     for entry in entries {
         let observed = if let Some(name) = entry.artifact_name.as_deref() {
-            match state.artifact_meta.find(set.build_id, name).await? {
+            match state
+                .artifact_meta
+                .find_for_job(set.build_id, set.job_id, set.attempt, name)
+                .await?
+            {
                 Some(meta) if meta.backend == ArtifactBackend::S3 => match &state.s3 {
                     None => ArtifactStateDto::Unavailable,
                     Some(s3) => match s3.head_object(&meta.path).await {
@@ -1615,7 +1691,12 @@ pub async fn agent_set_file(
         .ok_or_else(|| ApiError::resource_not_found("清单文件不存在"))?;
     let meta = state
         .artifact_meta
-        .find(set.build_id, &entry.artifact_name.unwrap_or_default())
+        .find_for_job(
+            set.build_id,
+            set.job_id,
+            set.attempt,
+            &entry.artifact_name.unwrap_or_default(),
+        )
         .await?
         .ok_or_else(|| ApiError::conflict("产物正文缺失"))?;
     artifact_response(&state, meta).await
@@ -1748,14 +1829,27 @@ async fn artifact_response(state: &AppState, meta: ArtifactMeta) -> Result<Respo
             meta.backend.as_str()
         )));
     }
-    let stream = match state.artifacts.open(meta.build_id, &meta.name).await {
+    let stream = match state.artifacts.open_meta(&meta).await {
         Ok(stream) => stream,
         Err(crate::store::StoreError::NotFound(_)) => {
-            state
-                .artifact_meta
-                .set_state(meta.build_id, &meta.name, ArtifactState::Missing)
-                .await
-                .map_err(|e| ApiError::internal("产物状态更新", &e))?;
+            if let (Some(job_id), Some(attempt)) = (meta.job_id, meta.attempt) {
+                state
+                    .artifact_meta
+                    .set_state_for_job(
+                        meta.build_id,
+                        job_id,
+                        attempt,
+                        &meta.name,
+                        ArtifactState::Missing,
+                    )
+                    .await
+            } else {
+                state
+                    .artifact_meta
+                    .set_state(meta.build_id, &meta.name, ArtifactState::Missing)
+                    .await
+            }
+            .map_err(|e| ApiError::internal("产物状态更新", &e))?;
             return Err(ApiError::conflict(format!("产物 {} 的正文缺失", meta.name)));
         }
         Err(e) => return Err(ApiError::internal("产物读取", &e)),

@@ -149,21 +149,21 @@ async fn purge_build(
 ) -> Result<CleanupReport, StoreError> {
     let mut report = CleanupReport::default();
 
-    // 产物字节先删（文件名即磁盘路径段，均过存储层名校验；缺失文件容错）。
-    let names = sqlx::query_scalar::<_, String>(
-        "SELECT name FROM artifacts WHERE build_id = ? AND backend = 'local'",
+    // 产物字节先删。path 可能包含任务 attempt 隔离键，不能再由 public name
+    // 反推；旧行 path 同样是 build/name 形式，直接按根拼接兼容两者。
+    let paths = sqlx::query_scalar::<_, String>(
+        "SELECT path FROM artifacts WHERE build_id = ? AND backend = 'local'",
     )
     .bind(build_id)
     .fetch_all(pool)
     .await?;
-    let dir = artifacts_root.join(build_id.to_string());
-    for name in &names {
-        let path = dir.join(name);
+    for relative in &paths {
+        let path = artifacts_root.join(relative);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => report.artifact_files_deleted += 1,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // 元数据有行但磁盘已无（上传半截/外部删除）：不炸，照删元数据。
-                tracing::trace!(build_id, artifact = %name, "产物磁盘文件已不存在");
+                tracing::trace!(build_id, artifact = %relative, "产物磁盘文件已不存在");
             }
             Err(e) => {
                 return Err(StoreError::Io(e));
@@ -187,7 +187,8 @@ async fn purge_build(
 
     // 空目录回收：仅当目录已空（全部产物删净）才移除；非空/不存在忽略——
     // 绝不误删非本构建数据（目录即 build_id，命名空间隔离）。
-    if !names.is_empty() {
+    if !paths.is_empty() {
+        let dir = artifacts_root.join(build_id.to_string());
         match tokio::fs::remove_dir(&dir).await {
             Ok(()) => report.empty_dirs_reclaimed += 1,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
