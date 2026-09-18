@@ -13,6 +13,7 @@ pub mod artifacts;
 pub mod audit;
 pub mod builds;
 pub mod cleanup;
+pub mod deletions;
 pub mod jobs;
 pub mod logs;
 pub mod members;
@@ -331,6 +332,7 @@ mod tests {
         // 模拟旧库升级：抹掉迁移标记与业务表，使下一次 bootstrap 见到待应用迁移。
         let pool = open_raw_pool_for_test(dir.path()).await;
         for stmt in [
+            "DROP TABLE artifact_deletions",
             "DROP TABLE artifact_set_entries",
             "DROP TABLE artifact_sets",
             "DROP TABLE pipelines",

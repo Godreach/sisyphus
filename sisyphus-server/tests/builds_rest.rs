@@ -609,10 +609,20 @@ async fn detail_shows_stages_and_missing_secret_records_name() {
 // ===========================================================================
 
 async fn delete_build(app: &TestApp, cookie: &str, pipeline: &str, number: i64) -> Response {
+    delete_build_with_query(app, cookie, pipeline, number, "").await
+}
+
+async fn delete_build_with_query(
+    app: &TestApp,
+    cookie: &str,
+    pipeline: &str,
+    number: i64,
+    query: &str,
+) -> Response {
     req_with_cookie(
         app,
         "DELETE",
-        &format!("/api/v1/projects/demo/pipelines/{pipeline}/builds/{number}"),
+        &format!("/api/v1/projects/demo/pipelines/{pipeline}/builds/{number}{query}"),
         None,
         Some(cookie),
     )
@@ -723,4 +733,109 @@ async fn delete_build_requires_admin_rejects_live_and_purges_data() {
     // 不存在构建号 → 404（项目 admin）。
     let resp = delete_build(&app, &carol, "build", 999).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// #128：普通构建数据清理默认保留 S3 产物；管理员显式选择删除时，端点
+/// 只受理异步任务并立即让正文停止列举，任务状态可公开观察。
+#[tokio::test]
+async fn delete_build_preserves_s3_by_default_and_explicit_delete_is_queued() {
+    let (app, _admin, _alice, bob, carol, _dave) = fixture().await;
+    save_definition(&app, &carol, "build", minimal_definition()).await;
+    let repo = BuildRepo::new(app.pool.clone());
+
+    let (preserved, _) = trigger_build(&app, &bob, "build", "{}").await;
+    assert!(
+        repo.transition(preserved, BuildStatus::Running, 1_000)
+            .await
+            .expect("进入运行态")
+    );
+    assert!(
+        repo.transition(preserved, BuildStatus::Succeeded, 2_000)
+            .await
+            .expect("进入终态")
+    );
+    sqlx::query(
+        "INSERT INTO artifacts
+            (build_id, backend, state, name, path, size, sha256, created_at, retention_until)
+         VALUES (?, 's3', 'ready', 'keep.bin', 'artifacts/keep.bin', 4, 'abcd', 2_000, ?)",
+    )
+    .bind(preserved)
+    .bind(i64::MAX)
+    .execute(&app.pool)
+    .await
+    .expect("插入默认保留的 S3 产物");
+
+    let resp = delete_build(&app, &carol, "build", 1).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "默认清理仍同步完成本地数据"
+    );
+    let resp = req_with_cookie(
+        &app,
+        "GET",
+        "/api/v1/projects/demo/pipelines/build/builds/1/artifacts",
+        None,
+        Some(&carol),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["items"][0]["name"], "keep.bin");
+
+    let (deleted, _) = trigger_build(&app, &bob, "build", "{}").await;
+    assert!(
+        repo.transition(deleted, BuildStatus::Running, 3_000)
+            .await
+            .expect("进入运行态")
+    );
+    assert!(
+        repo.transition(deleted, BuildStatus::Succeeded, 4_000)
+            .await
+            .expect("进入终态")
+    );
+    sqlx::query(
+        "INSERT INTO artifacts
+            (build_id, backend, state, name, path, size, sha256, created_at, retention_until)
+         VALUES (?, 's3', 'ready', 'delete.bin', 'artifacts/delete.bin', 6, 'abcdef', 4_000, ?)",
+    )
+    .bind(deleted)
+    .bind(i64::MAX)
+    .execute(&app.pool)
+    .await
+    .expect("插入待删除的 S3 产物");
+
+    let resp = delete_build_with_query(&app, &carol, "build", 2, "?delete_s3_artifacts=true").await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED, "显式 S3 删除异步受理");
+    let accepted = body_json(resp).await;
+    assert_eq!(accepted["scope"], "build");
+    assert_eq!(accepted["state"], "queued");
+    assert_eq!(accepted["build_number"], 2);
+
+    let resp = req_with_cookie(
+        &app,
+        "GET",
+        "/api/v1/projects/demo/pipelines/build/builds/2/artifacts",
+        None,
+        Some(&carol),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(resp).await["items"],
+        serde_json::json!([]),
+        "deleting 立即隐藏"
+    );
+
+    let resp = req_with_cookie(
+        &app,
+        "GET",
+        "/api/v1/projects/demo/artifact-deletions",
+        None,
+        Some(&carol),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["items"][0]["scope"], "build");
+    assert_eq!(body["items"][0]["state"], "queued");
 }

@@ -28,6 +28,7 @@ pub mod audit;
 pub mod auth;
 pub mod builds;
 pub mod csrf;
+pub mod deletions;
 pub mod docs;
 pub mod error;
 pub mod health;
@@ -130,6 +131,8 @@ pub struct AppState {
     pub artifacts: LocalDiskArtifactStore,
     /// 产物元数据仓储（票 #74，ADR-0004）：上传完成记行、列表/下载查询。
     pub artifact_meta: SqliteArtifactMetaRepo,
+    /// 产物/项目异步删除任务：持久化 deleting 标记、失败与重试状态。
+    pub deletions: crate::store::deletions::DeletionRepo,
     /// 升级包字节存储（票 #76，ADR-0017）：管理员上传 agent 发行包落盘、
     /// Agent 下载读取。布局 data/upgrade-packages/<package_name>。
     pub upgrade_packages: LocalDiskUpgradePackageStore,
@@ -212,6 +215,7 @@ impl AppState {
             logs: SqliteLogStore::open(&pool).await?,
             artifacts: LocalDiskArtifactStore::new(data_dir.join(crate::config::ARTIFACTS_DIR)),
             artifact_meta: SqliteArtifactMetaRepo::new(pool.clone(), retention_days),
+            deletions: crate::store::deletions::DeletionRepo::new(pool.clone()),
             upgrade_packages: LocalDiskUpgradePackageStore::new(
                 data_dir.join(crate::config::UPGRADE_PACKAGES_DIR),
             ),
@@ -342,7 +346,20 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         // （B5-T3，ADR-0016）。静态段置于 `/projects/{name}` 之前，免被动态段捕获。
         .route("/projects/scm-probe", post(scm::scm_probe))
         .route("/projects/scm-branches", post(scm::scm_branches))
-        .route("/projects/{name}", get(projects::get_one))
+        .route("/project-deletions", get(deletions::list_projects))
+        .route(
+            "/project-deletions/{id}/retry",
+            post(deletions::retry_project),
+        )
+        .route("/projects/{name}", get(projects::get_one).delete(projects::remove))
+        .route(
+            "/projects/{name}/artifact-deletions",
+            get(deletions::list),
+        )
+        .route(
+            "/projects/{name}/artifact-deletions/{id}/retry",
+            post(deletions::retry),
+        )
         // 既有项目 SCM 面（项目 admin）：测试连接（存储凭据）+ 凭据设置（加密落库）。
         .route(
             "/projects/{name}/test-connection",
@@ -396,6 +413,10 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route(
             "/projects/{name}/pipelines/{pipeline}/builds/{number}/artifact-sets",
             get(artifacts::list_sets),
+        )
+        .route(
+            "/projects/{name}/pipelines/{pipeline}/builds/{number}/artifact-sets/{set_id}",
+            delete(artifacts::delete_set),
         )
         .route(
             "/projects/{name}/pipelines/{pipeline}/builds/{number}/artifact-sets/{set_id}/file",

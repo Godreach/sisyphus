@@ -40,7 +40,7 @@ use super::AppState;
 use super::auth::bearer_token;
 use super::builds::load_build;
 use super::error::{ApiError, ErrorBody, ValidationIssue, parse_body};
-use super::policy::RequireViewer;
+use super::policy::{RequireAdmin, RequireViewer};
 use crate::auth::{TokenFamily, token_family, token_hash};
 use crate::storage::{ObjectClass, ObjectPhase, artifact_blob_name, object_key};
 use crate::store::artifacts::{ArtifactSetEntry, ArtifactSetRow, MultipartUploadRow};
@@ -456,6 +456,41 @@ pub async fn list_sets(
         items.push(set_response(&state, set, entries).await?);
     }
     Ok(Json(ArtifactSetsResponse { items }))
+}
+
+/// 删除整个 ready 产物集。删除先持久化任务并立即从列表/下载面隐藏，正文
+/// 由后台幂等清理；排队或运行中的构建拒绝清理。
+#[utoipa::path(
+    delete,
+    path = "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/artifact-sets/{set_id}",
+    tag = "artifacts",
+    responses(
+        (status = 202, description = "已进入异步删除", body = crate::store::deletions::DeletionJob),
+        (status = 403, description = "需项目 admin 档", body = ErrorBody),
+        (status = 404, description = "构建或产物集不存在", body = ErrorBody),
+        (status = 409, description = "排队/运行中的构建不可清理", body = ErrorBody),
+    )
+)]
+pub async fn delete_set(
+    State(state): State<AppState>,
+    RequireAdmin(access): RequireAdmin,
+    Path((_project, pipeline, number, set_id)): Path<(String, String, i64, i64)>,
+) -> Result<(StatusCode, Json<crate::store::deletions::DeletionJob>), ApiError> {
+    let build = load_build(&state, &access.project.id, &pipeline, number).await?;
+    if !build.status.is_terminal() {
+        return Err(ApiError::conflict(format!(
+            "构建 #{number} 运行中/排队中，不可删除产物集"
+        )));
+    }
+    let job = state
+        .deletions
+        .enqueue_set(access.project.id, build.id, set_id, &access.operator)
+        .await
+        .map_err(|error| match error {
+            crate::store::StoreError::NotFound(_) => ApiError::resource_not_found("产物集不存在"),
+            other => ApiError::internal("产物集删除入队", &other),
+        })?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
 /// 清单文件的精确相对路径查询。
@@ -1452,11 +1487,27 @@ async fn load_own_job(
     agent: &AgentAuth,
     job_id: i64,
 ) -> Result<crate::store::jobs::JobRow, ApiError> {
-    JobRepo::new(state.pool.clone())
+    let job = JobRepo::new(state.pool.clone())
         .get(job_id)
         .await?
         .filter(|j| j.agent_id == Some(agent.agent_id))
-        .ok_or_else(|| ApiError::resource_not_found(format!("任务 {job_id} 不存在")))
+        .ok_or_else(|| ApiError::resource_not_found(format!("任务 {job_id} 不存在")))?;
+    let project_active: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM builds b JOIN projects p ON p.id = b.project_id
+            WHERE b.id = ? AND p.lifecycle = 'active'
+        )",
+    )
+    .bind(job.build_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|error| ApiError::internal("项目生命周期查询", &error))?;
+    if !project_active {
+        return Err(ApiError::resource_not_found(format!(
+            "任务 {job_id} 不存在"
+        )));
+    }
+    Ok(job)
 }
 
 /// 任务上传声明：优先 jobs.spec_json，缺省回落到构建快照。

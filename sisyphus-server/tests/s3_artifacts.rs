@@ -7,7 +7,7 @@ mod common;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -36,6 +36,7 @@ struct Mock {
     objects: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     uploads: Arc<Mutex<HashMap<String, (String, HashMap<u32, Vec<u8>>)>>>,
     next_upload: Arc<AtomicUsize>,
+    fail_deletes: Arc<AtomicBool>,
 }
 
 async fn handle(State(mock): State<Mock>, req: Request<axum::body::Body>) -> Response {
@@ -223,6 +224,13 @@ async fn handle(State(mock): State<Mock>, req: Request<axum::body::Body>) -> Res
             (StatusCode::OK, data).into_response()
         }
         m if m == axum::http::Method::DELETE => {
+            if mock.fail_deletes.load(Ordering::Relaxed) && key.contains("/artifacts/final/") {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "<Error><Code>ServiceUnavailable</Code><Message>retry</Message></Error>",
+                )
+                    .into_response();
+            }
             mock.objects.lock().unwrap().remove(key);
             StatusCode::NO_CONTENT.into_response()
         }
@@ -256,6 +264,7 @@ async fn spawn_mock(access_key: &str, bucket: &str) -> (SocketAddr, Mock) {
         objects: Arc::new(Mutex::new(HashMap::new())),
         uploads: Arc::new(Mutex::new(HashMap::new())),
         next_upload: Arc::new(AtomicUsize::new(1)),
+        fail_deletes: Arc::new(AtomicBool::new(false)),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -840,6 +849,728 @@ async fn s3_single_file_is_ready_only_after_temp_copy() {
 
     let resp = agent_download(&h, h.job_b, "build", "dist.bin").await;
     assert_eq!(resp.status(), 302, "依赖拉取同样签发最终对象 GET");
+}
+
+/// #128：后台删除失败可见，显式重试后幂等完成；成功前保留正文元数据，
+/// 成功后同时移除 S3 对象和正文元数据。
+#[tokio::test]
+async fn queued_build_deletion_reports_failure_and_retries_idempotently() {
+    let h = harness().await;
+    let object_key = "prod/artifacts/final/manual-delete";
+    h.mock
+        .objects
+        .lock()
+        .unwrap()
+        .insert(object_key.into(), b"bytes".to_vec());
+    sqlx::query(
+        "INSERT INTO artifacts
+            (build_id, job_id, attempt, backend, state, name, path, size, sha256,
+             created_at, retention_until)
+         VALUES (?, ?, 1, 's3', 'ready', 'dist.bin', ?, 5, 'abc', 1, ?)",
+    )
+    .bind(h.build.id)
+    .bind(h.job_a)
+    .bind(object_key)
+    .bind(i64::MAX)
+    .execute(&h.app.pool)
+    .await
+    .expect("插入 S3 元数据");
+    let builds = BuildRepo::new(h.app.pool.clone());
+    assert!(
+        builds
+            .transition(
+                h.build.id,
+                sisyphus_server::store::builds::BuildStatus::Running,
+                2
+            )
+            .await
+            .expect("运行态")
+    );
+    assert!(
+        builds
+            .transition(
+                h.build.id,
+                sisyphus_server::store::builds::BuildStatus::Succeeded,
+                3
+            )
+            .await
+            .expect("终态")
+    );
+
+    h.mock.fail_deletes.store(true, Ordering::Relaxed);
+    let path = format!(
+        "/api/v1/projects/demo/pipelines/release/builds/{}?delete_s3_artifacts=true",
+        h.build.number
+    );
+    let resp = common::req_with_cookie(&h.app, "DELETE", &path, None, Some(&h.cookie)).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let job = common::body_json(resp).await;
+    let job_id = job["id"].as_i64().expect("删除任务 id");
+
+    assert!(
+        sisyphus_server::deletion::run_once(&h.app.state)
+            .await
+            .expect("执行失败轮次")
+    );
+    let status_path = "/api/v1/projects/demo/artifact-deletions";
+    let status = common::body_json(viewer_get(&h, status_path).await).await;
+    assert_eq!(status["items"][0]["state"], "failed");
+    assert_eq!(status["items"][0]["attempts"], 1);
+    assert!(status["items"][0]["last_error"].as_str().is_some());
+    assert!(h.mock.objects.lock().unwrap().contains_key(object_key));
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE build_id = ?")
+        .bind(h.build.id)
+        .fetch_one(&h.app.pool)
+        .await
+        .expect("元数据数");
+    assert_eq!(remaining, 1, "失败时保留元数据供重试");
+
+    h.mock.fail_deletes.store(false, Ordering::Relaxed);
+    let retry_path = format!("/api/v1/projects/demo/artifact-deletions/{job_id}/retry");
+    let resp = common::req_with_cookie(
+        &h.app,
+        "POST",
+        &retry_path,
+        Some("{}".into()),
+        Some(&h.cookie),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    assert_eq!(common::body_json(resp).await["state"], "queued");
+
+    assert!(
+        sisyphus_server::deletion::run_once(&h.app.state)
+            .await
+            .expect("重试")
+    );
+    let status = common::body_json(viewer_get(&h, status_path).await).await;
+    assert_eq!(status["items"][0]["state"], "completed");
+    assert_eq!(status["items"][0]["attempts"], 2);
+    assert!(!h.mock.objects.lock().unwrap().contains_key(object_key));
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE build_id = ?")
+        .bind(h.build.id)
+        .fetch_one(&h.app.pool)
+        .await
+        .expect("元数据数");
+    assert_eq!(remaining, 0);
+    assert!(
+        !sisyphus_server::deletion::run_once(&h.app.state)
+            .await
+            .expect("完成后空转"),
+        "完成任务不得重复执行"
+    );
+}
+
+/// #128：构建清理必须中止仍在传输的 multipart 会话，并裁剪临时会话与
+/// pending 元数据，不能只删除已经发布的最终对象。
+#[tokio::test]
+async fn build_deletion_aborts_pending_multipart_uploads() {
+    let h = harness_with_limits(sisyphus_server::api::ArtifactTransferLimits {
+        single_file_limit: 100,
+        task_limit: 200,
+        multipart_threshold: 5,
+        multipart_part_size: 4,
+        copy_object_limit: 6,
+        copy_part_size: 4,
+    })
+    .await;
+    let grant = agent_post_json(
+        &h,
+        &format!("/api/v1/agent/artifacts/{}/dist.bin/upload-url", h.job_a),
+        r#"{"size":10}"#,
+    )
+    .await;
+    assert_eq!(grant.status(), StatusCode::OK);
+    assert_eq!(common::body_json(grant).await["mode"], "multipart");
+    assert_eq!(h.mock.uploads.lock().unwrap().len(), 1);
+
+    let builds = BuildRepo::new(h.app.pool.clone());
+    assert!(
+        builds
+            .transition(
+                h.build.id,
+                sisyphus_server::store::builds::BuildStatus::Running,
+                2
+            )
+            .await
+            .expect("运行态")
+    );
+    assert!(
+        builds
+            .transition(
+                h.build.id,
+                sisyphus_server::store::builds::BuildStatus::Failed,
+                3
+            )
+            .await
+            .expect("终态")
+    );
+    let path = format!(
+        "/api/v1/projects/demo/pipelines/release/builds/{}?delete_s3_artifacts=true",
+        h.build.number
+    );
+    let resp = common::req_with_cookie(&h.app, "DELETE", &path, None, Some(&h.cookie)).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    assert!(
+        sisyphus_server::deletion::run_once(&h.app.state)
+            .await
+            .expect("清理 multipart")
+    );
+    assert!(
+        h.mock.uploads.lock().unwrap().is_empty(),
+        "应中止 S3 multipart"
+    );
+    let sessions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM artifact_multipart_uploads WHERE build_id = ?")
+            .bind(h.build.id)
+            .fetch_one(&h.app.pool)
+            .await
+            .expect("multipart 会话数");
+    assert_eq!(sessions, 0);
+    let metas: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE build_id = ?")
+        .bind(h.build.id)
+        .fetch_one(&h.app.pool)
+        .await
+        .expect("产物元数据数");
+    assert_eq!(metas, 0);
+}
+
+/// #128：单 PUT 已写入但尚未 complete 的临时对象同样属于构建空间，清理
+/// 不能只看 artifacts.path 指向的最终键。
+#[tokio::test]
+async fn build_deletion_removes_pending_single_upload_object() {
+    let h = harness().await;
+    let grant = agent_post_json(
+        &h,
+        &format!("/api/v1/agent/artifacts/{}/dist.bin/upload-url", h.job_a),
+        r#"{"size":1}"#,
+    )
+    .await;
+    let url = common::body_json(grant).await["url"]
+        .as_str()
+        .expect("单 PUT URL")
+        .to_string();
+    http_client()
+        .put(url)
+        .body(vec![b'x'])
+        .send()
+        .await
+        .expect("写临时对象")
+        .error_for_status()
+        .expect("临时对象写入成功");
+    assert!(
+        h.mock
+            .objects
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|key| key.contains("/artifacts/tmp/"))
+    );
+
+    let builds = BuildRepo::new(h.app.pool.clone());
+    assert!(
+        builds
+            .transition(
+                h.build.id,
+                sisyphus_server::store::builds::BuildStatus::Running,
+                2
+            )
+            .await
+            .expect("运行态")
+    );
+    assert!(
+        builds
+            .transition(
+                h.build.id,
+                sisyphus_server::store::builds::BuildStatus::Failed,
+                3
+            )
+            .await
+            .expect("终态")
+    );
+    let path = format!(
+        "/api/v1/projects/demo/pipelines/release/builds/{}?delete_s3_artifacts=true",
+        h.build.number
+    );
+    let resp = common::req_with_cookie(&h.app, "DELETE", &path, None, Some(&h.cookie)).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    assert!(
+        sisyphus_server::deletion::run_once(&h.app.state)
+            .await
+            .expect("清理单 PUT 临时对象")
+    );
+    assert!(
+        h.mock
+            .objects
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|key| !key.contains("/artifacts/tmp/")),
+        "pending 单 PUT 临时对象应清理"
+    );
+}
+
+/// #128：任务一旦被认领，枚举目标失败也必须持久化为 failed，不能永久
+/// 卡在 running 而失去重试入口。
+#[tokio::test]
+async fn deletion_target_lookup_error_is_recorded_as_failed() {
+    let h = harness().await;
+    h.app
+        .state
+        .deletions
+        .enqueue_build(1, h.build.id, "admin")
+        .await
+        .expect("删除入队");
+    sqlx::query("DROP TABLE artifacts")
+        .execute(&h.app.pool)
+        .await
+        .expect("制造枚举失败");
+
+    assert!(
+        sisyphus_server::deletion::run_once(&h.app.state)
+            .await
+            .expect("失败应被任务吸收")
+    );
+    let jobs = h
+        .app
+        .state
+        .deletions
+        .list_by_project(1)
+        .await
+        .expect("删除状态");
+    assert_eq!(
+        jobs[0].state,
+        sisyphus_server::store::deletions::DeletionState::Failed
+    );
+    assert!(jobs[0].last_error.as_deref().is_some_and(|e| !e.is_empty()));
+}
+
+/// #128：S3 删除成功后若元数据事务失败，任务同样回到 failed，保留可见
+/// 错误与重试入口。
+#[tokio::test]
+async fn deletion_completion_error_is_recorded_as_failed() {
+    let h = harness().await;
+    let project_id: i64 = sqlx::query_scalar("SELECT id FROM projects WHERE name = 'demo'")
+        .fetch_one(&h.app.pool)
+        .await
+        .expect("项目 id");
+    sqlx::query(
+        "INSERT INTO artifacts
+            (build_id, job_id, attempt, backend, state, name, path, size, sha256,
+             created_at, retention_until)
+         VALUES (?, ?, 1, 's3', 'ready', 'dist.bin',
+                 'prod/artifacts/final/complete-error', 1, 'abc', 1, ?)",
+    )
+    .bind(h.build.id)
+    .bind(h.job_a)
+    .bind(i64::MAX)
+    .execute(&h.app.pool)
+    .await
+    .expect("S3 元数据");
+    h.app
+        .state
+        .deletions
+        .enqueue_build(project_id, h.build.id, "admin")
+        .await
+        .expect("删除入队");
+    sqlx::raw_sql(
+        "CREATE TRIGGER reject_artifact_delete
+         BEFORE DELETE ON artifacts
+         BEGIN SELECT RAISE(ABORT, 'completion blocked'); END;",
+    )
+    .execute(&h.app.pool)
+    .await
+    .expect("制造完成事务失败");
+
+    assert!(
+        sisyphus_server::deletion::run_once(&h.app.state)
+            .await
+            .expect("失败应被任务吸收")
+    );
+    let jobs = h
+        .app
+        .state
+        .deletions
+        .list_by_project(project_id)
+        .await
+        .expect("删除状态");
+    assert_eq!(
+        jobs[0].state,
+        sisyphus_server::store::deletions::DeletionState::Failed
+    );
+    assert!(
+        jobs[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("completion blocked"))
+    );
+}
+
+/// #128：只允许项目管理员删除整个产物集；运行中构建拒绝清理，受理后整集
+/// 立即停止列举和签 URL，后台完成后对象与集合元数据一并移除。
+#[tokio::test]
+async fn artifact_set_delete_is_whole_set_only_and_rejects_live_build() {
+    let h = harness().await;
+    let set_id = sqlx::query(
+        "INSERT INTO artifact_sets (build_id, job_id, attempt, name, state, created_at)
+         VALUES (?, ?, 1, 'bundle', 'ready', 1)",
+    )
+    .bind(h.build.id)
+    .bind(h.job_a)
+    .execute(&h.app.pool)
+    .await
+    .expect("产物集")
+    .last_insert_rowid();
+    let internal = format!(".set-{set_id}-0");
+    sqlx::query(
+        "INSERT INTO artifact_set_entries
+            (set_id, path, kind, size, sha256, executable, artifact_name)
+         VALUES (?, 'nested/a.txt', 'file', 3, 'abc', 0, ?)",
+    )
+    .bind(set_id)
+    .bind(&internal)
+    .execute(&h.app.pool)
+    .await
+    .expect("集合条目");
+    let object_key = "prod/artifacts/final/set-delete";
+    h.mock
+        .objects
+        .lock()
+        .unwrap()
+        .insert(object_key.into(), b"abc".to_vec());
+    sqlx::query(
+        "INSERT INTO artifacts
+            (build_id, job_id, attempt, backend, state, name, path, size, sha256,
+             created_at, retention_until)
+         VALUES (?, ?, 1, 's3', 'ready', ?, ?, 3, 'abc', 1, ?)",
+    )
+    .bind(h.build.id)
+    .bind(h.job_a)
+    .bind(&internal)
+    .bind(object_key)
+    .bind(i64::MAX)
+    .execute(&h.app.pool)
+    .await
+    .expect("集合正文");
+
+    let base = format!(
+        "/api/v1/projects/demo/pipelines/release/builds/{}/artifact-sets/{set_id}",
+        h.build.number
+    );
+    let resp = common::req_with_cookie(&h.app, "DELETE", &base, None, Some(&h.cookie)).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "排队构建不可删产物集");
+
+    let builds = BuildRepo::new(h.app.pool.clone());
+    assert!(
+        builds
+            .transition(
+                h.build.id,
+                sisyphus_server::store::builds::BuildStatus::Running,
+                2
+            )
+            .await
+            .expect("运行态")
+    );
+    assert!(
+        builds
+            .transition(
+                h.build.id,
+                sisyphus_server::store::builds::BuildStatus::Succeeded,
+                3
+            )
+            .await
+            .expect("终态")
+    );
+    let resp = common::req_with_cookie(&h.app, "DELETE", &base, None, Some(&h.cookie)).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let job = common::body_json(resp).await;
+    assert_eq!(job["scope"], "set");
+    assert_eq!(job["set_id"], set_id);
+
+    let list = format!(
+        "/api/v1/projects/demo/pipelines/release/builds/{}/artifact-sets",
+        h.build.number
+    );
+    let body = common::body_json(viewer_get(&h, &list).await).await;
+    assert_eq!(body["items"], serde_json::json!([]), "deleting 整集隐藏");
+    let file = format!("{base}/file?path=nested%2Fa.txt");
+    assert_eq!(viewer_get(&h, &file).await.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        common::req_with_cookie(&h.app, "DELETE", &file, None, Some(&h.cookie))
+            .await
+            .status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "不能单独删除集合内文件"
+    );
+
+    assert!(
+        sisyphus_server::deletion::run_once(&h.app.state)
+            .await
+            .expect("执行")
+    );
+    assert!(!h.mock.objects.lock().unwrap().contains_key(object_key));
+    let sets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_sets WHERE id = ?")
+        .bind(set_id)
+        .fetch_one(&h.app.pool)
+        .await
+        .expect("集合数");
+    assert_eq!(sets, 0);
+}
+
+/// #128：项目删除由全局管理员发起，受理后立即冻结项目授权；后台清理 S3、
+/// 旧本地产物与日志，清理期间和完成后均可在全局删除状态面追踪，并写审计。
+#[tokio::test]
+async fn project_delete_freezes_access_and_cleans_all_owned_data() {
+    let h = harness().await;
+    let project_id: i64 = sqlx::query_scalar("SELECT id FROM projects WHERE name = 'demo'")
+        .fetch_one(&h.app.pool)
+        .await
+        .expect("项目 id");
+    let object_key = "prod/artifacts/final/project-delete";
+    h.mock
+        .objects
+        .lock()
+        .unwrap()
+        .insert(object_key.into(), b"remote".to_vec());
+    sqlx::query(
+        "INSERT INTO artifacts
+            (build_id, job_id, attempt, backend, state, name, path, size, sha256,
+             created_at, retention_until)
+         VALUES (?, ?, 1, 's3', 'ready', 'remote.bin', ?, 6, 'abc', 1, ?)",
+    )
+    .bind(h.build.id)
+    .bind(h.job_a)
+    .bind(object_key)
+    .bind(i64::MAX)
+    .execute(&h.app.pool)
+    .await
+    .expect("S3 元数据");
+    let local_dir = h._dir.path().join("artifacts").join(h.build.id.to_string());
+    std::fs::create_dir_all(&local_dir).expect("本地目录");
+    std::fs::write(local_dir.join("legacy.bin"), b"local").expect("本地正文");
+    sqlx::query(
+        "INSERT INTO artifacts
+            (build_id, job_id, attempt, backend, state, name, path, size, sha256,
+             created_at, retention_until)
+         VALUES (?, ?, 1, 'local', 'ready', 'legacy.bin', ?, 5, 'def', 1, 2)",
+    )
+    .bind(h.build.id)
+    .bind(h.job_a)
+    .bind(format!("{}/legacy.bin", h.build.id))
+    .execute(&h.app.pool)
+    .await
+    .expect("本地元数据");
+    sqlx::query(
+        "INSERT INTO logs
+            (build_id, job_id, attempt, start_seq, end_seq, step, stream, data, created_at)
+         VALUES (?, ?, 1, 0, 0, -1, '', X'1f8b', 1)",
+    )
+    .bind(h.build.id)
+    .bind(h.job_a)
+    .execute(&h.app.pool)
+    .await
+    .expect("日志");
+    let builds = BuildRepo::new(h.app.pool.clone());
+    assert!(
+        builds
+            .transition(
+                h.build.id,
+                sisyphus_server::store::builds::BuildStatus::Running,
+                2
+            )
+            .await
+            .expect("运行态")
+    );
+    assert!(
+        builds
+            .transition(
+                h.build.id,
+                sisyphus_server::store::builds::BuildStatus::Succeeded,
+                3
+            )
+            .await
+            .expect("终态")
+    );
+
+    let resp = common::req_with_cookie(
+        &h.app,
+        "DELETE",
+        "/api/v1/projects/demo",
+        None,
+        Some(&h.cookie),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let accepted = common::body_json(resp).await;
+    assert_eq!(accepted["scope"], "project");
+    assert_eq!(accepted["project_id"], project_id);
+    assert_eq!(accepted["project_name"], "demo", "冻结后仍携带项目名快照");
+
+    let agent_write = agent_post_json(
+        &h,
+        &format!("/api/v1/agent/artifacts/{}/dist.bin/upload-url", h.job_a),
+        r#"{"size":1}"#,
+    )
+    .await;
+    assert_eq!(
+        agent_write.status(),
+        StatusCode::NOT_FOUND,
+        "项目冻结后旧 Agent token 不得继续写入该项目空间"
+    );
+
+    assert_eq!(
+        common::req_with_cookie(
+            &h.app,
+            "GET",
+            "/api/v1/projects/demo",
+            None,
+            Some(&h.cookie),
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND,
+        "受理后立即冻结项目访问"
+    );
+    let status = common::body_json(
+        common::req_with_cookie(
+            &h.app,
+            "GET",
+            "/api/v1/project-deletions",
+            None,
+            Some(&h.cookie),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status["items"][0]["state"], "queued");
+    assert_eq!(status["items"][0]["project_name"], "demo");
+
+    h.mock.fail_deletes.store(true, Ordering::Relaxed);
+    assert!(
+        sisyphus_server::deletion::run_once(&h.app.state)
+            .await
+            .expect("项目清理")
+    );
+    let status = common::body_json(
+        common::req_with_cookie(
+            &h.app,
+            "GET",
+            "/api/v1/project-deletions",
+            None,
+            Some(&h.cookie),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status["items"][0]["state"], "failed");
+    let deletion_id = status["items"][0]["id"].as_i64().expect("删除任务 id");
+
+    h.mock.fail_deletes.store(false, Ordering::Relaxed);
+    let retry = common::req_with_cookie(
+        &h.app,
+        "POST",
+        &format!("/api/v1/project-deletions/{deletion_id}/retry"),
+        Some("{}".into()),
+        Some(&h.cookie),
+    )
+    .await;
+    assert_eq!(retry.status(), StatusCode::ACCEPTED);
+    assert_eq!(common::body_json(retry).await["state"], "queued");
+    assert!(
+        sisyphus_server::deletion::run_once(&h.app.state)
+            .await
+            .expect("重试项目清理")
+    );
+    assert!(!h.mock.objects.lock().unwrap().contains_key(object_key));
+    assert!(!local_dir.exists(), "旧本地产物目录已清理");
+    let logs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM logs WHERE build_id = ?")
+        .bind(h.build.id)
+        .fetch_one(&h.app.pool)
+        .await
+        .expect("日志数");
+    assert_eq!(logs, 0);
+    let lifecycle: String = sqlx::query_scalar("SELECT lifecycle FROM projects WHERE id = ?")
+        .bind(project_id)
+        .fetch_one(&h.app.pool)
+        .await
+        .expect("项目墓碑");
+    assert_eq!(lifecycle, "deleted");
+    let status = common::body_json(
+        common::req_with_cookie(
+            &h.app,
+            "GET",
+            "/api/v1/project-deletions",
+            None,
+            Some(&h.cookie),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status["items"][0]["state"], "completed");
+    let audit: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log
+         WHERE event_type = 'project_deletion_requested' AND project_name = 'demo'",
+    )
+    .fetch_one(&h.app.pool)
+    .await
+    .expect("审计");
+    assert_eq!(audit, 1);
+}
+
+/// #128：未配置 S3 的部署也能完成项目清理；空远端对象集不应被当作配置错误。
+#[tokio::test]
+async fn project_delete_without_s3_completes_local_cleanup() {
+    let mut h = harness().await;
+    h.app.state.s3 = None;
+    let project_id: i64 = sqlx::query_scalar("SELECT id FROM projects WHERE name = 'demo'")
+        .fetch_one(&h.app.pool)
+        .await
+        .expect("项目 id");
+    let builds = BuildRepo::new(h.app.pool.clone());
+    assert!(
+        builds
+            .transition(
+                h.build.id,
+                sisyphus_server::store::builds::BuildStatus::Running,
+                2
+            )
+            .await
+            .expect("运行态")
+    );
+    assert!(
+        builds
+            .transition(
+                h.build.id,
+                sisyphus_server::store::builds::BuildStatus::Succeeded,
+                3
+            )
+            .await
+            .expect("终态")
+    );
+    h.app
+        .state
+        .deletions
+        .enqueue_project(project_id, "admin")
+        .await
+        .expect("项目删除入队");
+
+    assert!(
+        sisyphus_server::deletion::run_once(&h.app.state)
+            .await
+            .expect("本地项目清理")
+    );
+    let state = h
+        .app
+        .state
+        .deletions
+        .list_project_deletions()
+        .await
+        .expect("删除状态");
+    assert_eq!(
+        state[0].state,
+        sisyphus_server::store::deletions::DeletionState::Completed
+    );
 }
 
 /// #124：超过阈值后 multipart 上传，且超过单次复制边界后 multipart copy；

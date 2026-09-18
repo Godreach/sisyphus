@@ -148,6 +148,10 @@ export const projectsApi = {
   create: (req: CreateProjectRequest) =>
     http.post<ProjectResponse>('projects', { json: req }),
 
+  /** 全局管理员冻结项目并异步清理全部产物与日志。 */
+  remove: (name: string) =>
+    http.del<import('@/api/types').DeletionJobResponse>(`projects/${encodeURIComponent(name)}`),
+
   /** 测试连接（创建期，全局 admin，ad-hoc 凭据不落库）：ls-remote/info 探测
    *  返回当前 head；不阻塞保存，失败可读错误（凭据不回显，B5-T3）。 */
   scmProbe: (req: ScmProbeRequest) =>
@@ -361,11 +365,12 @@ export const buildsApi = {
       `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}`,
     ),
 
-  /** 手动删构建（项目 admin 档，ADR-0013）：立即全删该构建的日志与产物
-   *  （构建记录保留）；运行中/排队 409。成功 204。 */
-  remove: (project: string, pipeline: string, number: number) =>
-    http.del<void>(
+  /** 手动删构建：日志与旧本地产物立即清理；S3 默认保留，显式选择时
+   *  返回 202 删除任务。 */
+  remove: (project: string, pipeline: string, number: number, deleteS3Artifacts = false) =>
+    http.del<void | import('@/api/types').DeletionJobResponse>(
       `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}`,
+      { query: deleteS3Artifacts ? { delete_s3_artifacts: true } : {} },
     ),
 }
 
@@ -382,6 +387,11 @@ export const artifactsApi = {
     http.get<import('@/api/types').ArtifactSetsResponse>(
       `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}/artifact-sets`,
     ),
+  /** 删除整个 ready 产物集（项目 admin；单文件不提供 DELETE）。 */
+  removeSet: (project: string, pipeline: string, number: number, setId: number) =>
+    http.del<import('@/api/types').DeletionJobResponse>(
+      `projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}/artifact-sets/${setId}`,
+    ),
   setFileUrl: (project: string, pipeline: string, number: number, setId: number, path: string) =>
     `/api/v1/projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}/artifact-sets/${setId}/file?path=${encodeURIComponent(path)}`,
 
@@ -389,6 +399,25 @@ export const artifactsApi = {
    *  大小与校验和，浏览器原生下载）。 */
   downloadUrl: (project: string, pipeline: string, number: number, name: string) =>
     `api/v1/projects/${encodeURIComponent(project)}/pipelines/${encodeURIComponent(pipeline)}/builds/${number}/artifacts/${encodeURIComponent(name)}`,
+}
+
+/** 项目管理员观察与重试异步产物删除。 */
+export const artifactDeletionsApi = {
+  list: (project: string) =>
+    http.get<import('@/api/types').DeletionJobsResponse>(
+      `projects/${encodeURIComponent(project)}/artifact-deletions`,
+    ),
+  retry: (project: string, id: number) =>
+    http.post<import('@/api/types').DeletionJobResponse>(
+      `projects/${encodeURIComponent(project)}/artifact-deletions/${id}/retry`,
+    ),
+}
+
+/** 全局管理员观察项目异步清理。 */
+export const projectDeletionsApi = {
+  list: () => http.get<import('@/api/types').DeletionJobsResponse>('project-deletions'),
+  retry: (id: number) =>
+    http.post<import('@/api/types').DeletionJobResponse>(`project-deletions/${id}/retry`),
 }
 
 /** 一级制品库入口状态（票 #122，ADR-0026）：任意登录角色。 */

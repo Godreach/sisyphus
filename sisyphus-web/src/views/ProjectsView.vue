@@ -29,15 +29,16 @@ import {
   NEmpty,
   NAlert,
   NIcon,
+  NPopconfirm,
   useMessage,
   type FormInst,
   type FormRules,
 } from 'naive-ui'
 import { GitBranch, CreateOutline } from '@vicons/ionicons5'
 
-import { projectsApi } from '@/api/client'
+import { projectDeletionsApi, projectsApi } from '@/api/client'
 import { describeSubmitError } from '@/api/errors'
-import type { ProjectResponse, ScmTypeDto } from '@/api/types'
+import type { DeletionJobResponse, ProjectResponse, ScmTypeDto } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
 const { t } = useI18n()
@@ -49,6 +50,11 @@ const isAdmin = computed(() => auth.user?.isAdmin === true)
 
 const projects = ref<ProjectResponse[] | null>(null)
 const listError = ref('')
+const projectDeletions = ref<DeletionJobResponse[]>([])
+const deletingProject = ref<string | null>(null)
+const deletionListError = ref('')
+const loadingDeletions = ref(false)
+const retryingProjectDeletion = ref<number | null>(null)
 const searchQuery = computed(() => (typeof route.query.q === 'string' ? route.query.q.trim().toLowerCase() : ''))
 const filteredProjects = computed(() => {
   if (projects.value === null || searchQuery.value === '') return projects.value
@@ -128,6 +134,47 @@ async function load(): Promise<void> {
   } catch (err) {
     projects.value = null
     listError.value = describeSubmitError(err)
+  }
+}
+
+async function deleteProject(project: ProjectResponse): Promise<void> {
+  deletingProject.value = project.name
+  try {
+    const job = await projectsApi.remove(project.name)
+    projects.value = projects.value?.filter((item) => item.id !== project.id) ?? []
+    projectDeletions.value = [job, ...projectDeletions.value.filter((item) => item.id !== job.id)]
+    message.success(t('projects.deletionQueued'))
+  } catch (err) {
+    message.error(describeSubmitError(err))
+  } finally {
+    deletingProject.value = null
+  }
+}
+
+async function loadProjectDeletions(): Promise<void> {
+  if (!isAdmin.value) return
+  loadingDeletions.value = true
+  deletionListError.value = ''
+  try {
+    const response = await projectDeletionsApi.list()
+    projectDeletions.value = Array.isArray(response?.items) ? response.items : []
+  } catch (err) {
+    deletionListError.value = describeSubmitError(err)
+  } finally {
+    loadingDeletions.value = false
+  }
+}
+
+async function retryProjectDeletion(job: DeletionJobResponse): Promise<void> {
+  retryingProjectDeletion.value = job.id
+  try {
+    const updated = await projectDeletionsApi.retry(job.id)
+    projectDeletions.value = projectDeletions.value.map((item) => item.id === updated.id ? updated : item)
+    message.success(t('projects.deletionRetryQueued'))
+  } catch (err) {
+    message.error(describeSubmitError(err))
+  } finally {
+    retryingProjectDeletion.value = null
   }
 }
 
@@ -400,7 +447,28 @@ function onScmTypeChange(v: ScmTypeDto): void {
             <span class="project-card-name">{{ p.name }}</span>
           </template>
           <template #header-extra>
-            <n-tag size="small" :bordered="false" round>{{ p.scm_type }}</n-tag>
+            <div class="project-card-extra">
+              <n-tag size="small" :bordered="false" round>{{ p.scm_type }}</n-tag>
+              <n-popconfirm
+                v-if="isAdmin"
+                :positive-text="t('projects.delete')"
+                :negative-text="t('common.cancel')"
+                @positive-click="deleteProject(p)"
+              >
+                <template #trigger>
+                  <n-button
+                    size="tiny"
+                    type="error"
+                    :loading="deletingProject === p.name"
+                    :data-testid="`delete-project-${p.name}`"
+                    @click.stop
+                  >
+                    {{ t('projects.delete') }}
+                  </n-button>
+                </template>
+                {{ t('projects.deleteConfirm', { name: p.name }) }}
+              </n-popconfirm>
+            </div>
           </template>
           <p v-if="p.scm_url" class="project-card-meta mono">{{ p.scm_url }}</p>
           <p v-else class="project-card-meta">{{ t('projects.scmNone') }}</p>
@@ -431,10 +499,54 @@ function onScmTypeChange(v: ScmTypeDto): void {
         </template>
       </n-empty>
     </div>
+
+    <section v-if="isAdmin" class="project-deletions" data-testid="project-deletions">
+      <header>
+        <h2>{{ t('projects.deletionsTitle') }}</h2>
+        <n-button size="small" :loading="loadingDeletions" @click="loadProjectDeletions">
+          {{ t('projects.refreshDeletions') }}
+        </n-button>
+      </header>
+      <n-alert v-if="deletionListError" type="error">{{ deletionListError }}</n-alert>
+      <ul v-if="projectDeletions.length > 0">
+        <li v-for="job in projectDeletions" :key="job.id" :data-testid="`project-deletion-${job.id}`">
+          <strong>{{ job.project_name }}</strong>
+          <n-tag :type="job.state === 'failed' ? 'error' : job.state === 'completed' ? 'success' : 'info'">
+            {{ t(`artifacts.deletionState.${job.state}`) }}
+          </n-tag>
+          <span v-if="job.last_error" class="project-deletion-error">{{ job.last_error }}</span>
+          <n-button
+            v-if="job.state === 'failed'"
+            size="small"
+            :loading="retryingProjectDeletion === job.id"
+            :data-testid="`retry-project-deletion-${job.id}`"
+            @click="retryProjectDeletion(job)"
+          >
+            {{ t('projects.retryDeletion') }}
+          </n-button>
+        </li>
+      </ul>
+    </section>
   </div>
 </template>
 
 <style scoped>
+.project-card-extra,
+.project-deletions header,
+.project-deletions li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.project-deletions {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--n-border-color, #e5e7eb);
+}
+.project-deletions header { justify-content: space-between; }
+.project-deletions h2 { margin: 0; font-size: 18px; }
+.project-deletions ul { display: grid; gap: 8px; padding: 0; list-style: none; }
+.project-deletion-error { color: #d03050; }
 /* #98: 自 main.css 原样收编（.n-form 非 inline 时根部无组件样式，无层叠
  * 冲突）。外围卡片样式 + 操作行布局，其余视觉由 NForm 系列提供。 */
 .project-form {

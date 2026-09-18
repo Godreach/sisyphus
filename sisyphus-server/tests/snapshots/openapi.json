@@ -1742,6 +1742,7 @@
                 "pat_created",
                 "pat_revoked",
                 "project_created",
+                "project_deletion_requested",
                 "member_roles_changed",
                 "secret_created",
                 "secret_overwritten",
@@ -2478,6 +2479,89 @@
         }
       }
     },
+    "/api/v1/project-deletions": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "全局管理员查看项目删除队列；冻结项目不再能经项目授权面访问。",
+        "operationId": "list_projects",
+        "responses": {
+          "200": {
+            "description": "项目删除任务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionJobsResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "仅全局管理员可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/project-deletions/{id}/retry": {
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "全局管理员将失败的项目清理重新排队。",
+        "operationId": "retry_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "项目清理已重新排队",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionJob"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "仅全局管理员可操作",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目删除任务不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects": {
       "get": {
         "tags": [
@@ -2775,6 +2859,166 @@
           },
           "404": {
             "description": "项目不存在或对调用者不可见（不泄露存在性）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "删除项目：全局管理员发起；所有构建均终态后，原子冻结项目授权并进入\n异步删除。项目行在清理完成前保留归属，完成后保留不可访问墓碑。",
+        "operationId": "remove",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "项目已冻结并进入异步删除",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionJob"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "仅全局管理员可删除项目",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "仍有排队或运行中的构建",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}/artifact-deletions": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "项目管理员查看本项目的产物删除队列。",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "项目删除任务与失败信息",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionJobsResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "需项目 admin 档",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "项目不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}/artifact-deletions/{id}/retry": {
+      "post": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "将失败删除任务显式重新排队；重复请求保持当前状态。",
+        "operationId": "retry",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "已重新排队",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionJob"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "需项目 admin 档",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "任务不存在",
             "content": {
               "application/json": {
                 "schema": {
@@ -3435,9 +3679,28 @@
               "type": "integer",
               "format": "int64"
             }
+          },
+          {
+            "name": "delete_s3_artifacts",
+            "in": "query",
+            "description": "`true` 时把保留的 S3 产物空间加入异步删除队列。",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
+          "202": {
+            "description": "本地数据已清理，S3 产物已进入异步删除",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionJob"
+                }
+              }
+            }
+          },
           "204": {
             "description": "已删除该构建的日志与本地产物（其它后端和构建记录保留）"
           },
@@ -3544,6 +3807,93 @@
           },
           "404": {
             "description": "构建不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{name}/pipelines/{pipeline}/builds/{number}/artifact-sets/{set_id}": {
+      "delete": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "删除整个 ready 产物集。删除先持久化任务并立即从列表/下载面隐藏，正文\n由后台幂等清理；排队或运行中的构建拒绝清理。",
+        "operationId": "delete_set",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "set_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "已进入异步删除",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionJob"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "需项目 admin 档",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "构建或产物集不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "排队/运行中的构建不可清理",
             "content": {
               "application/json": {
                 "schema": {
@@ -6978,6 +7328,134 @@
             "description": "5 字段 cron 表达式（`分 时 日 月 周`，标准 Unix/CI 形态）。"
           }
         }
+      },
+      "DeleteBuildQuery": {
+        "type": "object",
+        "description": "手动构建数据清理选项。S3 默认保留，只有显式 true 才进入异步删除。",
+        "properties": {
+          "delete_s3_artifacts": {
+            "type": "boolean",
+            "description": "`true` 时把保留的 S3 产物空间加入异步删除队列。"
+          }
+        }
+      },
+      "DeletionJob": {
+        "type": "object",
+        "description": "可供 REST 与后台共用的删除任务视图。",
+        "required": [
+          "id",
+          "project_id",
+          "project_name",
+          "scope",
+          "state",
+          "attempts",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "后台认领次数。"
+          },
+          "build_number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "构建范围的构建号。"
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "创建时间（Unix 毫秒）。"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "删除任务 ID。"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "最近一次失败信息。"
+          },
+          "pipeline_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "构建范围的流水线名。"
+          },
+          "project_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "归属项目 ID；项目墓碑保留该 ID。"
+          },
+          "project_name": {
+            "type": "string",
+            "description": "项目名快照；项目冻结后仍用于运维辨识。"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/DeletionScope",
+            "description": "删除粒度。"
+          },
+          "set_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "产物集范围的稳定 ID。"
+          },
+          "state": {
+            "$ref": "#/components/schemas/DeletionState",
+            "description": "当前状态。"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "最近更新时间（Unix 毫秒）。"
+          }
+        }
+      },
+      "DeletionJobsResponse": {
+        "type": "object",
+        "description": "删除任务列表响应。",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeletionJob"
+            },
+            "description": "按创建时间倒序的删除任务。"
+          }
+        }
+      },
+      "DeletionScope": {
+        "type": "string",
+        "description": "异步删除目标的粒度。",
+        "enum": [
+          "set",
+          "build",
+          "project"
+        ]
+      },
+      "DeletionState": {
+        "type": "string",
+        "description": "持久化删除任务状态。",
+        "enum": [
+          "queued",
+          "running",
+          "failed",
+          "completed"
+        ]
       },
       "DirectoryEntryResponse": {
         "type": "object",

@@ -5,13 +5,16 @@ import { computed, h, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   NAlert, NButton, NDataTable, NEmpty, NInput, NIcon, NPagination, NResult,
-  NSkeleton, NTag, type DataTableColumns, useMessage,
+  NSelect, NSkeleton, NTag, type DataTableColumns, useMessage,
 } from 'naive-ui'
 import { RefreshOutline } from '@vicons/ionicons5'
 
-import { artifactRepositoryApi, s3ConfigApi } from '@/api/client'
+import { artifactDeletionsApi, artifactRepositoryApi, projectsApi, s3ConfigApi } from '@/api/client'
 import { describeSubmitError } from '@/api/errors'
-import type { ArtifactRepositoryItem, ArtifactRepositoryResponse, ArtifactRepositoryStatus, S3TestReportDto } from '@/api/types'
+import type {
+  ArtifactRepositoryItem, ArtifactRepositoryResponse, ArtifactRepositoryStatus,
+  DeletionJobResponse, ProjectResponse, S3TestReportDto,
+} from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
 const { t } = useI18n()
@@ -29,6 +32,12 @@ const filters = ref({ project: '', pipeline: '', build: '', job: '', attempt: ''
 const testing = ref(false)
 const report = ref<S3TestReportDto | null>(null)
 const testError = ref('')
+const managedProjects = ref<ProjectResponse[]>([])
+const selectedProject = ref<string | null>(null)
+const deletionJobs = ref<DeletionJobResponse[]>([])
+const deletionError = ref('')
+const deletionLoading = ref(false)
+const retryingDeletionId = ref<number | null>(null)
 
 onMounted(() => { void loadStatus() })
 
@@ -37,7 +46,9 @@ async function loadStatus(): Promise<void> {
   errorMessage.value = ''
   try {
     status.value = await artifactRepositoryApi.status()
-    if (status.value.available) void loadItems()
+    if (status.value.available) {
+      await Promise.all([loadItems(), loadDeletionManagement()])
+    }
   } catch (err) {
     errorMessage.value = describeSubmitError(err)
     status.value = null
@@ -108,7 +119,56 @@ const columns = computed<DataTableColumns<ArtifactRepositoryItem>>(() => [
   },
 ])
 const totalPages = computed(() => repository.value ? Math.max(1, Math.ceil(repository.value.total / limit)) : 1)
-const canTest = computed(() => isAdmin.value && status.value?.available === true && !testing.value)
+
+async function loadDeletionManagement(): Promise<void> {
+  try {
+    const result = await projectsApi.list({ permission: 'admin' })
+    managedProjects.value = Array.isArray(result) ? result : []
+    const first = managedProjects.value[0]?.name ?? null
+    selectedProject.value = first
+    if (first) await loadDeletionJobs(first)
+  } catch {
+    managedProjects.value = []
+    selectedProject.value = null
+  }
+}
+
+async function loadDeletionJobs(project = selectedProject.value): Promise<void> {
+  if (!project) return
+  deletionLoading.value = true
+  deletionError.value = ''
+  try {
+    deletionJobs.value = (await artifactDeletionsApi.list(project)).items
+  } catch (err) {
+    deletionJobs.value = []
+    deletionError.value = describeSubmitError(err)
+  } finally {
+    deletionLoading.value = false
+  }
+}
+
+function selectProject(project: string): void {
+  selectedProject.value = project
+  void loadDeletionJobs(project)
+}
+
+async function retryDeletion(job: DeletionJobResponse): Promise<void> {
+  if (!selectedProject.value) return
+  retryingDeletionId.value = job.id
+  try {
+    const updated = await artifactDeletionsApi.retry(selectedProject.value, job.id)
+    deletionJobs.value = deletionJobs.value.map((item) => item.id === updated.id ? updated : item)
+    message.success(t('artifacts.deletionRetryQueued'))
+  } catch (err) {
+    message.error(describeSubmitError(err))
+  } finally {
+    retryingDeletionId.value = null
+  }
+}
+
+const canTest = computed(
+  () => isAdmin.value && status.value?.available === true && !testing.value,
+)
 
 async function testConnection(): Promise<void> {
   testing.value = true; testError.value = ''; report.value = null
@@ -159,6 +219,44 @@ async function testConnection(): Promise<void> {
         <n-data-table v-else-if="repository" :columns="columns" :data="repository.items" :bordered="false" :single-line="false" />
         <n-pagination v-if="repository && repository.total > limit" :page="page" :page-size="limit" :page-count="totalPages" @update:page="changePage" />
       </section>
+      <section v-if="managedProjects.length > 0" class="deletion-panel" data-testid="deletion-panel">
+        <div class="deletion-panel-head">
+          <h3>{{ t('artifacts.deletionsTitle') }}</h3>
+          <n-select
+            :value="selectedProject"
+            :options="managedProjects.map((project) => ({ label: project.name, value: project.name }))"
+            :virtual-scroll="false"
+            style="width: 220px"
+            @update:value="selectProject"
+          />
+        </div>
+        <n-alert v-if="deletionError" type="error">{{ deletionError }}</n-alert>
+        <n-skeleton v-else-if="deletionLoading" text :repeat="2" />
+        <n-empty v-else-if="deletionJobs.length === 0" :description="t('artifacts.deletionsEmpty')" />
+        <ul v-else class="deletion-jobs">
+          <li v-for="job in deletionJobs" :key="job.id" :data-testid="`deletion-job-${job.id}`">
+            <div>
+              <strong>{{ t(`artifacts.deletionScope.${job.scope}`) }}</strong>
+              <span v-if="job.pipeline_name"> {{ job.pipeline_name }} #{{ job.build_number }}</span>
+              <span v-if="job.set_id"> · {{ t('artifacts.deletionScope.set') }} {{ job.set_id }}</span>
+            </div>
+            <n-tag :type="job.state === 'failed' ? 'error' : job.state === 'completed' ? 'success' : 'info'">
+              {{ t(`artifacts.deletionState.${job.state}`) }}
+            </n-tag>
+            <span>{{ t('artifacts.deletionAttempts', { count: job.attempts }) }}</span>
+            <span v-if="job.last_error" class="deletion-error">{{ job.last_error }}</span>
+            <n-button
+              v-if="job.state === 'failed'"
+              size="small"
+              :loading="retryingDeletionId === job.id"
+              :data-testid="`retry-deletion-${job.id}`"
+              @click="retryDeletion(job)"
+            >
+              {{ t('artifacts.retry') }}
+            </n-button>
+          </li>
+        </ul>
+      </section>
     </div>
     <n-empty v-else :description="t('artifacts.loadError')" />
   </div>
@@ -180,4 +278,34 @@ async function testConnection(): Promise<void> {
 .artifact-sha { font-size: 11px; }
 .artifact-download { color: var(--n-color-target, #18a058); }
 @media (max-width: 900px) { .artifact-filters { grid-template-columns: repeat(2, minmax(140px, 1fr)); } }
+.deletion-panel {
+  margin-top: 28px;
+  border-top: 1px solid var(--n-border-color, #e5e7eb);
+  padding-top: 20px;
+}
+.deletion-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.deletion-panel-head h3 { margin: 0; }
+.deletion-jobs {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.deletion-jobs li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--n-border-color, #e5e7eb);
+  border-radius: 8px;
+}
+.deletion-error { color: #d03050; }
 </style>

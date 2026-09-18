@@ -624,8 +624,18 @@ impl SqliteArtifactMetaRepo {
     /// 列出已经完整发布的目录产物，包括历史 attempt。
     pub async fn list_sets(&self, build_id: i64) -> Result<Vec<ArtifactSetRow>, StoreError> {
         Ok(sqlx::query_as(
-            "SELECT id, build_id, job_id, attempt, name, state, created_at
-                           FROM artifact_sets WHERE build_id = ? AND state = 'ready' ORDER BY id",
+            "SELECT s.id, s.build_id, s.job_id, s.attempt, s.name, s.state, s.created_at
+             FROM artifact_sets s
+             WHERE s.build_id = ? AND s.state = 'ready'
+               AND NOT EXISTS (
+                   SELECT 1 FROM artifact_deletions d
+                   JOIN builds b ON b.id = s.build_id
+                   WHERE d.state != 'completed'
+                     AND ((d.scope = 'build' AND d.build_id = s.build_id)
+                       OR (d.scope = 'project' AND d.project_id = b.project_id)
+                       OR (d.scope = 'set' AND d.set_id = s.id))
+               )
+             ORDER BY s.id",
         )
         .bind(build_id)
         .fetch_all(&self.pool)
@@ -635,8 +645,17 @@ impl SqliteArtifactMetaRepo {
     /// 按稳定 ID 查询集合；调用方负责归属授权。
     pub async fn set(&self, set_id: i64) -> Result<Option<ArtifactSetRow>, StoreError> {
         Ok(sqlx::query_as(
-            "SELECT id, build_id, job_id, attempt, name, state, created_at
-                           FROM artifact_sets WHERE id = ?",
+            "SELECT s.id, s.build_id, s.job_id, s.attempt, s.name, s.state, s.created_at
+             FROM artifact_sets s
+             WHERE s.id = ?
+               AND NOT EXISTS (
+                   SELECT 1 FROM artifact_deletions d
+                   JOIN builds b ON b.id = s.build_id
+                   WHERE d.state != 'completed'
+                     AND ((d.scope = 'build' AND d.build_id = s.build_id)
+                       OR (d.scope = 'project' AND d.project_id = b.project_id)
+                       OR (d.scope = 'set' AND d.set_id = s.id))
+               )",
         )
         .bind(set_id)
         .fetch_optional(&self.pool)
@@ -802,9 +821,17 @@ impl SqliteArtifactMetaRepo {
         build_id: i64,
     ) -> Result<Vec<ArtifactMetaEntry>, StoreError> {
         let rows = sqlx::query_as::<_, ArtifactRow>(
-            "SELECT build_id, job_id, attempt, backend, state, name, path, size, sha256,
-                    created_at FROM artifacts
-             WHERE build_id = ? AND state != 'pending' AND name NOT LIKE '.set-%' ORDER BY name",
+            "SELECT a.build_id, a.job_id, a.attempt, a.backend, a.state, a.name, a.path,
+                    a.size, a.sha256, a.created_at FROM artifacts a
+             WHERE a.build_id = ? AND a.state != 'pending' AND a.name NOT LIKE '.set-%'
+               AND NOT EXISTS (
+                   SELECT 1 FROM artifact_deletions d
+                   JOIN builds b ON b.id = a.build_id
+                   WHERE d.state != 'completed'
+                     AND ((d.scope = 'build' AND d.build_id = a.build_id)
+                       OR (d.scope = 'project' AND d.project_id = b.project_id))
+               )
+             ORDER BY a.name",
         )
         .bind(build_id)
         .fetch_all(&self.pool)
@@ -1088,10 +1115,17 @@ impl ArtifactMetaRepo for SqliteArtifactMetaRepo {
 
     async fn find(&self, build_id: i64, name: &str) -> Result<Option<ArtifactMeta>, StoreError> {
         let row = sqlx::query_as::<_, ArtifactRow>(
-            "SELECT build_id, job_id, attempt, backend, state, name, path, size, sha256,
-                    created_at
-             FROM artifacts
-             WHERE build_id = ? AND name = ? AND state != 'pending'",
+            "SELECT a.build_id, a.job_id, a.attempt, a.backend, a.state, a.name, a.path,
+                    a.size, a.sha256, a.created_at
+             FROM artifacts a
+             WHERE a.build_id = ? AND a.name = ? AND a.state != 'pending'
+               AND NOT EXISTS (
+                   SELECT 1 FROM artifact_deletions d
+                   JOIN builds b ON b.id = a.build_id
+                   WHERE d.state != 'completed'
+                     AND ((d.scope = 'build' AND d.build_id = a.build_id)
+                       OR (d.scope = 'project' AND d.project_id = b.project_id))
+               )",
         )
         .bind(build_id)
         .bind(name)
@@ -1102,10 +1136,18 @@ impl ArtifactMetaRepo for SqliteArtifactMetaRepo {
 
     async fn list_by_build(&self, build_id: i64) -> Result<Vec<ArtifactMeta>, StoreError> {
         let rows = sqlx::query_as::<_, ArtifactRow>(
-            "SELECT build_id, job_id, attempt, backend, state, name, path, size, sha256,
-                    created_at
-             FROM artifacts
-             WHERE build_id = ? AND state != 'pending' ORDER BY name",
+            "SELECT a.build_id, a.job_id, a.attempt, a.backend, a.state, a.name, a.path,
+                    a.size, a.sha256, a.created_at
+             FROM artifacts a
+             WHERE a.build_id = ? AND a.state != 'pending'
+               AND NOT EXISTS (
+                   SELECT 1 FROM artifact_deletions d
+                   JOIN builds b ON b.id = a.build_id
+                   WHERE d.state != 'completed'
+                     AND ((d.scope = 'build' AND d.build_id = a.build_id)
+                       OR (d.scope = 'project' AND d.project_id = b.project_id))
+               )
+             ORDER BY a.name",
         )
         .bind(build_id)
         .fetch_all(&self.pool)

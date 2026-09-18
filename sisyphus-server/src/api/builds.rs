@@ -26,6 +26,7 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use sisyphus_model::validate::BuildSnapshot;
 use utoipa::openapi::schema::{ObjectBuilder, Type};
@@ -581,9 +582,11 @@ pub async fn detail(
         ("name" = String, Path, description = "项目名"),
         ("pipeline" = String, Path, description = "pipeline 名"),
         ("number" = i64, Path, description = "构建号"),
+        DeleteBuildQuery,
     ),
     responses(
         (status = 204, description = "已删除该构建的日志与本地产物（其它后端和构建记录保留）"),
+        (status = 202, description = "本地数据已清理，S3 产物已进入异步删除", body = crate::store::deletions::DeletionJob),
         (status = 401, description = "未认证", body = ErrorBody),
         (status = 403, description = "viewer/runner 档不足（删构建需项目 admin 档）", body = ErrorBody),
         (status = 404, description = "项目不存在/不可见，或构建号不存在", body = ErrorBody),
@@ -594,7 +597,8 @@ pub async fn remove(
     State(state): State<AppState>,
     RequireAdmin(access): RequireAdmin,
     Path((_project, pipeline, number)): Path<(String, String, i64)>,
-) -> Result<StatusCode, ApiError> {
+    Query(query): Query<DeleteBuildQuery>,
+) -> Result<Response, ApiError> {
     let build = load_build(&state, &access.project.id, &pipeline, number).await?;
     if !build.status.is_terminal() {
         return Err(ApiError::conflict(format!(
@@ -607,7 +611,22 @@ pub async fn remove(
     crate::store::delete_build_data(&state.pool, &artifacts_root, build.id)
         .await
         .map_err(|e| ApiError::internal("构建数据清理", &e))?;
-    Ok(StatusCode::NO_CONTENT)
+    if !query.delete_s3_artifacts {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    let job = state
+        .deletions
+        .enqueue_build(access.project.id, build.id, &access.operator)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(job)).into_response())
+}
+
+/// 手动构建数据清理选项。S3 默认保留，只有显式 true 才进入异步删除。
+#[derive(Debug, Default, Deserialize, IntoParams, ToSchema)]
+pub struct DeleteBuildQuery {
+    #[serde(default)]
+    /// `true` 时把保留的 S3 产物空间加入异步删除队列。
+    pub delete_s3_artifacts: bool,
 }
 
 // ---------------------------------------------------------------------------

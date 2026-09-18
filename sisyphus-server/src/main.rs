@@ -194,6 +194,10 @@ async fn main() {
         }
     };
     state.start_multipart_cleanup();
+    let deletion_state = state.clone();
+    let deletion_task = tokio::spawn(async move {
+        sisyphus_server::deletion::run(deletion_state).await;
+    });
     // 静态资源本地覆盖目录（B2a-T5）：数据目录 web/ 子目录，不存在即纯内嵌。
     let web_override_dir = config.data_dir.join(sisyphus_server::config::WEB_DIR);
 
@@ -321,6 +325,7 @@ async fn main() {
     sched_task.abort();
     trigger_task.abort();
     cleanup_task.abort();
+    deletion_task.abort();
 }
 
 /// tracing 基础初始化（ADR-0019）：RUST_LOG 整体胜出，否则用配置级别

@@ -39,6 +39,8 @@ pub enum AuditEvent {
     PatRevoked,
     /// 创建项目。
     ProjectCreated,
+    /// 发起项目异步删除（冻结授权并进入清理队列）。
+    ProjectDeletionRequested,
     /// 成员角色变更（整组分配；detail 记落定清单）。
     MemberRolesChanged,
     /// 机密建立（detail 只记名）。
@@ -78,7 +80,7 @@ pub enum AuditEvent {
 impl AuditEvent {
     /// 全部事件类型（契约单点：`as_str` 映射 + [`Self::parse`] 识别 +
     /// OpenAPI enum 生成的共同来源——新增事件类型只改这里与 [`Self::as_str`]）。
-    pub const ALL: [AuditEvent; 23] = [
+    pub const ALL: [AuditEvent; 24] = [
         Self::LoginSuccess,
         Self::LoginFailure,
         Self::Logout,
@@ -89,6 +91,7 @@ impl AuditEvent {
         Self::PatCreated,
         Self::PatRevoked,
         Self::ProjectCreated,
+        Self::ProjectDeletionRequested,
         Self::MemberRolesChanged,
         Self::SecretCreated,
         Self::SecretOverwritten,
@@ -117,6 +120,7 @@ impl AuditEvent {
             Self::PatCreated => "pat_created",
             Self::PatRevoked => "pat_revoked",
             Self::ProjectCreated => "project_created",
+            Self::ProjectDeletionRequested => "project_deletion_requested",
             Self::MemberRolesChanged => "member_roles_changed",
             Self::SecretCreated => "secret_created",
             Self::SecretOverwritten => "secret_overwritten",

@@ -9,6 +9,7 @@ use super::artifacts;
 use super::audit;
 use super::auth;
 use super::builds;
+use super::deletions;
 use super::error::{ErrorBody, ValidationIssue};
 use super::health;
 use super::logs;
@@ -53,6 +54,7 @@ use super::users;
         projects::list,
         projects::create,
         projects::get_one,
+        projects::remove,
         scm::scm_probe,
         scm::scm_branches,
         scm::test_connection,
@@ -70,6 +72,10 @@ use super::users;
         builds::list,
         builds::detail,
         builds::remove,
+        deletions::list,
+        deletions::retry,
+        deletions::list_projects,
+        deletions::retry_project,
         logs::stream,
         logs::download,
         artifacts::agent_upload,
@@ -81,6 +87,7 @@ use super::users;
         artifacts::agent_publish_set,
         artifacts::agent_set_file,
         artifacts::list_sets,
+        artifacts::delete_set,
         artifacts::download_set_file,
         artifacts::list,
         artifacts::download,
@@ -161,6 +168,11 @@ use super::users;
         builds::TriggerSourceDto,
         builds::JobStatusDto,
         builds::RerunModeDto,
+        builds::DeleteBuildQuery,
+        deletions::DeletionJobsResponse,
+        crate::store::deletions::DeletionJob,
+        crate::store::deletions::DeletionScope,
+        crate::store::deletions::DeletionState,
         artifacts::ArtifactUploadedResponse,
         artifacts::ArtifactUploadUrlResponse,
         artifacts::ArtifactUploadGrantRequest,

@@ -11,6 +11,7 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod deletion;
 pub mod engine;
 pub mod events;
 pub mod grpc;

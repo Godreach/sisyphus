@@ -96,6 +96,7 @@ impl ProjectRepo {
                     p.created_at, p.updated_at, COUNT(pl.id)
              FROM projects p
              LEFT JOIN pipelines pl ON pl.project_id = p.id
+             WHERE p.lifecycle = 'active'
              GROUP BY p.id
              ORDER BY p.name",
             )
@@ -144,7 +145,7 @@ impl ProjectRepo {
              FROM projects p
              JOIN project_members m ON m.project_id = p.id
              LEFT JOIN pipelines pl ON pl.project_id = p.id
-             WHERE m.user_id = ? AND (? IS NULL OR m.role = ?)
+             WHERE p.lifecycle = 'active' AND m.user_id = ? AND (? IS NULL OR m.role = ?)
              GROUP BY p.id
              ORDER BY p.name",
             )
@@ -200,7 +201,7 @@ impl ProjectRepo {
                     p.created_at, p.updated_at, COUNT(pl.id)
              FROM projects p
              LEFT JOIN pipelines pl ON pl.project_id = p.id
-             WHERE p.name = ?
+             WHERE p.name = ? AND p.lifecycle = 'active'
              GROUP BY p.id",
             )
             .bind(name)
@@ -218,7 +219,7 @@ impl ProjectRepo {
                     p.created_at, p.updated_at, COUNT(pl.id)
              FROM projects p
              LEFT JOIN pipelines pl ON pl.project_id = p.id
-             WHERE p.id = ?
+             WHERE p.id = ? AND p.lifecycle = 'active'
              GROUP BY p.id",
             )
             .bind(id)

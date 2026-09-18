@@ -91,6 +91,62 @@ describe('ProjectsView 项目列表 + 新建', () => {
     wrapper.unmount()
   })
 
+  it('全局管理员确认删除项目后立即移出项目卡并显示异步清理状态', async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (url === '/api/v1/projects' && method === 'GET') {
+        return jsonResponse(200, [project(1, 'demo', 'git', 'https://x/a.git')])
+      }
+      if (url === '/api/v1/project-deletions' && method === 'GET') {
+        return jsonResponse(200, { items: [] })
+      }
+      if (url === '/api/v1/projects/demo' && method === 'DELETE') {
+        return jsonResponse(202, { id: 71, project_id: 1, project_name: 'demo', scope: 'project', state: 'queued', pipeline_name: null, build_number: null, set_id: null, attempts: 0, last_error: null, created_at: 1, updated_at: 1 })
+      }
+      return jsonResponse(404, { code: 'NOT_FOUND', message: `no mock for ${url}` })
+    })
+    const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.text()).toContain('demo'))
+
+    await wrapper.get('[data-testid="delete-project-demo"]').trigger('click')
+    await vi.waitFor(() => expect(document.querySelector('.n-popconfirm__action')).toBeTruthy())
+    const actions = document.querySelectorAll('.n-popconfirm__action button')
+    await (actions[actions.length - 1] as HTMLElement).click()
+
+    await vi.waitFor(() => expect(wrapper.findAll('.project-card')).toHaveLength(0))
+    expect(wrapper.get('[data-testid="project-deletion-71"]').text()).toContain('demo')
+    expect(wrapper.get('[data-testid="project-deletion-71"]').text()).toContain('排队中')
+    expect(fetchMock.mock.calls.some((call) => call[0] === '/api/v1/projects/demo' && call[1]?.method === 'DELETE')).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('全局项目清理失败可见，并可显式重试', async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (url === '/api/v1/projects' && method === 'GET') return jsonResponse(200, [])
+      if (url === '/api/v1/project-deletions' && method === 'GET') {
+        return jsonResponse(200, { items: [{ id: 72, project_id: 2, project_name: 'broken', scope: 'project', state: 'failed', pipeline_name: null, build_number: null, set_id: null, attempts: 3, last_error: 'object delete denied', created_at: 1, updated_at: 2 }] })
+      }
+      if (url === '/api/v1/project-deletions/72/retry' && method === 'POST') {
+        return jsonResponse(202, { id: 72, project_id: 2, project_name: 'broken', scope: 'project', state: 'queued', pipeline_name: null, build_number: null, set_id: null, attempts: 3, last_error: null, created_at: 1, updated_at: 3 })
+      }
+      return jsonResponse(404, { code: 'NOT_FOUND', message: `no mock for ${url}` })
+    })
+    const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.text()).toContain('暂无项目'))
+
+    await wrapper.get('[data-testid="project-deletions"] button').trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="project-deletion-72"]').exists()).toBe(true))
+    expect(wrapper.get('[data-testid="project-deletion-72"]').text()).toContain('object delete denied')
+    await wrapper.get('[data-testid="retry-project-deletion-72"]').trigger('click')
+
+    await vi.waitFor(() => expect(wrapper.get('[data-testid="project-deletion-72"]').text()).toContain('排队中'))
+    expect(fetchMock.mock.calls.some((call) => call[0] === '/api/v1/project-deletions/72/retry' && call[1]?.method === 'POST')).toBe(true)
+    wrapper.unmount()
+  })
+
   it('无项目：展示空态提示', async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, []))
     const wrapper = mountView()

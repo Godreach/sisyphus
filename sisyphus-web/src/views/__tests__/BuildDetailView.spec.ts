@@ -253,6 +253,39 @@ describe('BuildDetailView（#107 定稿：阶段/任务卡 + 动作闭环 + SSE 
     expect(wrapper!.get('.artifact-set a').attributes('href')).toContain('path=nested%2Fapp.txt')
   })
 
+  it('终态构建可确认删除整个产物集，受理后该组立即从列表消失', async () => {
+    mockDetail(buildDetailBody({ status: 'succeeded', finished_at: 1_700_000_010_000 }))
+    mockDefinitionAndArtifacts()
+    const checksum = 'b'.repeat(64)
+    server.use(
+      http.get(`${BASE}/builds/7/artifact-sets`, () =>
+        HttpResponse.json({
+          items: [{
+            set: { id: 41, build_id: 7, job_id: 11, attempt: 1, name: 'compile-dir', state: 'ready', created_at: 1 },
+            availability: 'ready',
+            entries: [{ path: 'app.bin', kind: 'file', size: 3, sha256: checksum, executable: true, artifact_name: '.set-41-app.bin', state: 'ready' }],
+          }],
+        }),
+      ),
+      http.delete(`${BASE}/builds/7/artifact-sets/41`, () =>
+        HttpResponse.json(
+          { id: 51, project_id: 1, scope: 'set', state: 'queued', pipeline_name: 'release', build_number: 7, set_id: 41, attempts: 0, last_error: null, created_at: 1, updated_at: 1 },
+          { status: 202 },
+        ),
+      ),
+    )
+    mountView()
+    await vi.waitFor(() => expect(wrapper!.findAll('.artifact-set')).toHaveLength(1))
+
+    await wrapper!.get('[data-testid="delete-artifact-set-41"]').trigger('click')
+    await vi.waitFor(() => expect(document.querySelector('.n-popconfirm__action')).toBeTruthy())
+    const actions = document.querySelectorAll('.n-popconfirm__action button')
+    await (actions[actions.length - 1] as HTMLElement).click()
+
+    await vi.waitFor(() => expect(wrapper!.findAll('.artifact-set')).toHaveLength(0))
+    expect(requests).toContain(`DELETE ${BASE}/builds/7/artifact-sets/41`)
+  })
+
   it('排队任务 attempt 历史（attempt>1 标注并列）', async () => {
     const base = buildDetailBody()
     const pushJob = (base.stages[1] as { jobs: Array<Record<string, unknown>> }).jobs[0] as Record<string, unknown>
@@ -571,6 +604,33 @@ describe('BuildDetailView（#107 定稿：阶段/任务卡 + 动作闭环 + SSE 
     mountView()
     await vi.waitFor(() => expect(wrapper!.findAll('.stage-block')).toHaveLength(2))
     expect(wrapper!.get('[data-testid="delete-btn"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('删除构建：S3 产物默认保留，显式勾选后才请求异步删除', async () => {
+    mockDetail(buildDetailBody({ status: 'failed', finished_at: 1_700_000_010_000 }))
+    mockDefinitionAndArtifacts()
+    let deleteS3: string | null = null
+    server.use(
+      http.delete(`${BASE}/builds/7`, ({ request }) => {
+        deleteS3 = new URL(request.url).searchParams.get('delete_s3_artifacts')
+        return HttpResponse.json(
+          { id: 9, project_id: 1, scope: 'build', state: 'queued', pipeline_name: 'release', build_number: 7 },
+          { status: 202 },
+        )
+      }),
+    )
+    mountView()
+    await vi.waitFor(() => expect(wrapper!.findAll('.stage-block')).toHaveLength(2))
+
+    await wrapper!.get('[data-testid="delete-btn"]').trigger('click')
+    await vi.waitFor(() => expect(document.querySelector('[data-testid="delete-s3-checkbox"]')).toBeTruthy())
+    const checkbox = document.querySelector('[data-testid="delete-s3-checkbox"]') as HTMLElement
+    expect(checkbox.classList.contains('n-checkbox--checked')).toBe(false)
+    checkbox.click()
+    await vi.waitFor(() => expect(checkbox.classList.contains('n-checkbox--checked')).toBe(true))
+    const actions = document.querySelectorAll('.n-popconfirm__action button')
+    await (actions[actions.length - 1] as HTMLElement).click()
+    await vi.waitFor(() => expect(deleteS3).toBe('true'))
   })
 
   it('SSE 日志：查看日志展开流，输出块合流渲染、ANSI 剥离、步骤折叠/展开', async () => {

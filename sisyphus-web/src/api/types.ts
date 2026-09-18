@@ -620,6 +620,26 @@ export interface BuildArtifactsResponse {
   items: ArtifactResponse[]
 }
 
+/** 产物/项目异步删除任务（#128）。 */
+export interface DeletionJobResponse {
+  id: number
+  project_id: number
+  /** 项目名快照；项目删除冻结后仍可辨识。 */
+  project_name: string
+  scope: 'set' | 'build' | 'project'
+  state: 'queued' | 'running' | 'failed' | 'completed'
+  pipeline_name: string | null
+  build_number: number | null
+  set_id: number | null
+  attempts: number
+  last_error: string | null
+  created_at: number
+  updated_at: number
+}
+
+/** 异步删除任务列表响应。 */
+export interface DeletionJobsResponse { items: DeletionJobResponse[] }
+
 export interface ArtifactSetEntryResponse {
   path: string
   kind: 'file' | 'directory'
@@ -854,6 +874,7 @@ export const AUDIT_EVENTS = [
   'pat_created',
   'pat_revoked',
   'project_created',
+  'project_deletion_requested',
   'member_roles_changed',
   'secret_created',
   'secret_overwritten',
@@ -869,7 +890,7 @@ export const AUDIT_EVENTS = [
 ] as const
 
 /** 审计事件类型（由 `AUDIT_EVENTS` 派生；后端 `AuditEvent::as_str()` 契约值，
- *  与 store 层同源，19 种）。 */
+ *  与 store 层同源）。 */
 export type AuditEventDto = (typeof AUDIT_EVENTS)[number]
 
 /** 审计查询参数（全部可选，AND 组合；分页 limit/offset，时间倒序由后端保证）。

@@ -25,6 +25,7 @@ import { useI18n } from 'vue-i18n'
 import {
   NAlert,
   NButton,
+  NCheckbox,
   NEmpty,
   NForm,
   NFormItem,
@@ -79,6 +80,8 @@ const triggerParams = ref<Record<string, string>>({})
 const triggerBranch = ref('')
 const triggerCommit = ref('')
 const triggerError = ref('')
+const deleteS3Artifacts = ref(false)
+const deletingSetId = ref<number | null>(null)
 
 /** 已展开日志的任务集合（按 `job:attempt` 键；点任务卡日志按钮切换）。 */
 const openLogs = ref<Set<string>>(new Set())
@@ -207,7 +210,12 @@ async function rerunBuild(mode: RerunBuildRequest['mode']): Promise<void> {
 async function submitDelete(): Promise<void> {
   busy.value = 'delete'
   try {
-    await store.remove(project.value, pipeline.value, buildNumber.value)
+    await store.remove(
+      project.value,
+      pipeline.value,
+      buildNumber.value,
+      deleteS3Artifacts.value,
+    )
     await router.push({
       name: 'build-list',
       params: { name: project.value, pipeline: pipeline.value },
@@ -216,6 +224,22 @@ async function submitDelete(): Promise<void> {
     message.error(describeActionError(err))
   } finally {
     busy.value = null
+  }
+}
+
+function resetDeleteOptions(show: boolean): void {
+  if (show) deleteS3Artifacts.value = false
+}
+
+async function deleteArtifactSet(setId: number): Promise<void> {
+  deletingSetId.value = setId
+  try {
+    await store.removeArtifactSet(project.value, pipeline.value, buildNumber.value, setId)
+    message.success(t('buildDetail.artifactSetDeleteQueued'))
+  } catch (err) {
+    message.error(describeActionError(err))
+  } finally {
+    deletingSetId.value = null
   }
 }
 
@@ -400,6 +424,7 @@ function paramControl(p: { name: string; type: 'string' | 'number' | 'bool' | 'e
         <n-popconfirm
           :positive-text="t('common.confirm')"
           :negative-text="t('common.cancel')"
+          @update:show="resetDeleteOptions"
           @positive-click="submitDelete"
         >
           <template #trigger>
@@ -412,7 +437,16 @@ function paramControl(p: { name: string; type: 'string' | 'number' | 'bool' | 'e
               {{ t('buildDetail.delete') }}
             </button>
           </template>
-          {{ t('buildDetail.deleteConfirm', { number: build.number }) }}
+          <div class="delete-confirm-content">
+            <p>{{ t('buildDetail.deleteConfirm', { number: build.number }) }}</p>
+            <n-checkbox
+              v-model:checked="deleteS3Artifacts"
+              data-testid="delete-s3-checkbox"
+            >
+              {{ t('buildDetail.deleteS3Artifacts') }}
+            </n-checkbox>
+            <p class="form-hint">{{ t('buildDetail.deleteS3Hint') }}</p>
+          </div>
         </n-popconfirm>
       </div>
     </header>
@@ -569,6 +603,23 @@ function paramControl(p: { name: string; type: 'string' | 'number' | 'bool' | 'e
                   </span>
                   <span v-else class="artifact-chip">{{ entry.path }}/</span>
                 </template>
+                <n-popconfirm
+                  :positive-text="t('buildDetail.artifactSetDelete')"
+                  :negative-text="t('common.cancel')"
+                  @positive-click="deleteArtifactSet(set.set.id)"
+                >
+                  <template #trigger>
+                    <button
+                      type="button"
+                      class="btn-outline red artifact-set-delete"
+                      :data-testid="`delete-artifact-set-${set.set.id}`"
+                      :disabled="deletingSetId !== null || !build || isLiveStatus(build.status)"
+                    >
+                      {{ t('buildDetail.artifactSetDelete') }}
+                    </button>
+                  </template>
+                  {{ t('buildDetail.artifactSetDeleteConfirm', { name: set.set.name }) }}
+                </n-popconfirm>
               </div>
 
               <!-- 日志入口：展开/收起该任务的 SSE 日志流（步骤折叠/ANSI/截断/重连）。 -->

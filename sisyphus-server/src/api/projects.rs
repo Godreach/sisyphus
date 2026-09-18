@@ -8,7 +8,7 @@
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -16,7 +16,7 @@ use utoipa::ToSchema;
 use super::AppState;
 use super::auth::AuthContext;
 use super::error::{ApiError, ErrorBody, ValidationIssue, parse_body};
-use super::policy::RequireViewer;
+use super::policy::{RequireGlobalAdmin, RequireViewer};
 use crate::store::projects::{NewProject, Project, ScmType};
 
 /// 仓库类型（API 形态；`git` / `svn` / `none`）。
@@ -266,6 +266,53 @@ pub async fn get_one(
     RequireViewer(access): RequireViewer,
 ) -> Result<Json<ProjectResponse>, ApiError> {
     Ok(Json(access.project.into()))
+}
+
+/// 删除项目：全局管理员发起；所有构建均终态后，原子冻结项目授权并进入
+/// 异步删除。项目行在清理完成前保留归属，完成后保留不可访问墓碑。
+#[utoipa::path(
+    delete,
+    path = "/api/v1/projects/{name}",
+    tag = "projects",
+    responses(
+        (status = 202, description = "项目已冻结并进入异步删除", body = crate::store::deletions::DeletionJob),
+        (status = 403, description = "仅全局管理员可删除项目", body = ErrorBody),
+        (status = 404, description = "项目不存在", body = ErrorBody),
+        (status = 409, description = "仍有排队或运行中的构建", body = ErrorBody),
+    )
+)]
+pub async fn remove(
+    State(state): State<AppState>,
+    RequireGlobalAdmin(auth): RequireGlobalAdmin,
+    Path(name): Path<String>,
+) -> Result<(StatusCode, Json<crate::store::deletions::DeletionJob>), ApiError> {
+    let project = state
+        .projects
+        .get_by_name(&name)
+        .await?
+        .ok_or_else(|| ApiError::resource_not_found(format!("项目 {name} 不存在")))?;
+    let job = state
+        .deletions
+        .enqueue_project(project.id, &auth.username)
+        .await
+        .map_err(|error| match error {
+            crate::store::StoreError::Conflict(message) => ApiError::conflict(message),
+            crate::store::StoreError::NotFound(_) => {
+                ApiError::resource_not_found(format!("项目 {name} 不存在"))
+            }
+            other => ApiError::internal("项目删除入队", &other),
+        })?;
+    state
+        .audit
+        .insert(
+            crate::store::now_ms(),
+            &auth.username,
+            crate::store::audit::AuditEvent::ProjectDeletionRequested,
+            Some(&name),
+            Some(&serde_json::json!({ "deletion_id": job.id }).to_string()),
+        )
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
 /// 创建项目的字段校验（轻量输入面；pipeline 定义的重校验在 model 单一事实源）。

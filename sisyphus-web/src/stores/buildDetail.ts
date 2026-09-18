@@ -186,8 +186,20 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
     project: string,
     pipeline: string,
     number: number,
+    deleteS3Artifacts = false,
   ): Promise<void> {
-    await buildsApi.remove(project, pipeline, number)
+    await buildsApi.remove(project, pipeline, number, deleteS3Artifacts)
+  }
+
+  /** 删除整个目录产物集；202 受理后本地立即隐藏，与服务端 deleting 可见性一致。 */
+  async function removeArtifactSet(
+    project: string,
+    pipeline: string,
+    number: number,
+    setId: number,
+  ): Promise<void> {
+    await artifactsApi.removeSet(project, pipeline, number, setId)
+    artifactSets.value = artifactSets.value.filter((item) => item.set.id !== setId)
   }
 
   /** 组件卸载清理：停止轮询、清态（下次进入重新加载）。 */
@@ -219,6 +231,7 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
     cancel,
     rerun,
     remove,
+    removeArtifactSet,
     dispose,
   }
 })

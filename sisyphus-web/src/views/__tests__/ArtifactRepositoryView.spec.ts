@@ -173,4 +173,35 @@ describe('ArtifactRepositoryView 一级制品库入口（票 #122）', () => {
     await w.get('[data-testid="artifact-browser"] button').trigger('click')
     await vi.waitFor(() => expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('project=web-app'))).toBe(true))
   })
+
+  it('项目管理员可见删除失败与错误，并可将任务显式重新排队', async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/v1/artifact-repository') {
+        return jsonResponse(200, {
+          available: true,
+          backend: { endpoint: 'https://s3.example', region: 'us-east-1', bucket: 'sisyphus', prefix: '', path_style: true },
+        })
+      }
+      if (url === '/api/v1/projects?permission=admin') {
+        return jsonResponse(200, [{ id: 1, name: 'demo', scm_type: 'none', scm_url: '', default_branch: null, created_at: 1, updated_at: 1, pipeline_count: 0 }])
+      }
+      if (url === '/api/v1/projects/demo/artifact-deletions' && (init?.method ?? 'GET') === 'GET') {
+        return jsonResponse(200, { items: [{ id: 9, project_id: 1, scope: 'build', state: 'failed', pipeline_name: 'release', build_number: 7, set_id: null, attempts: 2, last_error: 'S3 delete timeout', created_at: 1, updated_at: 2 }] })
+      }
+      if (url === '/api/v1/projects/demo/artifact-deletions/9/retry' && init?.method === 'POST') {
+        return jsonResponse(202, { id: 9, project_id: 1, scope: 'build', state: 'queued', pipeline_name: 'release', build_number: 7, set_id: null, attempts: 2, last_error: null, created_at: 1, updated_at: 3 })
+      }
+      return jsonResponse(404, { code: 'NOT_FOUND', message: `no mock for ${url}` })
+    })
+    useAuthStore().setAuthed({ username: 'project-admin', isAdmin: false })
+    const w = mountView()
+
+    await vi.waitFor(() => expect(w.find('[data-testid="deletion-job-9"]').exists()).toBe(true))
+    expect(w.get('[data-testid="deletion-job-9"]').text()).toContain('S3 delete timeout')
+    expect(w.get('[data-testid="deletion-job-9"]').text()).toContain('2')
+    await w.get('[data-testid="retry-deletion-9"]').trigger('click')
+    await vi.waitFor(() => expect(w.get('[data-testid="deletion-job-9"]').text()).toContain('排队中'))
+    expect(fetchMock.mock.calls.some((call) => call[0] === '/api/v1/projects/demo/artifact-deletions/9/retry' && call[1]?.method === 'POST')).toBe(true)
+  })
 })
