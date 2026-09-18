@@ -427,6 +427,7 @@
     "reconnecting": "断线重连中（按 seq 续传）…",
     "noLog": "暂无日志输出。",
     "degraded": "日志流端点尚未交付（SSE 日志暂不可用，属退化态）。",
+    "agentUnavailable": "Agent 当前离线，日志暂不可用；重连后将按 seq 继续回放。",
     "truncated": "日志已达上限 {limit}，超限输出已被丢弃（截断不判失败）。",
     "ended": "任务已结束，日志流关闭。",
     "step": "步骤",

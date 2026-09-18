@@ -1,6 +1,6 @@
--- 0025 任务终态日志归档（ADR-0027 / #129）。旧 logs 表保持原样可读，
+-- 0027 任务终态日志归档（ADR-0027 / #129）。旧 logs 表保持原样可读，
 -- 新归档以 attempt 为粒度独立登记；正文路径由本地后端维护。
-CREATE TABLE log_archives (
+CREATE TABLE IF NOT EXISTS log_archives (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id INTEGER NOT NULL REFERENCES jobs(id),
     attempt INTEGER NOT NULL,
@@ -15,4 +15,4 @@ CREATE TABLE log_archives (
     ready_at INTEGER,
     UNIQUE(job_id, attempt)
 );
-CREATE INDEX idx_log_archives_job ON log_archives(job_id, attempt);
+CREATE INDEX IF NOT EXISTS idx_log_archives_job ON log_archives(job_id, attempt);

@@ -427,6 +427,7 @@
     "reconnecting": "Reconnecting (resuming by seq)…",
     "noLog": "No log output yet.",
     "degraded": "The log stream endpoint is not delivered yet (SSE logs unavailable — degraded state).",
+    "agentUnavailable": "The Agent is offline; logs are temporarily unavailable and will resume by seq after reconnect.",
     "truncated": "Log reached the {limit} limit; further output was dropped (truncation does not fail the build).",
     "ended": "Job finished; log stream closed.",
     "step": "Step",

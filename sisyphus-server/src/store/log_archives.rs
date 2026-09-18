@@ -179,7 +179,7 @@ impl LocalLogArchiveStore {
             return Ok(Vec::new());
         };
         let path = self.final_path(job_id, attempt);
-        for frame in index.frames.into_iter().filter(|f| f.end_seq >= from_seq) {
+        if let Some(frame) = index.frames.into_iter().find(|f| f.end_seq >= from_seq) {
             let mut values = Vec::new();
             for value in read_frame_values(&path, &frame).await? {
                 if value

@@ -31,6 +31,8 @@ message ChannelMessage {
     UpgradeCommand upgrade = 3;  // 升级指令（ADR-0017）
     WorkspaceCommand workspace_cmd = 4;  // 工作区列表/清理指令（ADR-0011）
     CacheCommand cache_cmd = 5;  // 缓存列表/删除指令（ADR-0012）
+    LogSubscribe log_subscribe = 6;  // 按需订阅 Agent 本地日志（ADR-0027）
+    LogUnsubscribe log_unsubscribe = 7;  // 最后一名观看者离开时退订
 
     // --- 上行（Agent -> Server）---
     Handshake handshake = 10;         // 握手（首帧，ADR-0017）
@@ -236,6 +238,20 @@ message LogBatch {
   int32 attempt = 2;
   uint64 start_seq = 3;   // 本批起始 seq
   repeated LogEvent events = 4;
+}
+
+// Server 仅在有日志观看者时发送。Agent 设置该任务 attempt 的活体转发，
+// 并从指定 seq 回放本地持久缓冲；重复订阅按 seq 幂等处理。
+message LogSubscribe {
+  string job_id = 1;
+  int32 attempt = 2;
+  uint64 from_seq = 3;
+}
+
+// 取消一个任务 attempt 的活体转发；本地缓冲继续保留到归档确认。
+message LogUnsubscribe {
+  string job_id = 1;
+  int32 attempt = 2;
 }
 
 message LogEvent {

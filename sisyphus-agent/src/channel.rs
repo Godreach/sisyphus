@@ -544,6 +544,11 @@ pub async fn run_connection(
                 .map_err(|e| ChannelError(format!("token 不是合法 metadata：{e}")))?,
         );
     }
+    // 连接级能力位：Server 据此选择 ADR-0027 按需直播；旧 Agent/测试对端
+    // 不带此 metadata 时继续走 SQLite 兼容日志面。
+    request
+        .metadata_mut()
+        .insert("x-sisyphus-log-subscribe", MetadataValue::from_static("1"));
     for (name, value) in cfg.labels.labels() {
         request.metadata_mut().insert(
             name,
@@ -589,10 +594,8 @@ pub async fn run_connection(
         .await
         .map_err(|_| ChannelError("上行邮箱关闭".into()))?;
 
-    // 日志缓冲补传（ADR-0007/0013）：先注入活体发送器（连接期新增日志经活体
-    // 转发），再幂等重放——从每个缓冲文件头重发未清空段；重复段由 Server 按
-    // seq 幂等吸收。孤儿缓冲（job 不在在途集）重放后删除——执行丢弃、日志
-    // 保留作取证后再清（ADR-0013）。
+    // 日志活体发送器先注入；只有后续收到 LogSubscribe 才会从本地缓冲回放，
+    // 因而无人观看时不会持续把正文写入 Server（ADR-0027）。
     //
     // 顺序说明：set_live 先于 replay——运行中 job（#59 起）的连接期新增日志
     // 须立即活体转发（重放不截断缓冲，活体 seq 恒高于已落盘段）。同
@@ -614,16 +617,6 @@ pub async fn run_connection(
     // 升级上行链路（ADR-0017）：升级阶段经此单 writer 外送；set_live 先于
     // flush_pending——断线时最新阶段存 pending，重连补发（「重连上报失败原因」）。
     upgrade_uplink.set_live(Some(out_tx.clone())).await;
-    for msg in logbuf
-        .replay_all()
-        .await
-        .map_err(|e| ChannelError(format!("日志缓冲重放失败：{e}")))?
-    {
-        out_tx
-            .send(msg)
-            .await
-            .map_err(|_| ChannelError("上行邮箱关闭".into()))?;
-    }
     // 未确认归档的孤儿缓冲不得在重连时自动删除（ADR-0027）；后台归档成功后
     // 才由 runner 的确认路径清理。这里仍重放旧 SQLite 兼容日志，但保留源文件。
     // 离线期间缓冲的终态补发（日志重放之后；同一 writer 保写序）。
@@ -660,8 +653,9 @@ pub async fn run_connection(
     // 单 reader 循环：下行帧按类型分派到各模块；流读完（对端关流）或读
     // 失败即结束连接（外层退避重连）。清除活体日志转发——此后事件仅落缓冲，
     // 重连时重放补传。
-    let result = read_and_dispatch(&mut inbound, dispatch).await;
+    let result = read_and_dispatch(&mut inbound, dispatch, logbuf, &out_tx).await;
     logbuf.set_live(None).await;
+    logbuf.clear_subscriptions().await;
     workspace.set_live(None).await;
     cache.set_live(None).await;
     runner_uplink.set_live(None).await;
@@ -697,6 +691,8 @@ async fn wait_handshake_reply(
 async fn read_and_dispatch(
     inbound: &mut tonic::Streaming<ChannelMessage>,
     dispatch: &Dispatch,
+    logbuf: &LogBuffer,
+    out_tx: &mpsc::Sender<ChannelMessage>,
 ) -> Result<(), ChannelError> {
     while let Some(msg) = inbound
         .message()
@@ -715,6 +711,24 @@ async fn read_and_dispatch(
             }
             Some(Kind::CacheCmd(_)) => {
                 dispatch_to(&dispatch.cache, "cache", msg).await;
+            }
+            Some(Kind::LogSubscribe(subscribe)) => {
+                let messages = logbuf
+                    .subscribe(&subscribe.job_id, subscribe.attempt, subscribe.from_seq)
+                    .await
+                    .map_err(|e| ChannelError(format!("日志订阅回放失败：{e}")))?;
+                for message in messages {
+                    if out_tx.try_send(message).is_err() {
+                        // 回放邮箱已满时停止本轮回放；Server 会按 seq 重试，
+                        // 不能让 Agent 任务线程/读循环被慢观看者卡住。
+                        break;
+                    }
+                }
+            }
+            Some(Kind::LogUnsubscribe(unsubscribe)) => {
+                logbuf
+                    .unsubscribe(&unsubscribe.job_id, unsubscribe.attempt)
+                    .await;
             }
             // 冗余握手（重连竞态回发）与未知变体：忽略（契约演进只加字段）。
             _ => {}

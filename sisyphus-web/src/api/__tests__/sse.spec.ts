@@ -119,6 +119,21 @@ describe('openLogStream（SSE 流接线）', () => {
     conn.close()
   })
 
+  it('Agent 离线事件可解析，并在重连输出后恢复在线状态', () => {
+    expect(parseLogEvent('{"type":"log_unavailable","reason":"agent_offline"}')).toEqual({
+      type: 'log_unavailable',
+      reason: 'agent_offline',
+    })
+    const conn = openLogStream('/logs/stream', onEvent, onStatus)
+    const src = lastSource()
+    src.dispatch('log_unavailable', { type: 'log_unavailable', reason: 'agent_offline' })
+    expect(statuses).toContain('unavailable')
+    src.dispatch('output', { type: 'output', seq: 1, stream: 'stdout', text: 'resumed' })
+    expect(statuses.at(-1)).toBe('open')
+    expect(events).toHaveLength(1)
+    conn.close()
+  })
+
   it('首连失败（未 open 过）→ degraded 退化态并关流（端点未交付）', () => {
     const conn = openLogStream('/logs/stream', onEvent, onStatus)
     const src = lastSource()

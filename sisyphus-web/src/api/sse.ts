@@ -74,6 +74,7 @@ export type LogStreamEvent =
   | ({ type: 'step_end' } & StepEndEvent)
   | ({ type: 'truncated' } & TruncatedEvent)
   | ({ type: 'job_end' } & JobEndEvent)
+  | { type: 'log_unavailable'; reason: string }
 
 /** SSE 命名事件名 → 归一化事件类型。 */
 const EVENT_TYPES = [
@@ -82,6 +83,7 @@ const EVENT_TYPES = [
   'step_end',
   'truncated',
   'job_end',
+  'log_unavailable',
 ] as const
 
 type EventType = (typeof EVENT_TYPES)[number]
@@ -102,6 +104,12 @@ export function parseLogEvent(data: string): LogStreamEvent | null {
   const type = obj.type
   if (typeof type !== 'string' || !(EVENT_TYPES as readonly string[]).includes(type)) {
     return null
+  }
+  if (type === 'log_unavailable') {
+    return {
+      type: 'log_unavailable',
+      reason: typeof obj.reason === 'string' ? obj.reason : 'agent_offline',
+    }
   }
   const seq = obj.seq
   if (typeof seq !== 'number' || !Number.isFinite(seq)) return null
@@ -193,6 +201,7 @@ export type LogStreamConnectionStatus =
   | 'reconnecting'
   | 'closed'
   | 'degraded'
+  | 'unavailable'
 
 /** 打开的日志流句柄（调用侧负责 close）。 */
 export interface LogStreamConnection {
@@ -245,6 +254,10 @@ export function openLogStream(
       if (closed) return
       const event = parseLogEvent((ev as MessageEvent).data)
       if (!event) return
+      if (event.type === 'log_unavailable') {
+        onStatus('unavailable')
+        return
+      }
       if (event.type === 'job_end') {
         // 终态事件送达即关流（ADR-0013）。
         closed = true
@@ -253,6 +266,9 @@ export function openLogStream(
         onStatus('closed')
         return
       }
+      // Agent 重连后同一 SSE 流会继续收到按 seq 回放；清除离线提示，
+      // 不要求浏览器重新建立第二条观看者订阅。
+      if (event.type !== 'log_unavailable') onStatus('open')
       onEvent(event)
     })
   }

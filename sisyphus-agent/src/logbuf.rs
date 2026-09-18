@@ -99,6 +99,9 @@ pub struct LogBuffer {
     open: Arc<Mutex<HashMap<(String, i32), JobBuffer>>>,
     /// 活体连接的上行发送器（通道 `set_live` 注入；`None` = 断线，事件仅落盘）。
     live: Arc<RwLock<Option<mpsc::Sender<ChannelMessage>>>>,
+    /// 当前连接被 Server 要求直播的任务 attempt。没有观看者时日志只写本地
+    /// 缓冲，不产生任何上行流量（ADR-0027）。
+    subscriptions: Arc<RwLock<HashSet<(String, i32)>>>,
     /// 缓冲删除调度（延迟宽限删除经此；`clear_now` 同步删除不走此）。
     delete_tx: mpsc::Sender<DeleteJob>,
 }
@@ -124,6 +127,7 @@ impl LogBuffer {
             grace,
             open: Arc::new(Mutex::new(HashMap::new())),
             live: Arc::new(RwLock::new(None)),
+            subscriptions: Arc::new(RwLock::new(HashSet::new())),
             delete_tx,
         }
     }
@@ -269,8 +273,9 @@ impl LogBuffer {
         Ok(msgs)
     }
 
-    /// 活体转发：连接在线（`set_live(Some)`）时把帧送入上行邮箱（单 writer
-    /// 保序）；断线（`None`）时不送——事件已落盘，重连重放补传。
+    /// 活体转发：仅被 Server 订阅的任务 attempt 才尝试送入上行邮箱（单
+    /// writer 保序）；邮箱已满时丢弃热帧，观看者会按 seq 重新订阅回放，
+    /// 因而慢客户端绝不会阻塞任务执行。
     ///
     /// **先克隆发送器出读锁再 send**：避免「持读锁期间 `tx.send` 阻塞」与
     /// [`LogBuffer::set_live`]`(None)` 的写锁互锁。断线时 writer 阻塞于上行流控、
@@ -279,12 +284,28 @@ impl LogBuffer {
     /// `set_live(None)` 可推进；`send` 在 writer 被清理 abort 后返 `Err`，事件已
     /// 落盘由重连重放兜底（ADR-0013）。
     async fn forward_live(&self, msg: &ChannelMessage) {
-        let live = self.live.read().await.clone();
-        if let Some(tx) = live
-            && tx.send(msg.clone()).await.is_err()
+        let Some((job_id, attempt)) = log_key(msg) else {
+            return;
+        };
+        if !self
+            .subscriptions
+            .read()
+            .await
+            .contains(&(job_id.to_string(), attempt))
         {
-            // 连接刚断（对端关流）：事件已落盘，重连重放兜底，不判败。
-            tracing::warn!("日志活体转发失败：通道已关闭，事件仅落缓冲");
+            return;
+        }
+        let live = self.live.read().await.clone();
+        if let Some(tx) = live {
+            match tx.try_send(msg.clone()) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::debug!(job = %job_id, attempt, "日志活体邮箱已满，丢弃热帧等待按 seq 回放");
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!(job = %job_id, attempt, "日志活体通道已关闭，事件仅落缓冲");
+                }
+            }
         }
     }
 
@@ -293,6 +314,39 @@ impl LogBuffer {
     /// 避免「重放读完 → 活体注入」窗口内的漏发。
     pub async fn set_live(&self, tx: Option<mpsc::Sender<ChannelMessage>>) {
         *self.live.write().await = tx;
+    }
+
+    /// 建立一个按需直播订阅，并返回从 `from_seq` 起的本地回放。订阅写入
+    /// 先于读取，保证回放期间追加的事件即使重复发送也不会漏掉。
+    pub(crate) async fn subscribe(
+        &self,
+        job_id: &str,
+        attempt: i32,
+        from_seq: u64,
+    ) -> std::io::Result<Vec<ChannelMessage>> {
+        self.subscriptions
+            .write()
+            .await
+            .insert((job_id.to_string(), attempt));
+        let messages = self.replay(job_id, attempt).await?;
+        Ok(messages
+            .into_iter()
+            .filter(|msg| log_event_of(msg).is_some_and(|event| event.seq >= from_seq))
+            .collect())
+    }
+
+    /// 取消一个按需直播订阅；本地缓冲与归档生命周期不受影响。
+    pub(crate) async fn unsubscribe(&self, job_id: &str, attempt: i32) {
+        self.subscriptions
+            .write()
+            .await
+            .remove(&(job_id.to_string(), attempt));
+    }
+
+    /// 连接断开时清除连接级订阅，避免下一次重连在 Server 尚未重发订阅前
+    /// 意外把旧任务日志上送。
+    pub(crate) async fn clear_subscriptions(&self) {
+        self.subscriptions.write().await.clear();
     }
 
     /// 幂等重放单文件：从缓冲起点（文件头）逐行读到 EOF，产出 `LogBatch` 帧
@@ -336,26 +390,24 @@ impl LogBuffer {
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some(stem) = name.strip_suffix(ARCHIVE_PENDING_EXT) {
-                if let Some((job, attempt)) = stem
+            if let Some(stem) = name.strip_suffix(ARCHIVE_PENDING_EXT)
+                && let Some((job, attempt)) = stem
                     .rsplit_once('-')
                     .and_then(|(job, n)| Some((job.to_string(), n.parse::<i32>().ok()?)))
-                {
-                    found.insert((job, attempt));
-                }
+            {
+                found.insert((job, attempt));
             }
         }
         let archive_dir = self.dir.join("archives");
         if let Ok(entries) = std::fs::read_dir(archive_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if let Some(stem) = name.strip_suffix(".json") {
-                    if let Some((job, attempt)) = stem
+                if let Some(stem) = name.strip_suffix(".json")
+                    && let Some((job, attempt)) = stem
                         .rsplit_once('-')
                         .and_then(|(job, n)| Some((job.to_string(), n.parse::<i32>().ok()?)))
-                    {
-                        found.insert((job, attempt));
-                    }
+                {
+                    found.insert((job, attempt));
                 }
             }
         }
@@ -492,6 +544,14 @@ fn event_with_seq(event: LogEvent, seq: u64) -> LogEvent {
 fn log_event_of(msg: &ChannelMessage) -> Option<&LogEvent> {
     match msg.kind.as_ref()? {
         Kind::LogBatch(b) => b.events.first(),
+        _ => None,
+    }
+}
+
+/// 从日志帧取直播筛选键。
+fn log_key(msg: &ChannelMessage) -> Option<(&str, i32)> {
+    match msg.kind.as_ref()? {
+        Kind::LogBatch(batch) => Some((&batch.job_id, batch.attempt)),
         _ => None,
     }
 }
@@ -730,6 +790,44 @@ mod tests {
             .unwrap();
         let m = buf.append("job-1", 0, output_event(b"c")).await.unwrap();
         assert_eq!(seq_of(&m), 2, "batch 后续单事件接着编号");
+    }
+
+    #[tokio::test]
+    async fn on_demand_subscription_replays_from_seq_and_filters_unwatched_logs() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let buf = LogBuffer::new(dir.path().to_path_buf(), DEFAULT_GRACE);
+        let (tx, mut rx) = mpsc::channel(8);
+        buf.set_live(Some(tx)).await;
+
+        // 无观看者：事件只落本地，不能出现在上行邮箱。
+        buf.append("job-1", 0, output_event(b"zero")).await.unwrap();
+        assert!(rx.try_recv().is_err());
+
+        buf.append("job-1", 0, output_event(b"one")).await.unwrap();
+        let replay = buf.subscribe("job-1", 0, 1).await.unwrap();
+        assert_eq!(replay.len(), 1);
+        assert_eq!(seq_of(&replay[0]), 1);
+
+        buf.append("job-1", 0, output_event(b"two")).await.unwrap();
+        let live = rx.try_recv().expect("订阅后活体转发");
+        assert_eq!(seq_of(&live), 2);
+    }
+
+    #[tokio::test]
+    async fn slow_live_mailbox_does_not_block_append() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let buf = LogBuffer::new(dir.path().to_path_buf(), DEFAULT_GRACE);
+        let (tx, _rx) = mpsc::channel(1);
+        buf.set_live(Some(tx)).await;
+        let _ = buf.subscribe("job-1", 0, 0).await.unwrap();
+        buf.append("job-1", 0, output_event(b"a")).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            buf.append("job-1", 0, output_event(b"b")),
+        )
+        .await
+        .expect("邮箱满时 append 仍应立即返回")
+        .unwrap();
     }
 
     #[tokio::test]

@@ -188,8 +188,7 @@ fn write_frame(
         .unwrap_or(0);
     let last = raw
         .split(|b| *b == b'\n')
-        .filter(|l| !l.is_empty())
-        .last()
+        .rfind(|l| !l.is_empty())
         .and_then(|l| serde_json::from_slice::<serde_json::Value>(l).ok())
         .and_then(|v| v.get("seq").and_then(serde_json::Value::as_u64))
         .unwrap_or(first);

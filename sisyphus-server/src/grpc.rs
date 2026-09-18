@@ -20,24 +20,25 @@
 //!   调度侧落库 + engine 推进。
 //! - **在线判定事件**：上线/离线发布 [`Event::AgentOnline`]/[`Event::AgentOffline`]
 //!   （sched 据此转 unknown/匹配重算；UI 在线态）。
-//! - **日志面**（票 #73，ADR-0013）：`Kind::LogBatch` 落库
-//!   （[`handle_log_batch`]——按 start_seq 幂等，断线补传不重不乱序）+
-//!   事件总线广播（SSE 尾随热通知）。
+//! - **日志面**（票 #73 / #130，ADR-0013/0027）：新 Agent 的 `Kind::LogBatch`
+//!   仅广播给按需观看者；旧 Agent 仍按 start_seq 幂等落 SQLite 并广播事件总线，
+//!   断线补传不重不乱序。
 //! - **会话注册表**（[`SessionRegistry`]）：agent_id → 会话发送器，随连接
 //!   建立/断开维护——JobSpec/CancelBuild 的下发目的地。trait 缝隔离：
 //!   sched 只依赖 `JobDispatcher`，不依赖 tonic。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
 use sisyphus_proto::agent::{
-    CancelBuild, ChannelMessage, DiskUsage, Handshake, UpgradeCommand, Version,
+    CancelBuild, ChannelMessage, DiskUsage, Handshake, LogBatch, LogSubscribe, LogUnsubscribe,
+    UpgradeCommand, Version,
     agent_channel_server::{AgentChannel, AgentChannelServer},
     channel_message::Kind,
 };
 use sisyphus_proto::version;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming, metadata::MetadataMap};
 
@@ -66,6 +67,8 @@ const META_AUTHORIZATION: &str = "authorization";
 const META_OS: &str = "x-sisyphus-os";
 const META_ARCH: &str = "x-sisyphus-arch";
 const META_CONTAINER: &str = "x-sisyphus-container";
+/// Agent 日志按需直播能力 metadata（旧 Agent 缺省不存在）。
+const META_LOG_SUBSCRIBE: &str = "x-sisyphus-log-subscribe";
 
 /// 每会话下行发送通道容量（调度下发 burst：阶段并行任务同时入池）。缓冲
 /// 满即背压——session_loop 等待，不丢下行帧。
@@ -111,6 +114,20 @@ pub struct SessionRegistry {
     /// kind)` → 回应 oneshot。session_loop 收到 `WorkspaceList`/`CacheList`
     /// 经 [`Self::fulfill`] 满足；断开/超时经 [`Self::cancel`] 丢弃。
     pending: RwLock<HashMap<(i64, AwaitKind), oneshot::Sender<ChannelMessage>>>,
+    /// 握手能力位；旧 Agent 缺省 false，继续走 SQLite 兼容写入。
+    capabilities: RwLock<HashMap<i64, bool>>,
+    /// 按 `(agent, job, attempt)` 复用的单一 Agent 上游日志订阅。观看者只
+    /// 消费自己的 broadcast 接收器，慢客户端不会阻塞 Agent 或其它浏览器。
+    log_streams: RwLock<HashMap<(i64, String, i32), LogStreamState>>,
+}
+
+struct LogStreamState {
+    viewers: usize,
+    from_seq: u64,
+    tx: broadcast::Sender<LogBatch>,
+    /// 最近直播帧的小型重放窗口，覆盖浏览器断线重连/第二个观看者在
+    /// 不重复建立上游订阅的情况下按 seq 补齐的常见间隙。
+    history: VecDeque<LogBatch>,
 }
 
 impl std::fmt::Debug for SessionRegistry {
@@ -127,14 +144,79 @@ impl SessionRegistry {
 
     /// 注册会话（连接建立后）。重复注册（同 Agent 并发连接）覆盖旧会话——
     /// 最晚连接优先（Agent 重连即旧会话作废）。
-    async fn register(&self, agent_id: i64, tx: mpsc::Sender<Result<ChannelMessage, Status>>) {
+    async fn register(
+        &self,
+        agent_id: i64,
+        tx: mpsc::Sender<Result<ChannelMessage, Status>>,
+        supports_log_subscribe: bool,
+    ) {
         self.inner.write().await.insert(agent_id, tx);
+        self.capabilities
+            .write()
+            .await
+            .insert(agent_id, supports_log_subscribe);
+        // Agent 重连后恢复所有仍有浏览器观看的订阅；订阅状态不随 gRPC
+        // session 丢失，回放从最早观看者游标起，重复帧由 SSE 游标过滤。
+        let subscriptions: Vec<(String, i32, u64)> = self
+            .log_streams
+            .read()
+            .await
+            .iter()
+            .filter(|((id, _, _), state)| *id == agent_id && state.viewers > 0)
+            .map(|((_, job, attempt), state)| (job.clone(), *attempt, state.from_seq))
+            .collect();
+        for (job_id, attempt, from_seq) in subscriptions {
+            let _ = self
+                .send(
+                    agent_id,
+                    ChannelMessage {
+                        kind: Some(Kind::LogSubscribe(LogSubscribe {
+                            job_id,
+                            attempt,
+                            from_seq,
+                        })),
+                    },
+                )
+                .await;
+        }
     }
 
     /// 注销会话（断开/踢线）：移除下行发送器 + 取消该 Agent 的待满足往返
     /// （oneshot 发送器随移除而 drop → 等待方收 `RecvError` 即 [`AwaitError::Offline`]）。
-    async fn unregister(&self, agent_id: i64) {
-        self.inner.write().await.remove(&agent_id);
+    async fn unregister(
+        &self,
+        agent_id: i64,
+        expected: &mpsc::Sender<Result<ChannelMessage, Status>>,
+    ) {
+        // 重连可能在旧 session 清理前完成；旧 session 不得移除新 session
+        // 的 sender/能力位或向新观看者误发离线哨兵。
+        let removed = {
+            let mut inner = self.inner.write().await;
+            if inner
+                .get(&agent_id)
+                .is_some_and(|current| current.same_channel(expected))
+            {
+                inner.remove(&agent_id).is_some()
+            } else {
+                false
+            }
+        };
+        if !removed {
+            return;
+        }
+        self.capabilities.write().await.remove(&agent_id);
+        // 已打开的 SSE 观看者立即得到明确的 Agent 离线信号；空 LogBatch
+        // 仅是 Server 内部哨兵，不会写入 SQLite 或转发给 Agent。
+        for ((id, job_id, attempt), state) in self.log_streams.read().await.iter() {
+            if *id == agent_id && state.viewers > 0 {
+                let _ = state.tx.send(LogBatch {
+                    job_id: job_id.clone(),
+                    attempt: *attempt,
+                    start_seq: 0,
+                    events: Vec::new(),
+                });
+            }
+        }
         let mut pending = self.pending.write().await;
         pending.retain(|(id, _), _| *id != agent_id);
     }
@@ -187,6 +269,157 @@ impl SessionRegistry {
     async fn fulfill(&self, agent_id: i64, kind: AwaitKind, msg: ChannelMessage) {
         if let Some(tx) = self.pending.write().await.remove(&(agent_id, kind)) {
             let _ = tx.send(msg);
+        }
+    }
+
+    /// 注册一个浏览器日志观看者。返回 `(接收器, agent_online, 热历史)`；即使 Agent
+    /// 当前离线也保留观看者计数，重连时由 [`Self::register`] 自动恢复订阅。
+    pub async fn subscribe_log(
+        &self,
+        agent_id: i64,
+        job_id: &str,
+        attempt: i32,
+        from_seq: u64,
+    ) -> (broadcast::Receiver<LogBatch>, bool, Vec<LogBatch>) {
+        let key = (agent_id, job_id.to_string(), attempt);
+        let (rx, should_send, effective_from, initial) = {
+            let mut streams = self.log_streams.write().await;
+            let state = streams.entry(key.clone()).or_insert_with(|| {
+                let (tx, _) = broadcast::channel(256);
+                LogStreamState {
+                    viewers: 0,
+                    from_seq,
+                    tx,
+                    history: VecDeque::new(),
+                }
+            });
+            let first = state.viewers == 0;
+            let lower = from_seq < state.from_seq;
+            if lower {
+                state.from_seq = from_seq;
+            }
+            state.viewers += 1;
+            let initial = state
+                .history
+                .iter()
+                .filter(|batch| batch.events.iter().any(|event| event.seq >= from_seq))
+                .cloned()
+                .collect::<Vec<_>>();
+            let history_starts_after_cursor = state
+                .history
+                .front()
+                .and_then(|batch| batch.events.first())
+                .is_some_and(|event| event.seq > from_seq);
+            (
+                state.tx.subscribe(),
+                first || lower || history_starts_after_cursor,
+                state.from_seq,
+                initial,
+            )
+        };
+        let online = self.inner.read().await.contains_key(&agent_id);
+        if should_send && online {
+            let _ = self
+                .send(
+                    agent_id,
+                    ChannelMessage {
+                        kind: Some(Kind::LogSubscribe(LogSubscribe {
+                            job_id: job_id.to_string(),
+                            attempt,
+                            from_seq: effective_from,
+                        })),
+                    },
+                )
+                .await;
+        }
+        (rx, online, initial)
+    }
+
+    /// 观看者离开；最后一名离开时取消 Agent 上游订阅。
+    pub async fn unsubscribe_log(&self, agent_id: i64, job_id: &str, attempt: i32) {
+        let key = (agent_id, job_id.to_string(), attempt);
+        let remove = {
+            let mut streams = self.log_streams.write().await;
+            let Some(state) = streams.get_mut(&key) else {
+                return;
+            };
+            if state.viewers <= 1 {
+                streams.remove(&key);
+                true
+            } else {
+                state.viewers -= 1;
+                false
+            }
+        };
+        if remove {
+            let _ = self
+                .send(
+                    agent_id,
+                    ChannelMessage {
+                        kind: Some(Kind::LogUnsubscribe(LogUnsubscribe {
+                            job_id: job_id.to_string(),
+                            attempt,
+                        })),
+                    },
+                )
+                .await;
+        }
+    }
+
+    /// 将 Agent 上行日志广播给当前观看者；不写 SQLite。
+    pub async fn publish_log_batch(&self, agent_id: i64, batch: LogBatch) {
+        let mut streams = self.log_streams.write().await;
+        if let Some(state) = streams.get_mut(&(agent_id, batch.job_id.clone(), batch.attempt)) {
+            if !batch.events.is_empty() {
+                state.history.push_back(batch.clone());
+                while state.history.len() > 256 {
+                    state.history.pop_front();
+                }
+            }
+            let _ = state.tx.send(batch);
+        }
+    }
+
+    /// Agent 握手是否声明 ADR-0027 按需日志能力。
+    pub async fn supports_log_subscribe(&self, agent_id: i64) -> bool {
+        self.capabilities
+            .read()
+            .await
+            .get(&agent_id)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// SSE 检测到 broadcast 丢帧时请求从当前游标回放；仍复用同一上游订阅。
+    pub async fn request_log_replay(
+        &self,
+        agent_id: i64,
+        job_id: &str,
+        attempt: i32,
+        from_seq: u64,
+    ) {
+        let key = (agent_id, job_id.to_string(), attempt);
+        let should_send = {
+            let mut streams = self.log_streams.write().await;
+            let Some(state) = streams.get_mut(&key) else {
+                return;
+            };
+            state.from_seq = state.from_seq.min(from_seq);
+            state.viewers > 0
+        };
+        if should_send {
+            let _ = self
+                .send(
+                    agent_id,
+                    ChannelMessage {
+                        kind: Some(Kind::LogSubscribe(LogSubscribe {
+                            job_id: job_id.to_string(),
+                            attempt,
+                            from_seq,
+                        })),
+                    },
+                )
+                .await;
         }
     }
 }
@@ -407,6 +640,11 @@ impl AgentChannel for AgentChannelService {
         let token_hash = token_hash(&token);
         let labels_json = system_labels_from_metadata(request.metadata());
 
+        let supports_log_subscribe = request
+            .metadata()
+            .get(META_LOG_SUBSCRIBE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
         let mut inbound = request.into_inner();
 
         // 首帧必须是握手（含 Agent 版本号；B1 语义保留）。
@@ -479,7 +717,9 @@ impl AgentChannel for AgentChannelService {
 
         let (tx, rx) = mpsc::channel(SESSION_TX_CAPACITY);
         // 会话注册：JobSpec/CancelBuild 的下发目的地（重连覆盖旧会话）。
-        self.sessions.register(agent.id, tx.clone()).await;
+        self.sessions
+            .register(agent.id, tx.clone(), supports_log_subscribe)
+            .await;
         // 在线事件（sched 据此匹配等待中的任务）。
         self.state.bus.publish(Event::AgentOnline {
             agent_id: agent.id,
@@ -529,7 +769,7 @@ async fn session_loop(
     tx: mpsc::Sender<Result<ChannelMessage, Status>>,
 ) {
     if tx.send(Ok(handshake_reply)).await.is_err() {
-        sessions.unregister(agent_id).await;
+        sessions.unregister(agent_id, &tx).await;
         crate::metrics::record_grpc_disconnect("handshake_fail");
         return; // 对端已断开，会话无意义
     }
@@ -689,7 +929,7 @@ async fn session_loop(
             }
         }
     }
-    sessions.unregister(agent_id).await;
+    sessions.unregister(agent_id, &tx).await;
 }
 
 /// proto `UpgradePhase` → 升级阶段字符串（落库 `agents.upgrade_phase`）。
@@ -813,10 +1053,9 @@ fn system_labels_from_metadata(metadata: &MetadataMap) -> String {
     serde_json::to_string(&labels).expect("系统标签 JSON 序列化恒可成功（纯字符串）")
 }
 
-/// proto LogBatch 落库：任务行校验（存在 + 归属本 Agent——与 on_job_status
-/// 同纪律，不越权写他人任务日志）→ proto 事件映射为 server 日志事件模型 →
-/// 编码 gzip chunk → [`LogStore::append`]（按 start_seq 幂等，断线补传不重
-/// 不乱序）→ 广播 [`Event::LogAppended`]（SSE 尾随热通知）。
+/// proto LogBatch 直播转发：任务行校验（存在 + 归属本 Agent——与
+/// on_job_status 同纪律，不越权读取）→ 广播给当前观看者。新任务的直播正文
+/// 不写 SQLite；终态归档与旧 SQLite 读取分别由归档/兼容路径提供。
 async fn handle_log_batch(
     state: &AppState,
     agent_id: i64,
@@ -842,14 +1081,23 @@ async fn handle_log_batch(
     if events.is_empty() {
         return Ok(());
     }
-    let loc = crate::logs::location(job.build_id, job_id, batch.attempt);
-    let chunk = crate::logs::encode_chunk(&events);
-    state.logs.append(loc, vec![chunk]).await?;
-    state.bus.publish(Event::LogAppended {
-        build_id: job.build_id,
-        job_id,
-        attempt: batch.attempt,
-    });
+    if state.agent_sessions.supports_log_subscribe(agent_id).await {
+        state
+            .agent_sessions
+            .publish_log_batch(agent_id, batch)
+            .await;
+    } else {
+        // N-1 兼容：旧 Agent 未声明按需能力，保持既有 SQLite 正文写入，
+        // 让旧构建与旧客户端继续可回放；新 Agent 完全不走此分支。
+        let loc = crate::logs::location(job.build_id, job_id, batch.attempt);
+        let chunk = crate::logs::encode_chunk(&events);
+        state.logs.append(loc, vec![chunk]).await?;
+        state.bus.publish(Event::LogAppended {
+            build_id: job.build_id,
+            job_id,
+            attempt: batch.attempt,
+        });
+    }
     Ok(())
 }
 
@@ -861,7 +1109,7 @@ async fn handle_log_batch(
 /// - `Truncated` → 截断标记（limit_bytes 取全局默认上限；dropped_bytes
 ///   随行携带作信息面）；
 /// - 契约未知 kind（None）跳过——演进只加字段，旧事件形态不炸。
-fn log_events_from_proto(
+pub(crate) fn log_events_from_proto(
     batch: &sisyphus_proto::agent::LogBatch,
 ) -> Vec<crate::logs::LogStreamEvent> {
     use sisyphus_proto::agent::Stream;
@@ -926,6 +1174,7 @@ fn disk_usage_json(disk: DiskUsage) -> String {
 mod tests {
     use super::*;
     use sisyphus_proto::version;
+    use tokio::sync::mpsc;
 
     fn v(major: u32, minor: u32, patch: u32) -> Version {
         Version {
@@ -1002,6 +1251,45 @@ mod tests {
             r#"{"volumes":[{"mount_point":"/","total_bytes":100,"free_bytes":40}],"cache_bytes":5,"workspace_bytes":10}"#,
             "与落库形态（AgentDiskUsage）同构"
         );
+    }
+
+    #[tokio::test]
+    async fn log_watchers_share_one_upstream_and_unsubscribe_on_last_leave() {
+        let sessions = SessionRegistry::new();
+        let (tx, mut outbound) = mpsc::channel(8);
+        sessions.register(7, tx, true).await;
+
+        let (mut first, online, initial) = sessions.subscribe_log(7, "42", 1, 0).await;
+        assert!(online);
+        assert!(initial.is_empty());
+        let subscribe = outbound.recv().await.expect("首名观看者触发订阅");
+        assert!(matches!(
+            subscribe.unwrap().kind,
+            Some(Kind::LogSubscribe(_))
+        ));
+
+        let (mut second, _, initial) = sessions.subscribe_log(7, "42", 1, 0).await;
+        assert!(initial.is_empty());
+        assert!(outbound.try_recv().is_err(), "第二名观看者复用上游");
+
+        let batch = LogBatch {
+            job_id: "42".into(),
+            attempt: 1,
+            start_seq: 0,
+            events: vec![],
+        };
+        sessions.publish_log_batch(7, batch.clone()).await;
+        assert_eq!(first.recv().await.expect("第一名收帧"), batch);
+        assert_eq!(second.recv().await.expect("第二名收帧"), batch);
+
+        sessions.unsubscribe_log(7, "42", 1).await;
+        assert!(outbound.try_recv().is_err(), "仍有观看者不退订");
+        sessions.unsubscribe_log(7, "42", 1).await;
+        let unsubscribe = outbound.recv().await.expect("最后一名离开触发退订");
+        assert!(matches!(
+            unsubscribe.unwrap().kind,
+            Some(Kind::LogUnsubscribe(_))
+        ));
     }
 
     #[test]

@@ -1,14 +1,14 @@
 //! 日志 REST 端点（票 #73 / B5-T1，ADR-0013）：SSE 回放+尾随 / 整份下载。
 //!
 //! - **SSE 端点**（viewer 档）：`GET .../logs/stream?from=<seq>`（缺省 0）。
-//!   先从 DB 补历史、再接事件总线实时尾随；浏览器原生 EventSource 断线
+//!   先从 DB/Agent 热历史补历史、再接事件总线和 Agent 实时尾随；浏览器原生 EventSource 断线
 //!   自动重连带 `Last-Event-ID`（即 seq）原地续传——header 优先于 `from`
 //!   query（重连 URL 仍携原始 from，header 才是游标真相）。流元素带类型
 //!   （输出块带 stream 标记 + 步骤生命周期事件），SSE 命名事件（`event:
 //!   <type>`）+ `id: <seq>` 承载续传游标，契约与前端 `sse.ts` 逐字对齐。
 //!   任务终态事件（job_end，自 jobs 行状态合成——proto 日志流不含终态）
-//!   送达并 flush 后关流。广播可丢：尾随收到 [`Event::LogAppended`] 后从
-//!   DB 游标重放（Lagged 亦自愈），DB 是真相源（ADR-0005 重放兜底）。
+//!   送达并 flush 后关流。旧 SQLite 广播可丢时从 DB 游标重放；新 Agent 直播
+//!   按 seq 请求本地回放，DB 不持续保存直播正文。
 //! - **整份下载**（viewer 档）：同资源 `GET .../logs`（text/plain；全部
 //!   chunk 解压拼接为纯文本渲染：输出原样含 ANSI、步骤回显 `$ <命令>`）。
 //!
@@ -33,6 +33,7 @@ use super::error::{ApiError, ErrorBody, ValidationIssue};
 use super::policy::RequireViewer;
 use crate::api::artifacts::AgentAuth;
 use crate::events::Event;
+use crate::grpc::log_events_from_proto;
 use crate::logs::{self, JobEndEvent, LogStreamEvent};
 use crate::store::ArchiveIndex;
 use crate::store::LogLocation;
@@ -40,6 +41,7 @@ use crate::store::LogStore;
 use crate::store::builds::BuildRow;
 use crate::store::jobs::{JobRepo, JobRow};
 use futures::StreamExt;
+use sisyphus_proto::agent::LogBatch;
 use tokio::io::AsyncWriteExt;
 
 /// SSE 尾随状态机（`futures::stream::unfold` 的折叠态）。
@@ -50,6 +52,16 @@ struct LogTail {
     loc: LogLocation,
     /// 事件总线接收器（订阅先于历史读取——历史读完后无漏窗）。
     rx: tokio::sync::broadcast::Receiver<Event>,
+    /// Agent 按需直播上游；Server 只在至少一名观看者时创建/复用它。
+    live_rx: tokio::sync::broadcast::Receiver<LogBatch>,
+    /// Server 小型热历史窗口，在浏览器重连时不必重新建立第二条上游订阅。
+    live_queue: VecDeque<LogBatch>,
+    agent_id: Option<i64>,
+    attempt: i32,
+    /// Agent 当前离线时先发一次明确的不可用事件；重连后的自动订阅仍可
+    /// 继续把日志送到同一 SSE 流。
+    unavailable_pending: bool,
+    _subscription: Option<LogSubscriptionGuard>,
     /// 下一待发 seq（from / Last-Event-ID+1 起，随发随推进）。
     cursor: u64,
     /// 已解码待发的事件队列（DB 一批读出逐条发）。
@@ -62,7 +74,63 @@ struct LogTail {
     check_terminal: bool,
 }
 
+/// SSE 状态机销毁时退订 Agent；正常终态与浏览器主动关闭都会触发 Drop。
+struct LogSubscriptionGuard {
+    sessions: std::sync::Arc<crate::grpc::SessionRegistry>,
+    agent_id: i64,
+    job_id: String,
+    attempt: i32,
+}
+
+impl Drop for LogSubscriptionGuard {
+    fn drop(&mut self) {
+        let sessions = self.sessions.clone();
+        let agent_id = self.agent_id;
+        let job_id = self.job_id.clone();
+        let attempt = self.attempt;
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                sessions.unsubscribe_log(agent_id, &job_id, attempt).await;
+            });
+        }
+    }
+}
+
 impl LogTail {
+    /// 把 Agent 直播帧按 SSE 游标入队；空帧是 Server 内部的 Agent 离线哨兵。
+    fn enqueue_live_batch(&mut self, batch: LogBatch) -> Option<u64> {
+        if batch.events.is_empty() {
+            self.unavailable_pending = true;
+            return None;
+        }
+        // Agent 的非阻塞上行可能丢掉邮箱已满时的热帧。先验证原始 seq
+        // 连续性；发现缺口时丢弃当前帧并让调用方从游标请求一次本地回放，
+        // 避免把后续帧提前送给浏览器而永久跳过缺失内容。
+        for event in batch.events {
+            if event.seq < self.cursor {
+                continue;
+            }
+            if event.seq > self.cursor {
+                return Some(self.cursor);
+            }
+            let single = LogBatch {
+                job_id: batch.job_id.clone(),
+                attempt: batch.attempt,
+                start_seq: event.seq,
+                events: vec![event.clone()],
+            };
+            for event in log_events_from_proto(&single) {
+                let seq = event.seq();
+                self.queue.push_back(sse_event(&event));
+                self.cursor = seq.saturating_add(1);
+            }
+            // 未知的未来事件类型也占用 seq；游标必须前移，否则每次重连都会
+            // 对同一未知帧反复请求回放。
+            self.cursor = self.cursor.max(event.seq.saturating_add(1));
+        }
+        None
+    }
+
     /// 从 DB 自游标重读并解码入队；返回新读到的条数。读失败记日志按空
     /// 处理（下一轮总线事件再试——不炸流）。损坏 chunk 跳过（解码层）。
     async fn drain_db(&mut self) -> usize {
@@ -222,6 +290,14 @@ pub(crate) struct ArchiveUploadResponse {
     pub state: String,
 }
 
+/// Agent 离线且尚未有可读归档时的明确 SSE 状态事件。
+#[derive(Debug, serde::Serialize)]
+struct LogUnavailableEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    reason: String,
+}
+
 /// SSE 日志流端点（viewer 档，ADR-0013）：`from` 起播先补 DB 历史、再接
 /// 事件总线尾随；`Last-Event-ID`（原生 EventSource 断线重连自动携带）即
 /// seq 游标，续传自 id+1 起。任务终态送达并 flush 后关流。
@@ -262,13 +338,39 @@ pub async fn stream(
         None => parse_seq(query.from.as_deref(), "from")?,
     };
 
-    // 订阅先于历史读取（窗口无漏）：订阅后发生的迁移必经总线（或 Lagged
-    // 自愈重读）；订阅前的终态由首轮 check_terminal 从行状态捕获。
+    // 订阅 Agent 先于历史读取（窗口无漏）：首名观看者触发一次上游订阅，
+    // 后续浏览器复用同一 broadcast；Agent 离线时保留观看者状态供重连恢复。
     let rx = state.bus.subscribe();
+    let (live_rx, online, initial, subscription) = if let Some(agent_id) = job.agent_id {
+        let (live_rx, online, initial) = state
+            .agent_sessions
+            .subscribe_log(agent_id, &job.id.to_string(), attempt, from)
+            .await;
+        (
+            live_rx,
+            online,
+            initial,
+            Some(LogSubscriptionGuard {
+                sessions: state.agent_sessions.clone(),
+                agent_id,
+                job_id: job.id.to_string(),
+                attempt,
+            }),
+        )
+    } else {
+        let (_, live_rx) = tokio::sync::broadcast::channel(1);
+        (live_rx, false, Vec::new(), None)
+    };
     let tail = LogTail {
         state: state.clone(),
         loc: logs::location(build.id, job.id, attempt),
         rx,
+        live_rx,
+        live_queue: initial.into(),
+        agent_id: job.agent_id,
+        attempt,
+        unavailable_pending: job.agent_id.is_some() && !online && !job.status.is_terminal(),
+        _subscription: subscription,
         cursor: from,
         queue: VecDeque::new(),
         done: false,
@@ -293,6 +395,22 @@ pub async fn stream(
                     continue; // 历史有货：先发
                 }
             }
+            if let Some(batch) = tail.live_queue.pop_front() {
+                if let Some(from_seq) = tail.enqueue_live_batch(batch)
+                    && let Some(agent_id) = tail.agent_id
+                {
+                    tail.state
+                        .agent_sessions
+                        .request_log_replay(
+                            agent_id,
+                            &tail.loc.job_id.to_string(),
+                            tail.attempt,
+                            from_seq,
+                        )
+                        .await;
+                }
+                continue;
+            }
             if tail.check_terminal {
                 tail.check_terminal = false;
                 tail.check_terminal().await;
@@ -300,23 +418,59 @@ pub async fn stream(
                     continue; // job_end 入队：发完关流
                 }
             }
-            // 无新事件：尾随等总线（可丢热通知——丢了靠下一轮 DB 重读）。
-            match tail.rx.recv().await {
-                Ok(Event::LogAppended { job_id, .. }) if job_id == tail.loc.job_id => {
-                    tail.reread = true;
+            if tail.unavailable_pending {
+                tail.unavailable_pending = false;
+                let event = LogUnavailableEvent {
+                    kind: "log_unavailable".into(),
+                    reason: "agent_offline".into(),
+                };
+                tail.queue.push_back(sse_unavailable(&event));
+                continue;
+            }
+            // 两条热路径并行等待：任务状态由事件总线驱动，正文由 Agent
+            // broadcast 驱动。任一路丢帧都按 seq 请求 Agent 回放。
+            tokio::select! {
+                live = tail.live_rx.recv() => match live {
+                    Ok(batch) => {
+                        if let Some(from_seq) = tail.enqueue_live_batch(batch)
+                            && let Some(agent_id) = tail.agent_id
+                        {
+                            tail.state.agent_sessions.request_log_replay(
+                                agent_id,
+                                &tail.loc.job_id.to_string(),
+                                tail.attempt,
+                                from_seq,
+                            ).await;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if let Some(agent_id) = tail.agent_id {
+                            tail.state.agent_sessions.request_log_replay(
+                                agent_id,
+                                &tail.loc.job_id.to_string(),
+                                tail.attempt,
+                                tail.cursor,
+                            ).await;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                },
+                event = tail.rx.recv() => match event {
+                    Ok(Event::LogAppended { job_id, .. }) if job_id == tail.loc.job_id => {
+                        // 旧 Agent 兼容面仍把 LogBatch 写入 SQLite；新 Agent
+                        // 直播正文走 live_rx，不产生该事件。
+                        tail.reread = true;
+                    }
+                    Ok(Event::JobStatus { job_id, .. }) if job_id == tail.loc.job_id => {
+                        tail.reread = true;
+                        tail.check_terminal = true;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        tail.check_terminal = true;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    _ => {}
                 }
-                Ok(Event::JobStatus { job_id, .. }) if job_id == tail.loc.job_id => {
-                    tail.reread = true;
-                    tail.check_terminal = true;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    // 慢消费丢中间消息：从游标重读 DB 自愈（真相源兜底）。
-                    tail.reread = true;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return None; // 总线关闭（进程关闭）：关流
-                }
-                Ok(_) => {} // 无关事件（其它任务/构建/Agent 面）：继续等
             }
         }
     });
@@ -484,6 +638,13 @@ fn sse_job_end(end: &JobEndEvent) -> SseEvent {
         .id(end.seq.to_string())
         .json_data(end)
         .expect("job_end JSON 恒可序列化")
+}
+
+fn sse_unavailable(event: &LogUnavailableEvent) -> SseEvent {
+    SseEvent::default()
+        .event("log_unavailable")
+        .json_data(event)
+        .expect("日志不可用事件 JSON 恒可序列化")
 }
 
 #[cfg(test)]

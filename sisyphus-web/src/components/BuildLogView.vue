@@ -164,6 +164,12 @@ onBeforeUnmount(() => {
       {{ t('buildLog.degraded') }}
     </div>
 
+    <!-- 运行中 Agent 离线且终态归档尚未就绪；保持 SSE 观看者，Agent 重连后
+         会从当前 seq 继续回放。 -->
+    <div v-else-if="connectionStatus === 'unavailable'" class="state-note" role="status">
+      {{ t('buildLog.agentUnavailable') }}
+    </div>
+
     <!-- 连接中/重连中：轻提示（重连为原生 EventSource 自动行为，携
          Last-Event-ID 续传，ADR-0013）。 -->
     <div
