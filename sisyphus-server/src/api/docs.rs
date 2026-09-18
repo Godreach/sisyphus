@@ -12,6 +12,7 @@ use super::builds;
 use super::consistency;
 use super::deletions;
 use super::error::{ErrorBody, ValidationIssue};
+use super::favorites;
 use super::health;
 use super::logs;
 use super::members;
@@ -52,6 +53,9 @@ use super::users;
         tokens::list,
         tokens::create,
         tokens::revoke,
+        favorites::list,
+        favorites::add,
+        favorites::remove,
         projects::list,
         projects::create,
         projects::get_one,
@@ -146,6 +150,8 @@ use super::users;
         tokens::CreateTokenRequest,
         tokens::TokenResponse,
         tokens::CreatedTokenResponse,
+        favorites::FavoriteLatestBuildResponse,
+        favorites::PipelineFavoriteResponse,
         projects::ScmTypeDto,
         projects::ListProjectsPermission,
         projects::CreateProjectRequest,
@@ -267,6 +273,7 @@ use super::users;
         (name = "scm", description = "SCM 探测 / 测试连接 / 分支枚举 / 凭据管理（票 B5-T3，ADR-0016：git ls-remote / svn info + ASKPASS 凭据递送，凭据不回显）"),
         (name = "secrets", description = "项目机密（票 B2b-T6：值只写不读——建/覆写、仅名清单、删；viewer/runner 连名不可见，项目 admin 档）"),
         (name = "pipelines", description = "Pipeline 定义读写、跨项目清单与构建统计"),
+        (name = "favorites", description = "当前用户的流水线收藏（列出 / 收藏 / 取消收藏；按用户隔离并关联最新真实构建）"),
         (name = "builds", description = "构建生命周期（票 B2c-T5：手动触发 / 取消 / 重跑 / 列表 / 详情；runner 档触发/取消/重跑、viewer 档列表/详情）"),
         (name = "artifacts", description = "产物链路（票 #74，ADR-0004/0007：Agent token 鉴权的上传/依赖拉取 + viewer 档的构建产物列表/流式下载）"),
         (name = "triggers", description = "触发器管理（票 B2c-T6，ADR-0016：cron / poll 触发源 CRUD；项目 admin 档——列/建/改配置与启停；触发历史经 builds 行呈现）"),

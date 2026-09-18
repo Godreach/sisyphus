@@ -16,6 +16,7 @@ pub mod builds;
 pub mod cleanup;
 pub mod consistency;
 pub mod deletions;
+pub mod favorites;
 pub mod jobs;
 mod log_archives;
 pub mod logs;
@@ -341,6 +342,7 @@ mod tests {
         // 模拟旧库升级：抹掉迁移标记与业务表，使下一次 bootstrap 见到待应用迁移。
         let pool = open_raw_pool_for_test(dir.path()).await;
         for stmt in [
+            "DROP TABLE pipeline_favorites",
             "DROP TABLE agent_log_buffers",
             "DROP TABLE log_archive_publish_candidates",
             "DROP TABLE log_archives",

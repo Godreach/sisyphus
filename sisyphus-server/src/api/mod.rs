@@ -32,6 +32,7 @@ pub mod csrf;
 pub mod deletions;
 pub mod docs;
 pub mod error;
+pub mod favorites;
 pub mod health;
 pub mod log_archives;
 pub mod logs;
@@ -79,6 +80,7 @@ use crate::store::SqliteLogStore;
 use crate::store::agents::AgentRepo;
 use crate::store::artifacts::{LocalDiskArtifactStore, SqliteArtifactMetaRepo};
 use crate::store::audit::AuditRepo;
+use crate::store::favorites::FavoriteRepo;
 use crate::store::members::MemberRepo;
 use crate::store::pipelines::PipelineRepo;
 use crate::store::projects::ProjectRepo;
@@ -108,6 +110,8 @@ pub struct AppState {
     pub sessions: SessionRepo,
     /// PAT repo（认证面 + 管理端点，票 B2b-T3）。
     pub pats: PatRepo,
+    /// 当前用户的流水线收藏 repo（票 #137）。
+    pub favorites: FavoriteRepo,
     /// 项目成员 repo（授权面 + 成员管理端点，票 B2b-T5）。
     pub members: MemberRepo,
     /// 项目机密 repo（票 B2b-T6：建/覆写/列名/删，值只写不读）。
@@ -214,6 +218,7 @@ impl AppState {
             users: UserRepo::new(pool.clone()),
             sessions: SessionRepo::new(pool.clone()),
             pats: PatRepo::new(pool.clone()),
+            favorites: FavoriteRepo::new(pool.clone()),
             members: MemberRepo::new(pool.clone()),
             secrets: SecretRepo::new(pool.clone()),
             scm_credentials: ScmCredentialRepo::new(pool.clone()),
@@ -375,6 +380,11 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route("/auth/password", post(auth::change_password))
         .route("/auth/tokens", get(tokens::list).post(tokens::create))
         .route("/auth/tokens/{id}", delete(tokens::revoke))
+        .route("/user/pipeline-favorites", get(favorites::list))
+        .route(
+            "/user/pipeline-favorites/{name}/{pipeline}",
+            put(favorites::add).delete(favorites::remove),
+        )
         .route("/users", get(users::list).post(users::create))
         .route("/users/directory", get(users::directory))
         .route("/users/{name}", patch(users::patch))

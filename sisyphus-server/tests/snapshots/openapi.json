@@ -5972,6 +5972,146 @@
         }
       }
     },
+    "/api/v1/user/pipeline-favorites": {
+      "get": {
+        "tags": [
+          "favorites"
+        ],
+        "summary": "列出当前用户收藏的流水线。",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "当前用户可见的收藏清单（收藏时间倒序，内嵌最新真实构建）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PipelineFavoriteResponse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/user/pipeline-favorites/{name}/{pipeline}": {
+      "put": {
+        "tags": [
+          "favorites"
+        ],
+        "summary": "收藏已存在的流水线。",
+        "operationId": "add",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "流水线名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "收藏成功；重复收藏同样成功"
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "流水线不存在或调用者不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "favorites"
+        ],
+        "summary": "取消收藏；未收藏时同样成功。",
+        "operationId": "remove",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "项目名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "path",
+            "description": "流水线名",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "取消成功；未收藏时同样成功"
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "流水线不存在或调用者不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/users": {
       "get": {
         "tags": [
@@ -8282,6 +8422,41 @@
           }
         }
       },
+      "FavoriteLatestBuildResponse": {
+        "type": "object",
+        "description": "收藏条目内嵌的最近构建摘要。",
+        "required": [
+          "number",
+          "status"
+        ],
+        "properties": {
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "终态时刻（Unix 毫秒）。"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64",
+            "description": "per-pipeline 构建号。"
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "开始时刻（Unix 毫秒）。"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BuildStatusDto",
+            "description": "构建状态。"
+          }
+        }
+      },
       "Healthz": {
         "type": "object",
         "description": "`/healthz` 响应体。",
@@ -8747,6 +8922,41 @@
             "type": "integer",
             "format": "int64",
             "description": "最后保存时间（Unix 毫秒）。"
+          }
+        }
+      },
+      "PipelineFavoriteResponse": {
+        "type": "object",
+        "description": "当前用户的一条流水线收藏。",
+        "required": [
+          "project",
+          "pipeline",
+          "added_at"
+        ],
+        "properties": {
+          "added_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "收藏时刻（Unix 毫秒）。"
+          },
+          "latest_build": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FavoriteLatestBuildResponse",
+                "description": "最近构建；从未运行为空。"
+              }
+            ]
+          },
+          "pipeline": {
+            "type": "string",
+            "description": "流水线名。"
+          },
+          "project": {
+            "type": "string",
+            "description": "项目名。"
           }
         }
       },
@@ -9982,6 +10192,10 @@
     {
       "name": "pipelines",
       "description": "Pipeline 定义读写、跨项目清单与构建统计"
+    },
+    {
+      "name": "favorites",
+      "description": "当前用户的流水线收藏（列出 / 收藏 / 取消收藏；按用户隔离并关联最新真实构建）"
     },
     {
       "name": "builds",
