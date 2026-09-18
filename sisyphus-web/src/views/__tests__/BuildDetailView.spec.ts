@@ -253,6 +253,13 @@ describe('BuildDetailView（#107 定稿：阶段/任务卡 + 动作闭环 + SSE 
     expect(wrapper!.get('.artifact-set a').attributes('href')).toContain('path=nested%2Fapp.txt')
   })
 
+  it('demo 模式默认 handler 提供非空产物集，而非永远空列表', async () => {
+    mountView()
+    await vi.waitFor(() => expect(wrapper!.findAll('.artifact-set').length).toBeGreaterThan(0))
+
+    expect(wrapper!.text()).toContain('产物集')
+  })
+
   it('终态构建可确认删除整个产物集，受理后该组立即从列表消失', async () => {
     mockDetail(buildDetailBody({ status: 'succeeded', finished_at: 1_700_000_010_000 }))
     mockDefinitionAndArtifacts()
@@ -284,6 +291,33 @@ describe('BuildDetailView（#107 定稿：阶段/任务卡 + 动作闭环 + SSE 
 
     await vi.waitFor(() => expect(wrapper!.findAll('.artifact-set')).toHaveLength(0))
     expect(requests).toContain(`DELETE ${BASE}/builds/7/artifact-sets/41`)
+  })
+
+  it.each([
+    { status: 409, expected: '构建仍在运行或排队' },
+    { status: 403, expected: '需要项目管理员权限' },
+  ])('产物集删除 $status 错误显示对应反馈，不误报为重跑冲突', async ({ status, expected }) => {
+    mockDetail(buildDetailBody({ status: 'succeeded', finished_at: 1_700_000_010_000 }))
+    mockDefinitionAndArtifacts()
+    server.use(
+      http.get(`${BASE}/builds/7/artifact-sets`, () => HttpResponse.json({
+        items: [{
+          set: { id: 42, build_id: 7, job_id: 11, attempt: 1, name: 'compile-dir', state: 'ready', created_at: 1 },
+          availability: 'ready',
+          entries: [{ path: 'app.bin', kind: 'file', size: 3, sha256: 'c'.repeat(64), executable: false, artifact_name: '.set-42-app.bin', state: 'ready' }],
+        }],
+      })),
+      http.delete(`${BASE}/builds/7/artifact-sets/42`, () =>
+        HttpResponse.json({ code: status === 409 ? 'CONFLICT' : 'FORBIDDEN', message: '拒绝' }, { status }),
+      ),
+    )
+    mountView()
+    await vi.waitFor(() => expect(wrapper!.find('[data-testid="delete-artifact-set-42"]').exists()).toBe(true))
+    await wrapper!.get('[data-testid="delete-artifact-set-42"]').trigger('click')
+    await vi.waitFor(() => expect(document.querySelector('.n-popconfirm__action')).toBeTruthy())
+    const actions = document.querySelectorAll('.n-popconfirm__action button')
+    await (actions[actions.length - 1] as HTMLElement).click()
+    await vi.waitFor(() => expect(document.querySelector('.n-message')?.textContent).toContain(expected))
   })
 
   it('排队任务 attempt 历史（attempt>1 标注并列）', async () => {

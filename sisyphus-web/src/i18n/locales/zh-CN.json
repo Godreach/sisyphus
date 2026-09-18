@@ -408,8 +408,11 @@
     "artifactSetDelete": "删除产物集",
     "artifactSetDeleteConfirm": "确认删除整个产物集 {name}？不能只删除其中单个文件。",
     "artifactSetDeleteQueued": "产物集已进入异步删除。",
+    "artifactSetDeleteConflict": "产物集删除被拒绝（409）：构建仍在运行或排队。",
+    "artifactSetDeleteForbidden": "无权删除产物集（403）：需要项目管理员权限。",
     "artifactState": {
       "ready": "可下载",
+      "pending": "上传中",
       "missing": "正文缺失",
       "unavailable": "存储后端不可用"
     },

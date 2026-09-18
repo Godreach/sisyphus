@@ -21,6 +21,7 @@ import type {
   BuildSummaryResponse,
   CreatedAgentResponse,
   CreateProjectRequest,
+  DeletionJobResponse,
   MemberAssignment,
   ProjectResponse,
   ScmBranchesRequest,
@@ -881,7 +882,90 @@ export function createHandlers(options: MockHandlerOptions) {
 
     artifactSets: http.get(
       '/api/v1/projects/:name/pipelines/:pipeline/builds/:number/artifact-sets',
-      ({ request }) => guard(options, request) ?? HttpResponse.json({ items: [] }),
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const name = String(params.name)
+        const pipeline = String(params.pipeline)
+        const number = Number(params.number)
+        await delay(120)
+        if (isErrorFixture(name)) {
+          return jsonError(500, 'INTERNAL', '服务内部错误（mock 错误态演示）')
+        }
+        if (db.buildSummaryAt(name, pipeline, number) == null) {
+          return jsonError(404, 'NOT_FOUND', '构建不存在')
+        }
+        return HttpResponse.json({ items: db.artifactSetsOf(name, pipeline, number) })
+      },
+    ),
+
+    artifactSetDelete: http.delete(
+      '/api/v1/projects/:name/pipelines/:pipeline/builds/:number/artifact-sets/:setId',
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const name = String(params.name)
+        const pipeline = String(params.pipeline)
+        const number = Number(params.number)
+        const setId = Number(params.setId)
+        const adminDenied = projectAdminGuard(sessionUser(request) ?? 'admin', name)
+        if (adminDenied != null) return adminDenied
+        await delay(120)
+        const build = db.buildSummaryAt(name, pipeline, number)
+        if (build == null) return jsonError(404, 'NOT_FOUND', '构建不存在')
+        if (build.status === 'queued' || build.status === 'running') {
+          return jsonError(409, 'CONFLICT', '构建运行中/排队中，不可删除产物集')
+        }
+        if (!db.deleteArtifactSet(name, pipeline, number, setId)) {
+          return jsonError(404, 'NOT_FOUND', '产物集不存在')
+        }
+        const now = Date.now()
+        const projectId = db.PROJECTS.find((project) => project.name === name)?.id ?? 0
+        return HttpResponse.json(
+          {
+            id: 1_000_000 + setId,
+            project_id: projectId,
+            project_name: name,
+            scope: 'set',
+            state: 'queued',
+            pipeline_name: pipeline,
+            build_number: number,
+            set_id: setId,
+            attempts: 0,
+            last_error: null,
+            created_at: now,
+            updated_at: now,
+          } satisfies DeletionJobResponse,
+          { status: 202 },
+        )
+      },
+    ),
+
+    artifactSetFile: http.get(
+      '/api/v1/projects/:name/pipelines/:pipeline/builds/:number/artifact-sets/:setId/file',
+      ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const name = String(params.name)
+        const pipeline = String(params.pipeline)
+        const number = Number(params.number)
+        const setId = Number(params.setId)
+        const set = db.artifactSetOf(name, pipeline, number, setId)
+        if (set == null) return jsonError(404, 'NOT_FOUND', '产物集不存在')
+        if (set.set.state !== 'ready') return jsonError(404, 'NOT_FOUND', '产物集不存在')
+        const path = new URL(request.url).searchParams.get('path')
+        const entry = set.entries.find((candidate) => candidate.path === path)
+        if (entry == null || entry.kind !== 'file') return jsonError(404, 'NOT_FOUND', '产物文件不存在')
+        if (entry.state !== 'ready') return jsonError(409, 'CONFLICT', '产物正文尚未就绪')
+        const filename = entry.path.split('/').pop() ?? 'artifact.bin'
+        return new HttpResponse(`demo artifact set ${setId}: ${entry.path}\n`, {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Disposition': `attachment; filename="${filename}"`,
+          },
+        })
+      },
     ),
 
     artifacts: http.get(

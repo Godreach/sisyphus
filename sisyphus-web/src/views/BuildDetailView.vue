@@ -237,7 +237,13 @@ async function deleteArtifactSet(setId: number): Promise<void> {
     await store.removeArtifactSet(project.value, pipeline.value, buildNumber.value, setId)
     message.success(t('buildDetail.artifactSetDeleteQueued'))
   } catch (err) {
-    message.error(describeActionError(err))
+    const messageKey =
+      err instanceof ApiError && err.status === 409
+        ? 'buildDetail.artifactSetDeleteConflict'
+        : err instanceof ApiError && err.status === 403
+          ? 'buildDetail.artifactSetDeleteForbidden'
+          : null
+    message.error(messageKey == null ? describeActionError(err) : t(messageKey))
   } finally {
     deletingSetId.value = null
   }
@@ -589,7 +595,7 @@ function paramControl(p: { name: string; type: 'string' | 'number' | 'bool' | 'e
                 </template>
               </div>
               <div v-for="set in store.artifactSets.filter((s) => s.set.job_id === job.id && s.set.attempt === job.attempt)" :key="set.set.id" class="job-artifacts artifact-set">
-                <span class="job-artifacts-label">{{ set.set.name }}: {{ t(`buildDetail.artifactState.${set.availability}`) }}</span>
+                <span class="job-artifacts-label">{{ set.set.name }}: {{ t(`buildDetail.artifactState.${set.set.state === 'pending' ? 'pending' : set.availability}`) }}</span>
                 <template v-for="entry in set.entries" :key="entry.path">
                   <a v-if="entry.kind === 'file' && entry.state === 'ready'" class="btn-outline blue artifact-link" :href="artifactsApi.setFileUrl(project, pipeline, buildNumber, set.set.id, entry.path)" :download="entry.path.split('/').pop()">
                     {{ entry.path }} <span class="artifact-size">{{ formatBytes(entry.size) }}</span>

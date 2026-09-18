@@ -199,6 +199,10 @@ export const useBuildDetailStore = defineStore('buildDetail', () => {
     setId: number,
   ): Promise<void> {
     await artifactsApi.removeSet(project, pipeline, number, setId)
+    // 202 只代表删除任务已入队；重新读取详情让页面与服务端的即时隐藏面
+    // 对齐（mock 与真实后端都在入队时从列表移除）。请求失败时仍保留本地
+    // 的即时隐藏，下一次进入页面会再次从服务端校准。
+    await refresh(project, pipeline, number)
     artifactSets.value = artifactSets.value.filter((item) => item.set.id !== setId)
   }
 

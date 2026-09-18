@@ -408,8 +408,11 @@
     "artifactSetDelete": "Delete artifact set",
     "artifactSetDeleteConfirm": "Delete the entire artifact set {name}? Individual files cannot be deleted.",
     "artifactSetDeleteQueued": "Artifact-set deletion queued.",
+    "artifactSetDeleteConflict": "Artifact-set deletion rejected (409): the build is queued or running.",
+    "artifactSetDeleteForbidden": "You cannot delete artifact sets (403): project admin access is required.",
     "artifactState": {
       "ready": "Available",
+      "pending": "Upload pending",
       "missing": "Content missing",
       "unavailable": "Storage unavailable"
     },

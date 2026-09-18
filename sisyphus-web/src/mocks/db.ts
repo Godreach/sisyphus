@@ -12,6 +12,7 @@
 import type {
   AgentResponse,
   ArtifactResponse,
+  ArtifactSetsResponse,
   AuditEventDto,
   BuildStatusDto,
   BuildSummaryResponse,
@@ -962,6 +963,102 @@ export function artifactsOf(project: string, pipeline: string, number: number): 
     }
   }
   return items
+}
+
+type ArtifactSetItem = ArtifactSetsResponse['items'][number]
+
+/** 已从 mock 可见面移除的目录产物集（异步删除 202 受理后的语义）。 */
+const DELETED_ARTIFACT_SETS = new Set<string>()
+
+function artifactSetRef(project: string, pipeline: string, number: number, setId: number): string {
+  return `${project}/${pipeline}#${number}/${setId}`
+}
+
+function artifactSetFixtureState(number: number, pending: boolean): {
+  state: ArtifactSetItem['set']['state']
+  availability: ArtifactSetItem['availability']
+  entryState: ArtifactSetItem['entries'][number]['state']
+} {
+  if (pending) {
+    return { state: 'pending', availability: 'unavailable', entryState: 'unavailable' }
+  }
+  switch (((number % 4) + 4) % 4) {
+    case 0:
+      return { state: 'ready', availability: 'ready', entryState: 'ready' }
+    case 1:
+      return { state: 'pending', availability: 'unavailable', entryState: 'unavailable' }
+    case 2:
+      return { state: 'ready', availability: 'missing', entryState: 'missing' }
+    default:
+      return { state: 'ready', availability: 'unavailable', entryState: 'unavailable' }
+  }
+}
+
+/** 构建详情的目录产物集 fixture：按构建号轮换全状态矩阵，保持演示可复现。 */
+export function artifactSetsOf(project: string, pipeline: string, number: number): ArtifactSetItem[] {
+  const detail = buildDetailOf(project, pipeline, number)
+  if (detail == null || findPipeline(project, pipeline) == null) return []
+
+  const packageJob = detail.stages
+    .flatMap((stage) => stage.jobs)
+    .find((job) => job.name === 'package' && job.attempt === detail.attempt)
+  if (packageJob == null) return []
+
+  const setId = number * 100 + 41
+  if (DELETED_ARTIFACT_SETS.has(artifactSetRef(project, pipeline, number, setId))) return []
+  const status = artifactSetFixtureState(
+    number,
+    packageJob.status === 'queued' || packageJob.status === 'running',
+  )
+  const path = 'dist/app-linux-amd64.tar.gz'
+  const sha256 = '0123456789abcdef'.repeat(4)
+  return [
+    {
+      set: {
+        id: setId,
+        build_id: number,
+        job_id: packageJob.id,
+        attempt: packageJob.attempt,
+        name: `package-output-${status.state === 'pending' ? 'pending' : status.availability}`,
+        state: status.state,
+        created_at: detail.finished_at ?? NOW,
+      },
+      availability: status.availability,
+      entries: [
+        {
+          path,
+          kind: 'file',
+          size: 4096,
+          sha256,
+          executable: false,
+          artifact_name: status.entryState === 'ready' ? `.set-${setId}-app-linux-amd64.tar.gz` : null,
+          state: status.entryState,
+        },
+      ],
+    },
+  ]
+}
+
+/** 查找单个目录产物集，供删除与文件下载 handler 共享同一 fixture。 */
+export function artifactSetOf(
+  project: string,
+  pipeline: string,
+  number: number,
+  setId: number,
+): ArtifactSetItem | null {
+  return artifactSetsOf(project, pipeline, number).find((item) => item.set.id === setId) ?? null
+}
+
+/** 异步删除入队后立即从列表/下载面隐藏；返回 false 表示资源不存在。 */
+export function deleteArtifactSet(
+  project: string,
+  pipeline: string,
+  number: number,
+  setId: number,
+): boolean {
+  if (artifactSetOf(project, pipeline, number, setId) == null) return false
+  DELETED_ARTIFACT_SETS.add(artifactSetRef(project, pipeline, number, setId))
+  return true
 }
 
 // ---------------------------------------------------------------------------
