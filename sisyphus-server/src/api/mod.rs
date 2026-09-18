@@ -66,6 +66,7 @@ pub use docs::ApiDoc;
 use crate::api::error::ApiError;
 use crate::auth::LoginRateLimiter;
 pub use crate::config::ArtifactTransferLimits;
+use crate::config::LogArchiveBackend;
 use crate::engine::Engine;
 use crate::events::EventBus;
 use crate::grpc::SessionRegistry;
@@ -129,6 +130,8 @@ pub struct AppState {
     pub logs: SqliteLogStore,
     /// 任务终态日志归档（本地后端；旧 SQLite logs 仍并行可读）。
     pub(crate) log_archives: LocalLogArchiveStore,
+    /// 仅控制新归档写入目标；历史行仍按自身 backend 读取。
+    pub(crate) log_archive_backend: LogArchiveBackend,
     /// 产物字节存储（票 #74，ADR-0004）：Agent 上传端点（写）与下载端点
     /// （读）两消费面，布局 data/artifacts/<build_id>/<name>。
     pub artifacts: LocalDiskArtifactStore,
@@ -220,6 +223,7 @@ impl AppState {
                 .await?
                 .with_archive(log_archives.clone()),
             log_archives,
+            log_archive_backend: LogArchiveBackend::Local,
             artifacts: LocalDiskArtifactStore::new(data_dir.join(crate::config::ARTIFACTS_DIR)),
             artifact_meta: SqliteArtifactMetaRepo::new(pool.clone(), retention_days),
             deletions: crate::store::deletions::DeletionRepo::new(pool.clone()),
@@ -244,6 +248,19 @@ impl AppState {
     /// 注入可选 S3 客户端（启动校验通过后由 main 调用）。
     pub fn with_s3(mut self, s3: Option<S3Client>) -> Self {
         self.s3 = s3.map(Arc::new);
+        self.log_archive_backend = if self.s3.is_some() {
+            LogArchiveBackend::S3
+        } else {
+            LogArchiveBackend::Local
+        };
+        self.log_archives = self.log_archives.with_s3(self.s3.clone());
+        self.logs = self.logs.with_archive(self.log_archives.clone());
+        self
+    }
+
+    /// 配置层已确保 s3 仅在 S3 客户端存在时选择。
+    pub fn with_log_archive_backend(mut self, backend: LogArchiveBackend) -> Self {
+        self.log_archive_backend = backend;
         self
     }
 
@@ -300,6 +317,14 @@ pub fn router(state: AppState, web_override_dir: PathBuf) -> Router {
         .route(
             "/agent/log-archives/{job_id}/{attempt}",
             post(logs::agent_archive_upload),
+        )
+        .route(
+            "/agent/log-archives/{job_id}/{attempt}/upload-url",
+            post(logs::agent_archive_grant),
+        )
+        .route(
+            "/agent/log-archives/{job_id}/{attempt}/complete",
+            post(logs::agent_archive_complete),
         )
         .route(
             "/agent/artifacts/{job_id}/sets",

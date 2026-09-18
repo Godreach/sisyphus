@@ -46,6 +46,9 @@ struct Args {
     /// 抓取可关，仅限可信内网）
     #[arg(long)]
     metrics_auth: Option<bool>,
+    /// 新终态日志归档后端 local/s3（有 S3 时默认 s3）。
+    #[arg(long)]
+    log_archive_backend: Option<String>,
     /// 子命令（无子命令 = 默认 serve 行为，ADR-0010）。`admin create` 是
     /// headless 引导等价（票 B5-T8，setup wizard 的 CLI 形态）。
     #[command(subcommand)]
@@ -101,6 +104,7 @@ impl From<&Args> for Overrides {
             s3_secret_access_key: None,
             s3_path_style: None,
             s3_ca_path: None,
+            log_archive_backend: args.log_archive_backend.clone(),
         }
     }
 }
@@ -186,7 +190,9 @@ async fn main() {
                     "S3 后端已启用"
                 );
             }
-            state.with_s3(s3)
+            state
+                .with_s3(s3)
+                .with_log_archive_backend(config.log_archive_backend)
         }
         Err(e) => {
             tracing::error!(error = %e, "S3 后端启动校验失败");
@@ -261,11 +267,13 @@ async fn main() {
     let cleanup_pool = pool.clone();
     let cleanup_artifacts = config.data_dir.join(sisyphus_server::config::ARTIFACTS_DIR);
     let cleanup_retention = config.retention_days;
+    let cleanup_s3 = state.s3.clone();
     let cleanup_task = tokio::spawn(async move {
-        sisyphus_server::store::run_daily_cleanup(
+        sisyphus_server::store::run_daily_cleanup_with_s3(
             cleanup_pool,
             cleanup_artifacts,
             cleanup_retention,
+            cleanup_s3,
         )
         .await;
     });

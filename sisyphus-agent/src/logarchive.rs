@@ -271,6 +271,67 @@ impl LogArchiveIo for RealLogArchiveIo {
             "{}/api/v1/agent/log-archives/{job_id}/{attempt}",
             base.trim_end_matches('/')
         );
+        let mut grant = self
+            .client
+            .post(format!("{url}/upload-url"))
+            .json(&serde_json::json!({"index": &archive.index}));
+        if let Some(token) = &self.token {
+            grant = grant.bearer_auth(token);
+        }
+        let response = grant.send().await.map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Server 拒绝日志归档许可：HTTP {}",
+                response.status()
+            ));
+        }
+        #[derive(serde::Deserialize)]
+        struct Grant {
+            backend: String,
+            state: String,
+            url: Option<String>,
+        }
+        let grant: Grant = response.json().await.map_err(|e| e.to_string())?;
+        if grant.state == "ready" {
+            return Ok(());
+        }
+        if grant.backend == "s3" {
+            let put_url = grant.url.ok_or("日志归档 S3 许可缺少 URL")?;
+            let file = tokio::fs::File::open(&archive.path)
+                .await
+                .map_err(|e| e.to_string())?;
+            let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file));
+            let response = self
+                .client
+                .put(&put_url)
+                .header(
+                    reqwest::header::CONTENT_LENGTH,
+                    archive.index.compressed_bytes,
+                )
+                .body(body)
+                .send()
+                .await
+                .map_err(|_| "S3 日志归档上传传输失败".to_string())?;
+            if !response.status().is_success() {
+                return Err(format!("S3 日志归档上传失败：HTTP {}", response.status()));
+            }
+            let mut complete = self.client.post(format!("{url}/complete"));
+            if let Some(token) = &self.token {
+                complete = complete.bearer_auth(token);
+            }
+            let response = complete.send().await.map_err(|e| e.to_string())?;
+            return if response.status().is_success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Server 拒绝日志归档确认：HTTP {}",
+                    response.status()
+                ))
+            };
+        }
+        if grant.backend != "local" {
+            return Err("Server 返回未知日志归档后端".into());
+        }
         let file = tokio::fs::File::open(&archive.path)
             .await
             .map_err(|e| e.to_string())?;
@@ -338,6 +399,138 @@ pub(crate) fn spawn_retry_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn agent_uploads_log_to_temporary_s3_url_then_confirms_with_server() {
+        use axum::Router;
+        use axum::http::StatusCode;
+        use axum::routing::{post, put};
+        use std::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Seen(Arc<Mutex<Vec<(String, Vec<u8>)>>>);
+        let seen = Seen::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let grant_seen = seen.clone();
+        let put_seen = seen.clone();
+        let complete_seen = seen.clone();
+        let app = Router::new()
+            .route("/api/v1/agent/log-archives/{job}/{attempt}/upload-url", post(move |body: axum::body::Bytes| {
+                let seen = grant_seen.clone();
+                async move {
+                    seen.0.lock().unwrap().push(("grant".into(), body.to_vec()));
+                    axum::Json(serde_json::json!({
+                        "backend":"s3", "state":"pending", "url": format!("http://{addr}/s3/tmp/log.slog")
+                    }))
+                }
+            }))
+            .route("/s3/tmp/log.slog", put(move |body: axum::body::Bytes| {
+                let seen = put_seen.clone();
+                async move {
+                    seen.0.lock().unwrap().push(("put".into(), body.to_vec()));
+                    StatusCode::OK
+                }
+            }))
+            .route("/api/v1/agent/log-archives/{job}/{attempt}/complete", post(move || {
+                let seen = complete_seen.clone();
+                async move {
+                    seen.0.lock().unwrap().push(("complete".into(), Vec::new()));
+                    axum::Json(serde_json::json!({"state":"ready"}))
+                }
+            }));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let buffer = dir.path().join("events.jsonl");
+        std::fs::write(
+            &buffer,
+            b"{\"seq\":0,\"kind\":\"output\",\"stream\":0,\"data\":\"aGkK\"}\n",
+        )
+        .unwrap();
+        let archive = seal(
+            &buffer,
+            &dir.path().join("log.slog"),
+            &dir.path().join("log.json"),
+            "42",
+            1,
+        )
+        .unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let io = RealLogArchiveIo {
+            client,
+            api_url: Some(format!("http://{addr}")),
+            token: Some("sisa_test".into()),
+        };
+        io.upload("42", 1, &archive).await.expect("S3 直传确认");
+        let calls = seen.0.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["grant", "put", "complete"]
+        );
+        assert_eq!(calls[1].1, std::fs::read(&archive.path).unwrap());
+        let grant: serde_json::Value = serde_json::from_slice(&calls[0].1).unwrap();
+        assert_eq!(grant["index"]["sha256"], archive.index.sha256);
+    }
+
+    #[tokio::test]
+    async fn agent_keeps_streaming_to_server_when_log_backend_is_local() {
+        use axum::Router;
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use std::sync::Mutex;
+
+        let uploaded = Arc::new(Mutex::new(Vec::new()));
+        let seen = uploaded.clone();
+        let app = Router::new()
+            .route(
+                "/api/v1/agent/log-archives/{job}/{attempt}/upload-url",
+                post(|| async {
+                    axum::Json(serde_json::json!({"backend":"local", "state":"pending"}))
+                }),
+            )
+            .route(
+                "/api/v1/agent/log-archives/{job}/{attempt}",
+                post(move |body: axum::body::Bytes| {
+                    let seen = seen.clone();
+                    async move {
+                        *seen.lock().unwrap() = body.to_vec();
+                        StatusCode::OK
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let buffer = dir.path().join("events.jsonl");
+        std::fs::write(
+            &buffer,
+            b"{\"seq\":0,\"kind\":\"output\",\"stream\":0,\"data\":\"aGkK\"}\n",
+        )
+        .unwrap();
+        let archive = seal(
+            &buffer,
+            &dir.path().join("log.slog"),
+            &dir.path().join("log.json"),
+            "42",
+            1,
+        )
+        .unwrap();
+        let io = RealLogArchiveIo {
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            api_url: Some(format!("http://{addr}")),
+            token: Some("sisa_test".into()),
+        };
+        io.upload("42", 1, &archive).await.expect("本地流式归档");
+        assert_eq!(
+            *uploaded.lock().unwrap(),
+            std::fs::read(&archive.path).unwrap()
+        );
+    }
 
     #[test]
     fn seals_independent_frames_with_sparse_index() {

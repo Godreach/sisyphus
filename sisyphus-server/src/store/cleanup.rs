@@ -18,6 +18,7 @@
 
 use std::path::Path;
 
+use crate::storage::S3Client;
 use sqlx::SqlitePool;
 
 use super::StoreError;
@@ -34,16 +35,27 @@ pub async fn run_daily_cleanup(
     artifacts_root: std::path::PathBuf,
     retention_days: i64,
 ) {
+    run_daily_cleanup_with_s3(pool, artifacts_root, retention_days, None).await;
+}
+
+/// 生产清理器额外接受可选 S3；运行期故障只留积压，下一轮重试。
+pub async fn run_daily_cleanup_with_s3(
+    pool: SqlitePool,
+    artifacts_root: std::path::PathBuf,
+    retention_days: i64,
+    s3: Option<std::sync::Arc<S3Client>>,
+) {
     let mut ticker = tokio::time::interval(CLEANUP_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         // 首 tick 立即触发（interval 首 tick 即 now），等价「启动先跑一轮」。
         ticker.tick().await;
-        match sweep(
+        match sweep_with_s3(
             &pool,
             &artifacts_root,
             crate::store::now_ms(),
             retention_days,
+            s3.as_deref(),
         )
         .await
         {
@@ -89,8 +101,19 @@ pub async fn sweep(
     now: i64,
     retention_days: i64,
 ) -> Result<CleanupReport, StoreError> {
+    sweep_with_s3(pool, artifacts_root, now, retention_days, None).await
+}
+
+/// 同 [`sweep`]，并清理 S3 归档及中断后遗留的候选对象。
+pub async fn sweep_with_s3(
+    pool: &SqlitePool,
+    artifacts_root: &Path,
+    now: i64,
+    retention_days: i64,
+    s3: Option<&S3Client>,
+) -> Result<CleanupReport, StoreError> {
     let cutoff = now - retention_days.max(1) * 24 * 60 * 60 * 1000;
-    let mut report = purge_expired_archives(pool, cutoff).await?;
+    let mut report = purge_expired_archives(pool, cutoff, s3).await?;
     let build_ids = sqlx::query_scalar::<_, i64>(
         "SELECT build_id FROM (
              SELECT build_id, created_at AS last FROM logs
@@ -107,7 +130,7 @@ pub async fn sweep(
     .await?;
 
     for build_id in build_ids {
-        match purge_build(pool, artifacts_root, build_id).await {
+        match purge_build(pool, artifacts_root, build_id, s3).await {
             Ok(partial) => {
                 report.builds_purged += 1;
                 report.logs_deleted += partial.logs_deleted;
@@ -118,6 +141,21 @@ pub async fn sweep(
                 report.log_archive_files_deleted += partial.log_archive_files_deleted;
             }
             Err(e) => tracing::warn!(build_id, error = %e, "保留清理：构建数据裁剪失败"),
+        }
+    }
+    // 归档行可能已删，但迟到的 CopyObject 仍可在首次 DELETE 后生成对象。
+    // 保留候选 key 登记，后续每日扫描继续幂等删除（S3 不可用则下次重试）。
+    if let Some(s3) = s3 {
+        let orphan_keys = sqlx::query_scalar::<_, String>(
+            "SELECT c.key FROM log_archive_publish_candidates c
+             WHERE NOT EXISTS (SELECT 1 FROM log_archives a WHERE a.job_id=c.job_id AND a.attempt=c.attempt)",
+        )
+        .fetch_all(pool)
+        .await?;
+        for key in orphan_keys {
+            if let Err(error) = s3.delete_object(&key).await {
+                tracing::warn!(key, error = %error, "迟到的日志归档候选对象清理失败，保留登记待重试");
+            }
         }
     }
     // 批量 DELETE 后收缩 WAL（ADR-0004「定期 DELETE + PRAGMA
@@ -141,37 +179,107 @@ pub async fn sweep(
 async fn purge_expired_archives(
     pool: &SqlitePool,
     cutoff: i64,
+    s3: Option<&S3Client>,
 ) -> Result<CleanupReport, StoreError> {
-    let rows = sqlx::query_as::<_, (i64, i32, String, String, String)>(
-        "SELECT job_id, attempt, path, index_path, state FROM log_archives WHERE created_at < ?",
+    let rows = sqlx::query_as::<_, (i64, i32, String, String, String, String, Option<String>)>(
+        "SELECT job_id, attempt, path, index_path, state, backend, temp_path FROM log_archives WHERE created_at < ?",
     )
     .bind(cutoff)
     .fetch_all(pool)
     .await?;
     let mut report = CleanupReport::default();
-    for (job_id, attempt, path, index_path, state) in &rows {
-        for candidate in [path, index_path] {
-            match tokio::fs::remove_file(candidate).await {
-                Ok(()) => report.log_archive_files_deleted += 1,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(StoreError::Io(e)),
-            }
+    for (job_id, attempt, path, index_path, state, backend, temp_path) in &rows {
+        if !delete_archive_bytes(
+            pool,
+            ArchiveBytes {
+                job_id: *job_id,
+                attempt: *attempt,
+                backend,
+                path,
+                index_path,
+                temp_path: temp_path.as_deref(),
+            },
+            s3,
+            &mut report,
+        )
+        .await?
+        {
+            continue;
         }
         tracing::debug!(job_id, attempt, "已按 attempt 保留期删除日志归档");
         if state == "pending" {
             sqlx::query("UPDATE log_archives SET state = 'lost' WHERE job_id = ? AND attempt = ? AND state = 'pending'")
                 .bind(job_id).bind(attempt).execute(pool).await?;
+        } else if state == "ready" {
+            let deleted = sqlx::query(
+                "DELETE FROM log_archives WHERE job_id=? AND attempt=? AND state='ready'",
+            )
+            .bind(job_id)
+            .bind(attempt)
+            .execute(pool)
+            .await?;
+            report.log_archives_deleted += deleted.rows_affected() as i64;
         }
     }
-    if rows.iter().any(|(_, _, _, _, state)| state != "pending") {
-        let result =
-            sqlx::query("DELETE FROM log_archives WHERE created_at < ? AND state = 'ready'")
-                .bind(cutoff)
-                .execute(pool)
-                .await?;
-        report.log_archives_deleted = result.rows_affected() as i64;
-    }
     Ok(report)
+}
+
+struct ArchiveBytes<'a> {
+    job_id: i64,
+    attempt: i32,
+    backend: &'a str,
+    path: &'a str,
+    index_path: &'a str,
+    temp_path: Option<&'a str>,
+}
+
+async fn delete_archive_bytes(
+    pool: &SqlitePool,
+    archive: ArchiveBytes<'_>,
+    s3: Option<&S3Client>,
+    report: &mut CleanupReport,
+) -> Result<bool, StoreError> {
+    // 候选对象属于发布尝试，不属于行当前的后端：pending S3 改走 local
+    // 后也须先回收它们，不能因行级联删除而丢失最后的 S3 key 线索。
+    let candidates = sqlx::query_scalar::<_, String>(
+        "SELECT key FROM log_archive_publish_candidates WHERE job_id=? AND attempt=?",
+    )
+    .bind(archive.job_id)
+    .bind(archive.attempt)
+    .fetch_all(pool)
+    .await?;
+    if !candidates.is_empty() && s3.is_none() {
+        return Ok(false);
+    }
+    if let Some(s3) = s3 {
+        for key in &candidates {
+            if let Err(error) = s3.delete_object(key).await {
+                tracing::warn!(key, error = %error, "S3 日志归档清理失败，保留元数据待重试");
+                return Ok(false);
+            }
+        }
+    }
+    if archive.backend == "s3" {
+        let Some(s3) = s3 else { return Ok(false) };
+        for key in [archive.temp_path, Some(archive.path)]
+            .into_iter()
+            .flatten()
+        {
+            if let Err(error) = s3.delete_object(key).await {
+                tracing::warn!(key, error = %error, "S3 日志归档清理失败，保留元数据待重试");
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+    for candidate in [archive.path, archive.index_path] {
+        match tokio::fs::remove_file(candidate).await {
+            Ok(()) => report.log_archive_files_deleted += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(StoreError::Io(e)),
+        }
+    }
+    Ok(true)
 }
 
 /// 手动删构建的数据裁剪（REST DELETE 端点消费）：立即删除该构建的日志与
@@ -183,7 +291,17 @@ pub async fn delete_build_data(
     artifacts_root: &Path,
     build_id: i64,
 ) -> Result<CleanupReport, StoreError> {
-    purge_build(pool, artifacts_root, build_id).await
+    delete_build_data_with_s3(pool, artifacts_root, build_id, None).await
+}
+
+/// 手动删除构建时清理所有可用后端；S3 暂不可用的行保留供每日重试。
+pub async fn delete_build_data_with_s3(
+    pool: &SqlitePool,
+    artifacts_root: &Path,
+    build_id: i64,
+    s3: Option<&S3Client>,
+) -> Result<CleanupReport, StoreError> {
+    purge_build(pool, artifacts_root, build_id, s3).await
 }
 
 /// 单个构建的数据裁剪：删本地后端的磁盘产物文件 → 删 logs 行 + 本地产物
@@ -193,27 +311,39 @@ async fn purge_build(
     pool: &SqlitePool,
     artifacts_root: &Path,
     build_id: i64,
+    s3: Option<&S3Client>,
 ) -> Result<CleanupReport, StoreError> {
     let mut report = CleanupReport::default();
 
     // 归档正文与索引不在 artifacts/<build> 下，先按 job 归属取出并删除；
     // DB 行随后与旧 logs 一起事务删除，避免 ready/pending 文件永久泄漏。
-    let archives = sqlx::query_as::<_, (i64, String, String)>(
-        "SELECT a.job_id, a.path, a.index_path FROM log_archives a
+    let archives = sqlx::query_as::<_, (i64, i32, String, String, String, Option<String>)>(
+        "SELECT a.job_id, a.attempt, a.path, a.index_path, a.backend, a.temp_path FROM log_archives a
          JOIN jobs j ON j.id = a.job_id WHERE j.build_id = ?",
     )
     .bind(build_id)
     .fetch_all(pool)
     .await?;
-    for (job_id, path, index_path) in &archives {
-        for candidate in [path, index_path] {
-            match tokio::fs::remove_file(candidate).await {
-                Ok(()) => report.log_archive_files_deleted += 1,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(StoreError::Io(e)),
-            }
+    let mut cleaned = Vec::new();
+    for (job_id, attempt, path, index_path, backend, temp_path) in &archives {
+        if delete_archive_bytes(
+            pool,
+            ArchiveBytes {
+                job_id: *job_id,
+                attempt: *attempt,
+                backend,
+                path,
+                index_path,
+                temp_path: temp_path.as_deref(),
+            },
+            s3,
+            &mut report,
+        )
+        .await?
+        {
+            cleaned.push((*job_id, *attempt));
+            tracing::debug!(build_id, job_id, "已删除任务日志归档文件");
         }
-        tracing::debug!(build_id, job_id, "已删除任务日志归档文件");
     }
 
     // 产物字节先删。path 可能包含任务 attempt 隔离键，不能再由 public name
@@ -257,16 +387,19 @@ async fn purge_build(
         .bind(build_id)
         .execute(&mut *tx)
         .await?;
-    let archives_deleted = sqlx::query(
-        "DELETE FROM log_archives WHERE job_id IN (SELECT id FROM jobs WHERE build_id = ?)",
-    )
-    .bind(build_id)
-    .execute(&mut *tx)
-    .await?;
+    let mut archives_deleted = 0;
+    for (job_id, attempt) in cleaned {
+        archives_deleted += sqlx::query("DELETE FROM log_archives WHERE job_id=? AND attempt=?")
+            .bind(job_id)
+            .bind(attempt)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    }
     tx.commit().await?;
     report.logs_deleted = logs.rows_affected() as i64;
     report.artifact_meta_deleted = metas.rows_affected() as i64;
-    report.log_archives_deleted = archives_deleted.rows_affected() as i64;
+    report.log_archives_deleted = archives_deleted as i64;
 
     // 空目录回收：仅当目录已空（全部产物删净）才移除；非空/不存在忽略——
     // 绝不误删非本构建数据（目录即 build_id，命名空间隔离）。

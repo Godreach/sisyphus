@@ -39,7 +39,10 @@ pub use agents::{AgentVersion, PendingUpgrade};
 pub use artifacts::{
     ARTIFACT_NAME_MAX, LocalDiskArtifactStore, SqliteArtifactMetaRepo, validate_artifact_name,
 };
-pub use cleanup::{CLEANUP_INTERVAL, CleanupReport, delete_build_data, run_daily_cleanup, sweep};
+pub use cleanup::{
+    CLEANUP_INTERVAL, CleanupReport, delete_build_data, delete_build_data_with_s3,
+    run_daily_cleanup, run_daily_cleanup_with_s3, sweep,
+};
 pub(crate) use log_archives::{ArchiveIndex, LocalLogArchiveStore};
 pub use logs::SqliteLogStore;
 pub use s3_identity::{S3BackendIdentity, S3IdentityRepo};
@@ -334,6 +337,8 @@ mod tests {
         // 模拟旧库升级：抹掉迁移标记与业务表，使下一次 bootstrap 见到待应用迁移。
         let pool = open_raw_pool_for_test(dir.path()).await;
         for stmt in [
+            "DROP TABLE log_archive_publish_candidates",
+            "DROP TABLE log_archives",
             "DROP TABLE artifact_deletions",
             "DROP TABLE artifact_set_entries",
             "DROP TABLE artifact_sets",

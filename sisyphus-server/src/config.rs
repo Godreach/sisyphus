@@ -102,6 +102,15 @@ pub enum LogFormat {
     Pretty,
 }
 
+/// 新终态归档的目标；既有归档始终按行记录的后端读取。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogArchiveBackend {
+    /// Server 数据目录里的本地归档。
+    Local,
+    /// Agent 预签名直传的 S3 归档。
+    S3,
+}
+
 /// 合并后的启动配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -134,6 +143,8 @@ pub struct Config {
     pub metrics_auth: bool,
     /// 可选自托管 S3 兼容后端（ADR-0026：未配置时制品库入口不可用）。
     pub s3: Option<S3Config>,
+    /// 新终态日志归档后端；无 S3 时只能 local，配置 S3 后默认 s3。
+    pub log_archive_backend: LogArchiveBackend,
     /// 产物大文件传输限额与分段参数。
     pub artifact_transfer_limits: ArtifactTransferLimits,
 }
@@ -174,6 +185,8 @@ pub struct Overrides {
     pub s3_path_style: Option<String>,
     /// S3 TLS CA 路径覆盖。
     pub s3_ca_path: Option<String>,
+    /// 日志归档后端覆盖（local/s3）。
+    pub log_archive_backend: Option<String>,
 }
 
 /// 覆盖层与文件层的保留期天数统一合并：CLI > env > 文件 > 默认（票 #78，
@@ -320,6 +333,8 @@ pub struct MetricsFile {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorageFile {
+    /// 新终态日志归档后端（local/s3；缺省随 S3 配置选择）。
+    pub log_archive_backend: Option<String>,
     /// 单文件产物上限（GiB）。
     pub artifact_single_file_limit_gib: Option<u64>,
     /// 单任务一次发布合计上限（GiB）。
@@ -493,6 +508,8 @@ multipart_threshold_mib = 100
 multipart_part_size_mib = 64
 copy_object_limit_mib = 5120
 copy_part_size_mib = 512
+# 已配置 S3 时日志默认直传；如需 Server 本地归档，取消注释下一行。
+# log_archive_backend = "local"
 
 # 可选自托管 S3 兼容后端（ADR-0026）。整段注释 = 未配置：Server 与既有本地产物
 # 照常工作，一级制品库入口提示不可用。任一必填字段生效则必须配齐，错误配置
@@ -558,6 +575,7 @@ impl Overrides {
             s3_secret_access_key: get("SISYPHUS_S3_SECRET_ACCESS_KEY"),
             s3_path_style: get("SISYPHUS_S3_PATH_STYLE"),
             s3_ca_path: get("SISYPHUS_S3_CA_PATH"),
+            log_archive_backend: get("SISYPHUS_LOG_ARCHIVE_BACKEND"),
         }
     }
 }
@@ -663,6 +681,27 @@ pub fn merge(
         None => file.metrics.auth.unwrap_or(DEFAULT_METRICS_AUTH),
     };
     let s3 = merge_s3(&data_dir, env, file)?;
+    let log_archive_backend = match pick(
+        &cli.log_archive_backend,
+        &env.log_archive_backend,
+        file.storage.log_archive_backend.as_deref(),
+    )
+    .as_deref()
+    {
+        None if s3.is_some() => LogArchiveBackend::S3,
+        None | Some("local") => LogArchiveBackend::Local,
+        Some("s3") if s3.is_some() => LogArchiveBackend::S3,
+        Some("s3") => {
+            return Err(ConfigError::InvalidLogValue(
+                "log_archive_backend=s3 需要配置 S3".into(),
+            ));
+        }
+        Some(other) => {
+            return Err(ConfigError::InvalidLogValue(format!(
+                "log_archive_backend={other}，期望 local/s3"
+            )));
+        }
+    };
     let artifact_transfer_limits = merge_artifact_transfer_limits(&file.storage)?;
 
     Ok(Config {
@@ -678,6 +717,7 @@ pub fn merge(
         retention_days,
         metrics_auth,
         s3,
+        log_archive_backend,
         artifact_transfer_limits,
     })
 }

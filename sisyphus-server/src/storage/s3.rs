@@ -304,16 +304,41 @@ impl S3Client {
             .unwrap_or(0))
     }
 
-    async fn get_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, StorageError> {
+    pub(crate) async fn get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        let expected = end
+            .checked_sub(start)
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| StorageError::Protocol("Range GET 范围非法".into()))?;
         let range = format!("bytes={start}-{end}");
-        let resp = self
-            .send("GET", Some(key), &[], &[("Range", &range)], b"")
+        let mut resp = self
+            .send_response("GET", Some(key), &[], &[("Range", &range)], b"")
             .await?;
-        if resp.status == 206 || resp.status == 200 {
-            Ok(resp.body)
-        } else {
-            Err(map_s3_status(resp.status, &resp.body, "Range GET"))
+        let status = resp.status().as_u16();
+        if status != 206 {
+            if status == 200 {
+                return Err(StorageError::Protocol("Range GET 未返回 206".into()));
+            }
+            let body = resp.bytes().await.map_err(StorageError::from_reqwest)?;
+            return Err(map_s3_status(status, &body, "Range GET"));
         }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(StorageError::from_reqwest)? {
+            if bytes.len() as u64 + chunk.len() as u64 > expected {
+                return Err(StorageError::Protocol(
+                    "Range GET 返回字节超出请求范围".into(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.len() as u64 != expected {
+            return Err(StorageError::Protocol("Range GET 返回字节不足".into()));
+        }
+        Ok(bytes)
     }
 
     /// 删除对象（404 视为已清理）。
