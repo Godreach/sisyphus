@@ -11,6 +11,7 @@
 
 import type {
   AgentResponse,
+  ArchiveStatus,
   ArtifactResponse,
   ArtifactSetsResponse,
   AuditEventDto,
@@ -37,6 +38,7 @@ import type {
   VersionDto,
   WorkspaceEntry,
 } from '@/api/types'
+import type { LogStreamEvent } from '@/api/sse'
 import type { Job as ModelJob, Pipeline as ModelPipelineDef } from '@/model/pipeline'
 
 /** 种子随机（mulberry32）：全量 fixture 确定性可复现。 */
@@ -1147,6 +1149,14 @@ export const AGENTS: AgentResponse[] = [
   },
   {
     name: 'build-04',
+    log_buffer: {
+      bytes: 19e9,
+      capacity_bytes: 20e9,
+      pending_archives: 1,
+      pressured: true,
+      last_error: 'archive retry deferred',
+      reported_at: NOW - 2 * 3600e3,
+    },
     online: false,
     disabled: false,
     system_labels: ['linux', 'docker'],
@@ -1226,6 +1236,176 @@ export const AGENTS: AgentResponse[] = [
     updated_at: NOW - 30e3,
   },
 ]
+
+// ---------------------------------------------------------------------------
+// 日志归档（票 #142，ADR-0027）：状态与任务执行结果独立。fixture 同时覆盖
+// pending / ready / lost，供构建日志页按同一 status 端点选择直播、归档回放
+// 或永久丢失提示。project_name 仅用于 mock 内部按 REST 路径定位，不进响应。
+// ---------------------------------------------------------------------------
+
+interface FixtureArchiveStatus extends ArchiveStatus {
+  project_name: string
+}
+
+const LOG_ARCHIVES: FixtureArchiveStatus[] = [
+  {
+    project_name: 'web-app',
+    pipeline_name: 'main',
+    build_number: 10,
+    job_name: 'unit-test',
+    job_id: 10001,
+    attempt: 1,
+    state: 'pending',
+    backend: 'local',
+    size: 18_432,
+    last_seq: 23,
+    execution_finished_at: NOW - 25 * 60e3,
+    lost_reason: null,
+    lost_at: null,
+    agent_name: 'build-04',
+    last_seen_at: NOW - 2 * 3600e3,
+  },
+  {
+    project_name: 'web-app',
+    pipeline_name: 'main',
+    build_number: 11,
+    job_name: 'compile',
+    job_id: 10002,
+    attempt: 1,
+    state: 'ready',
+    backend: 'local',
+    size: 32_768,
+    last_seq: 4,
+    execution_finished_at: NOW - 90 * 60e3,
+    lost_reason: null,
+    lost_at: null,
+    agent_name: 'build-01',
+    last_seen_at: NOW - 15e3,
+  },
+  {
+    project_name: 'web-app',
+    pipeline_name: 'main',
+    build_number: 9,
+    job_name: 'lint',
+    job_id: 10003,
+    attempt: 1,
+    state: 'lost',
+    backend: 'local',
+    size: 9_216,
+    last_seq: 17,
+    execution_finished_at: NOW - 4 * 3600e3,
+    lost_reason: 'retention_expired',
+    lost_at: NOW - 30 * 60e3,
+    agent_name: 'build-04',
+    last_seen_at: NOW - 2 * 3600e3,
+  },
+  {
+    project_name: 'web-app',
+    pipeline_name: 'main',
+    build_number: 8,
+    job_name: 'audit',
+    job_id: 10004,
+    attempt: 1,
+    state: 'pending',
+    backend: 'local',
+    size: 4_096,
+    last_seq: 8,
+    execution_finished_at: NOW - 6 * 3600e3,
+    lost_reason: null,
+    lost_at: null,
+    agent_name: 'build-07',
+    last_seen_at: NOW - 30e3,
+  },
+]
+
+function archiveResponse(row: FixtureArchiveStatus): ArchiveStatus {
+  const { project_name: _projectName, ...status } = row
+  return { ...status }
+}
+
+/** 单任务 attempt 的独立归档状态；未知 attempt 与 Server 的 JSON null 同形。 */
+export function archiveStatusOf(
+  project: string,
+  pipeline: string,
+  buildNumber: number,
+  job: string,
+  attempt: number,
+): ArchiveStatus | null {
+  const row = LOG_ARCHIVES.find(
+    (item) =>
+      item.project_name === project &&
+      item.pipeline_name === pipeline &&
+      item.build_number === buildNumber &&
+      item.job_name === job &&
+      item.attempt === attempt,
+  )
+  return row == null ? null : archiveResponse(row)
+}
+
+/** 管理积压：只列 pending/lost，pending 优先，每页固定最多 500 条。 */
+export function logArchiveBacklog(agent: string | null, offset: number): ArchiveStatus[] {
+  return LOG_ARCHIVES
+    .filter(
+      (item) =>
+        (item.state === 'pending' || item.state === 'lost') &&
+        (agent == null || item.agent_name === agent),
+    )
+    .sort((left, right) => {
+      if (left.state !== right.state) return left.state === 'pending' ? -1 : 1
+      return (right.execution_finished_at ?? 0) - (left.execution_finished_at ?? 0)
+    })
+    .slice(offset, offset + 500)
+    .map(archiveResponse)
+}
+
+/** 仅 pending 可标记 lost；状态变更与审计写入保持一个同步临界区。 */
+export function markLogArchiveLost(
+  jobId: number,
+  attempt: number,
+  reason: string,
+  actor: string,
+): ArchiveStatus | null {
+  const row = LOG_ARCHIVES.find((item) => item.job_id === jobId && item.attempt === attempt)
+  if (row == null || row.state !== 'pending') return null
+  row.state = 'lost'
+  row.lost_reason = reason
+  row.lost_at = Date.now()
+  insertAudit(actor, 'log_archive_lost', null, { job_id: jobId, attempt, reason })
+  return archiveResponse(row)
+}
+
+type ArchivedLogEvent = Exclude<LogStreamEvent, { type: 'log_unavailable' }>
+
+const READY_ARCHIVE_LOG: ArchivedLogEvent[] = [
+  {
+    type: 'step_start',
+    seq: 1,
+    step: 0,
+    name: 'compile',
+    command: 'make compile',
+    started_at: NOW - 90 * 60e3,
+  },
+  {
+    type: 'output',
+    seq: 2,
+    stream: 'stdout',
+    text: 'archive replay: compile succeeded',
+  },
+  { type: 'step_end', seq: 3, step: 0, exit_code: 0, duration_ms: 12_000 },
+  { type: 'job_end', seq: 4, status: 'succeeded', exit_code: 0 },
+]
+
+/** ready fixture 的归档正文仍从现有 SSE seam 回放，不另造浏览器下载协议。 */
+export function archivedLogHistory(
+  project: string,
+  pipeline: string,
+  buildNumber: number,
+  job: string,
+  attempt: number,
+): ArchivedLogEvent[] {
+  const status = archiveStatusOf(project, pipeline, buildNumber, job, attempt)
+  return status?.state === 'ready' ? READY_ARCHIVE_LOG : []
+}
 
 // ---------------------------------------------------------------------------
 // 升级包（spec #111，票 #76/B5-T4 契约同形，ADR-0017）：升级页上传/全量/

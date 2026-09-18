@@ -219,7 +219,10 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 空态：流已开但无任何输出（历史为空且未推块——如无日志的终态构建）。 -->
-    <div v-else-if="!hasLog" class="build-log-status">
+    <div
+      v-else-if="!hasLog && archive?.state !== 'pending' && archive?.state !== 'lost'"
+      class="build-log-status"
+    >
       {{ t('buildLog.noLog') }}
     </div>
 

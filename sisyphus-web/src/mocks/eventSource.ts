@@ -8,6 +8,7 @@
 //   degraded 退化态），不吞调用侧的退化标注纪律。
 
 import { logHistory, subscribeLogs } from './engine'
+import { archivedLogHistory } from './db'
 
 const STREAM_URL_RE =
   /^\/api\/v1\/projects\/([^/]+)\/pipelines\/([^/]+)\/builds\/(\d+)\/jobs\/([^/]+)\/attempts\/(\d+)\/logs\/stream$/
@@ -45,10 +46,29 @@ export class MockEventSource {
       this.readyState = MockEventSource.OPEN
       this.dispatch('open', '')
       // 先补历史（seq > from，模拟 DB 回放），再订阅实时尾随。
-      for (const event of logHistory(project as string, pipeline as string, Number(number), job as string, Number(attempt))) {
+      const dynamicHistory = logHistory(
+        project as string,
+        pipeline as string,
+        Number(number),
+        job as string,
+        Number(attempt),
+      )
+      const history = dynamicHistory.length > 0
+        ? dynamicHistory
+        : archivedLogHistory(
+            project as string,
+            pipeline as string,
+            Number(number),
+            job as string,
+            Number(attempt),
+          )
+      for (const event of history) {
         if (this.closed) return
         if (event.seq > from) this.dispatch(event.type, JSON.stringify(event))
       }
+      // 历史回放以 job_end 收尾时，客户端会在事件回调内同步 close；此时
+      // 不再挂实时订阅，避免把已结束的归档观看者泄漏到订阅集合。
+      if (this.closed) return
       this.unsubscribe = subscribeLogs(
         project as string,
         pipeline as string,

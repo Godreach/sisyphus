@@ -507,6 +507,7 @@
     "next": "Next"
   },
   "auditEvent": {
+    "log_archive_lost": "Log archive marked permanently lost",
     "login_success": "Login success",
     "login_failure": "Login failure",
     "logout": "Logout",

@@ -916,6 +916,7 @@ export interface PutSecretRequest {
  *  同序）。`AuditEventDto` 由本数组派生（`as const` + `typeof`），新增事件
  *  只改这一处——避免「union 与数组并列、改一处漏另一处」的 Shotgun Surgery。 */
 export const AUDIT_EVENTS = [
+  'log_archive_lost',
   'login_success',
   'login_failure',
   'logout',

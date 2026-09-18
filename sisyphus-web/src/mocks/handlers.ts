@@ -59,12 +59,15 @@ function jsonError(status: number, code: string, message: string) {
 }
 
 /** 校验失败 422（server projects.rs validate 同形：detail.errors 错误清单）。 */
-function validationError(errors: { path: string; message: string }[]) {
+function validationError(
+  errors: { path: string; message: string }[],
+  message = '项目输入校验失败',
+) {
   // 契约序列化只取 path/message（调用方传 ValidationError 等超集形态时剥掉
   // 规则码等前端内部字段——响应形态与 server ValidationIssue 严格同形）。
   const items = errors.map(({ path, message }) => ({ path, message }))
   return HttpResponse.json(
-    { code: 'VALIDATION_FAILED', message: '项目输入校验失败', detail: { errors: items } },
+    { code: 'VALIDATION_FAILED', message, detail: { errors: items } },
     { status: 422 },
   )
 }
@@ -1081,6 +1084,78 @@ export function createHandlers(options: MockHandlerOptions) {
       if (adminDenied != null) return adminDenied
       return jsonError(409, 'CONFLICT', '未配置 S3 后端，无法测试连接')
     }),
+
+    // ----- 日志归档状态（ADR-0027；项目 viewer 可读，状态与正文 API 分离）-----
+    logArchiveStatus: http.get(
+      '/api/v1/projects/:name/pipelines/:pipeline/builds/:number/jobs/:job/attempts/:attempt/logs/status',
+      ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const name = String(params.name)
+        const user = sessionUser(request) ?? 'admin'
+        if (db.projectRoleOf(user, name) == null) {
+          return jsonError(404, 'NOT_FOUND', '项目不存在')
+        }
+        const pipeline = String(params.pipeline)
+        const buildNumber = Number(params.number)
+        const job = String(params.job)
+        const attempt = Number(params.attempt)
+        const detail = dynamicDetail(name, pipeline, buildNumber)
+          ?? db.buildDetailOf(name, pipeline, buildNumber)
+        if (detail == null) return jsonError(404, 'NOT_FOUND', '构建不存在')
+        const jobExists = detail.stages.some((stage) =>
+          stage.jobs.some((item) => item.name === job && item.attempt === attempt),
+        )
+        if (!jobExists) {
+          return jsonError(404, 'NOT_FOUND', `任务 ${job}（attempt ${attempt}）不存在`)
+        }
+        return HttpResponse.json(
+          db.archiveStatusOf(
+            name,
+            pipeline,
+            buildNumber,
+            job,
+            attempt,
+          ),
+        )
+      },
+    ),
+
+    logArchiveBacklog: http.get('/api/v1/log-archives', ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const adminDenied = globalAdminGuard(request)
+      if (adminDenied != null) return adminDenied
+      const url = new URL(request.url)
+      const agent = url.searchParams.get('agent')
+      const offset = Number(url.searchParams.get('offset') ?? '0')
+      return HttpResponse.json(db.logArchiveBacklog(agent, offset))
+    }),
+
+    logArchiveMarkLost: http.post(
+      '/api/v1/log-archives/:jobId/:attempt/lost',
+      async ({ request, params }) => {
+        const denied = guard(options, request)
+        if (denied != null) return denied
+        const adminDenied = globalAdminGuard(request)
+        if (adminDenied != null) return adminDenied
+        const body = (await request.json()) as { reason?: unknown }
+        const reason = typeof body.reason === 'string' ? body.reason.trim() : ''
+        if (reason === '' || new TextEncoder().encode(reason).byteLength > 2000) {
+          return validationError([], '必须填写丢失原因（最多 2000 字节）')
+        }
+        const status = db.markLogArchiveLost(
+          Number(params.jobId),
+          Number(params.attempt),
+          reason,
+          sessionUser(request) ?? 'admin',
+        )
+        if (status == null) {
+          return jsonError(409, 'CONFLICT', '只有待归档日志可以标记永久丢失')
+        }
+        return HttpResponse.json(status)
+      },
+    ),
 
     // ----- Agent 清单（后端 api/agents.rs；构建机页消费）-----
     agentsList: http.get('/api/v1/agents', async ({ request }) => {
