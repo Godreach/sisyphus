@@ -56,6 +56,15 @@ export function mulberry32(seed: number): () => number {
 /** fixture 时间基线（模块加载时刻；列表按相对时间展示，无需绝对对齐）。 */
 const NOW = Date.now()
 
+/** demo 制品库共用的脱敏 S3 后端 fixture（浏览器演示与页面测试同源）。 */
+export const DEMO_S3_BACKEND = {
+  endpoint: 'https://s3.demo.invalid',
+  region: 'demo',
+  bucket: 'sisyphus-demo',
+  prefix: 'artifacts',
+  path_style: true,
+} as const
+
 // ---------------------------------------------------------------------------
 // 用户（登录 mock：admin/admin123、alice/alice123、bob/bob123）
 // ---------------------------------------------------------------------------

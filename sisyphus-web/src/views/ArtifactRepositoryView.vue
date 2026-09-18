@@ -11,6 +11,7 @@ import { RefreshOutline } from '@vicons/ionicons5'
 
 import { artifactDeletionsApi, artifactRepositoryApi, projectsApi, s3ConfigApi, storageConsistencyApi } from '@/api/client'
 import { describeSubmitError } from '@/api/errors'
+import { formatDateTime } from '@/utils/format'
 import type {
   ArtifactRepositoryItem, ArtifactRepositoryResponse, ArtifactRepositoryStatus,
   ConsistencyReport, DeletionJobResponse, ProjectResponse, S3TestReportDto,
@@ -64,6 +65,8 @@ async function checkConsistency(deepHash = false): Promise<void> {
   try {
     consistency.value = await storageConsistencyApi.check(deepHash)
   } catch (err) {
+    // 失败结果不能与上一次成功报告并存，避免时间/积压/finding 看起来像本次检查的结果。
+    consistency.value = null
     consistencyError.value = describeSubmitError(err)
   } finally {
     consistencyLoading.value = false
@@ -229,10 +232,16 @@ async function testConnection(): Promise<void> {
         </div>
         <n-alert v-if="consistencyError" type="error">{{ consistencyError }}</n-alert>
         <template v-if="consistency">
+          <dl class="consistency-meta" data-testid="consistency-report">
+            <div><dt>{{ t('artifacts.consistencyCheckedAt') }}</dt><dd>{{ formatDateTime(consistency.checked_at) }}</dd></div>
+            <div><dt>{{ t('artifacts.consistencyBackend') }}</dt><dd>{{ consistency.backend }}</dd></div>
+            <div><dt>{{ t('artifacts.consistencyMode') }}</dt><dd>{{ consistency.deep_hash ? t('artifacts.consistencyDeepMode') : t('artifacts.consistencyNormalMode') }}</dd></div>
+          </dl>
           <p class="consistency-summary">{{ t('artifacts.consistencySummary', { n: consistency.findings.length }) }}</p>
           <p>{{ t('artifacts.consistencyBacklog', { uploads: consistency.backlog.pending_uploads, multipart: consistency.backlog.pending_multipart_uploads, deletes: consistency.backlog.pending_deletions, archives: consistency.backlog.pending_archives }) }}</p>
-          <ul v-if="consistency.findings.length" class="consistency-findings"><li v-for="finding in consistency.findings" :key="`${finding.kind}:${finding.key}`"><strong>{{ finding.kind }}</strong> — {{ finding.key }}<span v-if="finding.detail">: {{ finding.detail }}</span></li></ul>
-          <n-alert v-if="consistency.errors.length" type="warning">{{ consistency.errors.join('；') }}</n-alert>
+          <ul v-if="consistency.findings.length" class="consistency-findings" data-testid="consistency-findings"><li v-for="finding in consistency.findings" :key="`${finding.kind}:${finding.key}`"><strong>{{ finding.kind }}</strong> — {{ finding.key }}<span v-if="finding.detail">: {{ finding.detail }}</span></li></ul>
+          <n-alert v-if="consistency.errors.length" type="warning" data-testid="consistency-errors"><ul class="consistency-errors"><li v-for="error in consistency.errors" :key="error">{{ error }}</li></ul>
+          </n-alert>
         </template>
       </section>
       <section class="artifact-browser" data-testid="artifact-browser">
@@ -307,7 +316,12 @@ async function testConnection(): Promise<void> {
 .consistency-panel { margin-top: 24px; padding: 16px; border: 1px solid var(--n-border-color, #e5e7eb); border-radius: 8px; }
 .consistency-actions { display: flex; gap: 8px; }
 .consistency-summary { font-weight: 600; }
+.consistency-meta { display: grid; gap: 6px 24px; grid-template-columns: auto 1fr; margin: 12px 0; }
+.consistency-meta > div { display: contents; }
+.consistency-meta dt { color: var(--n-text-color-3, #86868b); }
+.consistency-meta dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .consistency-findings { max-height: 240px; overflow: auto; padding-left: 20px; }
+.consistency-errors { margin: 0; padding-left: 20px; }
 .artifact-filters { display: grid; grid-template-columns: repeat(3, minmax(140px, 1fr)) auto; gap: 10px; margin-bottom: 16px; }
 .artifact-item-name { display: flex; align-items: center; gap: 8px; }
 .artifact-sha { font-size: 11px; }

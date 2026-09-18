@@ -50,7 +50,8 @@ export const SESSION_COOKIE = 'sisyphus_mock_session'
 export interface MockHandlerOptions {
   /** 浏览器 worker：校验 mock 会话 cookie（未登录 401）；vitest node：关闭。 */
   authEnforced: boolean
-  /** 浏览器 demo 提供脱敏的可用对象存储 fixture，让制品库管理面完整可体验。 */
+  /** 浏览器 demo 使用已配置的 S3 fixture；node 保留未配置的入口契约，
+   * 一致性端点仍可在 node 中独立验证。 */
   demo?: boolean
 }
 
@@ -1051,38 +1052,108 @@ export function createHandlers(options: MockHandlerOptions) {
     artifactRepository: http.get('/api/v1/artifact-repository', ({ request }) => {
       const denied = guard(options, request)
       if (denied != null) return denied
-      if (options.demo) {
-        return HttpResponse.json({
-          available: true,
-          backend: {
-            endpoint: 'https://s3.demo.invalid',
-            region: 'demo',
-            bucket: 'sisyphus-demo',
-            prefix: 'artifacts',
-            path_style: true,
-          },
-        })
-      }
-      return HttpResponse.json({ available: false, reason: 's3_unconfigured' })
+      if (!options.demo) return HttpResponse.json({ available: false, reason: 's3_unconfigured' })
+      return HttpResponse.json({
+        available: true,
+        backend: db.DEMO_S3_BACKEND,
+      })
     }),
     artifactRepositoryItems: http.get('/api/v1/artifact-repository/artifacts', ({ request }) => {
       const denied = guard(options, request)
       if (denied != null) return denied
-      return jsonError(409, 'CONFLICT', '未配置 S3 后端，制品库不可用')
+      if (!options.demo) return jsonError(409, 'CONFLICT', '未配置 S3 后端，制品库不可用')
+      return HttpResponse.json({
+        items: [{
+          kind: 'set_entry',
+          id: 1,
+          name: 'app.tgz',
+          set_name: 'release',
+          path: 'dist/app.tgz',
+          size: 4096,
+          sha256: 'b'.repeat(64),
+          executable: false,
+          backend: 's3',
+          availability: 'ready',
+          created_at: Date.now() - 3600e3,
+          source: { project: 'web-app', pipeline: 'release', build: 12, job: 'package', attempt: 1 },
+          download_url: '/api/v1/projects/web-app/pipelines/release/builds/12/artifact-sets/1/file?path=dist%2Fapp.tgz',
+        }],
+        total: 1,
+        page: Number(new URL(request.url).searchParams.get('page') ?? 1),
+        limit: Number(new URL(request.url).searchParams.get('limit') ?? 50),
+        legacy_local_count: 0,
+      })
+    }),
+    storageConsistency: http.get('/api/v1/storage/consistency', ({ request }) => {
+      const denied = guard(options, request)
+      if (denied != null) return denied
+      const adminDenied = globalAdminGuard(request)
+      if (adminDenied != null) return adminDenied
+      const query = new URL(request.url).searchParams
+      if (query.get('_mock_error') === '1') {
+        return jsonError(500, 'INTERNAL', '存储一致性检查失败（mock 错误态演示）')
+      }
+      const deepHash = query.get('deep_hash') === 'true'
+      return HttpResponse.json(deepHash ? {
+        checked_at: Date.now(),
+        deep_hash: true,
+        backend: 's3',
+        findings: [{
+          kind: 'hash_mismatch',
+          resource: 'artifact',
+          backend: 's3',
+          key: 'demo/release/12/package/app.tgz',
+          expected_size: 4096,
+          actual_size: 4096,
+          detail: '对象哈希校验失败',
+        }],
+        backlog: {
+          pending_uploads: 2,
+          pending_multipart_uploads: 1,
+          pending_deletions: 1,
+          pending_archives: 1,
+        },
+        errors: ['归档积压等待重试'],
+      } : {
+        checked_at: Date.now(),
+        deep_hash: false,
+        backend: 's3',
+        findings: [],
+        backlog: {
+          pending_uploads: 0,
+          pending_multipart_uploads: 0,
+          pending_deletions: 0,
+          pending_archives: 0,
+        },
+        errors: [],
+      })
     }),
     s3Config: http.get('/api/v1/config/s3', ({ request }) => {
       const denied = guard(options, request)
       if (denied != null) return denied
       const adminDenied = globalAdminGuard(request)
       if (adminDenied != null) return adminDenied
-      return HttpResponse.json({ configured: false })
+      if (!options.demo) return HttpResponse.json({ configured: false })
+      return HttpResponse.json({ configured: true, config: db.DEMO_S3_BACKEND })
     }),
     s3TestConnection: http.post('/api/v1/config/s3/test-connection', ({ request }) => {
       const denied = guard(options, request)
       if (denied != null) return denied
       const adminDenied = globalAdminGuard(request)
       if (adminDenied != null) return adminDenied
-      return jsonError(409, 'CONFLICT', '未配置 S3 后端，无法测试连接')
+      if (!options.demo) return jsonError(409, 'CONFLICT', '未配置 S3 后端，无法测试连接')
+      return HttpResponse.json({
+        ok: true,
+        checks: [
+          { op: 'put', ok: true },
+          { op: 'head', ok: true },
+          { op: 'range_get', ok: true },
+          { op: 'copy', ok: true },
+          { op: 'multipart_upload', ok: true },
+          { op: 'multipart_copy', ok: true },
+          { op: 'delete', ok: true },
+        ],
+      })
     }),
 
     // ----- 日志归档状态（ADR-0027；项目 viewer 可读，状态与正文 API 分离）-----
