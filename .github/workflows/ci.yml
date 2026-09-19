@@ -155,8 +155,8 @@ jobs:
         target:
           - { runner: ubuntu-latest,   os: linux,   arch: x86_64 }
           - { runner: ubuntu-24.04-arm, os: linux,   arch: aarch64 }
-          - { runner: macos-13,         os: macos,   arch: x86_64 }
-          - { runner: macos-14,         os: macos,   arch: aarch64 }
+          - { runner: macos-15-intel,   os: macos,   arch: x86_64 }
+          - { runner: macos-15,         os: macos,   arch: aarch64 }
           - { runner: windows-latest,   os: windows, arch: x86_64 }
           - { runner: windows-11-arm,   os: windows, arch: aarch64 }
     runs-on: ${{ matrix.target.runner }}
@@ -180,4 +180,3 @@ jobs:
 
       - name: Build（release，原生）
         run: cargo build --release -p sisyphus-${{ matrix.crate }}
-

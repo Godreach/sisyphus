@@ -8,8 +8,8 @@ name: release
 # + libsqlite3-sys bundled）、agent 也有 C 依赖（aws-lc-sys via reqwest→rustls
 # →aws-lc-rs），ADR-0022 明确本地 Windows→Linux 交叉编译被 C 工具链阻断，
 # 6 目标原生构建由本 workflow 验证。仓库为 public → 6 个原生 runner 全免费：
-# ubuntu-latest(x86_64) / ubuntu-24.04-arm(aarch64) / macos-13(x86_64) /
-# macos-14(aarch64) / windows-latest(x86_64) / windows-11-arm(aarch64 preview)。
+# ubuntu-latest(x86_64) / ubuntu-24.04-arm(aarch64) / macos-15-intel(x86_64) /
+# macos-15(aarch64) / windows-latest(x86_64) / windows-11-arm(aarch64 preview)。
 #
 # 前端产物 git 不提交（sisyphus-web/.gitignore）：server 各构建 job 先经
 # frontend job 的 web-dist artifact 注入真实 dist（rust-embed 编译期内嵌），
@@ -72,8 +72,8 @@ jobs:
         target:
           - { runner: ubuntu-latest,   os: linux,   arch: x86_64,  ext: tar.gz }
           - { runner: ubuntu-24.04-arm, os: linux,   arch: aarch64, ext: tar.gz }
-          - { runner: macos-13,         os: macos,   arch: x86_64,  ext: tar.gz }
-          - { runner: macos-14,         os: macos,   arch: aarch64, ext: tar.gz }
+          - { runner: macos-15-intel,   os: macos,   arch: x86_64,  ext: tar.gz }
+          - { runner: macos-15,         os: macos,   arch: aarch64, ext: tar.gz }
           - { runner: windows-latest,   os: windows, arch: x86_64,  ext: zip }
           - { runner: windows-11-arm,   os: windows, arch: aarch64, ext: zip }
     runs-on: ${{ matrix.target.runner }}
