@@ -235,6 +235,7 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
       expect(wrapper.findAll('[data-testid^="pipeline-row-"]').length).toBeGreaterThanOrEqual(3),
     )
     const card = wrapper.get('.project-pipelines-card')
+    expect(card.get('.ppl-col-avg').text()).toBe('平均耗时')
     expect(card.find('[data-testid="pipeline-row-main"]').exists()).toBe(true)
     expect(card.find('[data-testid="pipeline-row-release"]').exists()).toBe(true)
     expect(card.find('[data-testid="pipeline-row-nightly"]').exists()).toBe(true)

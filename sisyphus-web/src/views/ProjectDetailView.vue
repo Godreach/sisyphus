@@ -631,7 +631,7 @@ function openNewPipeline(): void {
           <span class="ppl-col-name">{{ t('plines.colPipeline') }}</span>
           <span class="ppl-col-status">{{ t('plines.colStatus') }}</span>
           <span class="ppl-col-rate">{{ t('plines.colRate') }}</span>
-          <span class="ppl-col-avg">{{ t('plines.colAvg') }}</span>
+          <span class="ppl-col-avg">{{ t('plines.avgDuration') }}</span>
           <span class="ppl-col-latest">{{ t('plines.latestRun') }}</span>
           <span class="ppl-col-action" />
         </div>
