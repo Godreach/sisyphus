@@ -1,5 +1,5 @@
-// 项目删除 demo 闭环（票 #139）：组件使用真实 api client + MSW node server，
-// 不替换 global fetch，证明页面流程无需真实 sisyphus-server。
+// 项目清理状态 demo（票 #139）：组件使用真实 api client + MSW node server，
+// 不替换 global fetch，验证外部发起的清理任务可在页面查看状态。
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
@@ -15,7 +15,7 @@ import ProjectsView from '@/views/ProjectsView.vue'
 
 const PROJECT_NAME = 'page-delete-demo'
 
-describe('ProjectsView 项目删除 demo 闭环（票 #139）', () => {
+describe('ProjectsView 项目清理状态 demo（票 #139）', () => {
   let pinia: Pinia
   let router: Router
   let wrapper: VueWrapper | null
@@ -79,29 +79,21 @@ describe('ProjectsView 项目删除 demo 闭环（票 #139）', () => {
     server.close()
   })
 
-  it('删除后立即隐藏项目，并经队列刷新展示 queued/running/completed', async () => {
+  it('列表卡片无删除入口，清理状态可经队列刷新展示 queued/running/completed', async () => {
     wrapper = mount(Host, {
       attachTo: document.body,
       global: { plugins: [pinia, router, i18n] },
     })
     await vi.waitFor(() => expect(wrapper?.text()).toContain(PROJECT_NAME))
+    expect(wrapper.find(`[data-testid="delete-project-${PROJECT_NAME}"]`).exists()).toBe(false)
 
-    await wrapper.get(`[data-testid="delete-project-${PROJECT_NAME}"]`).trigger('click')
-    await vi.waitFor(() => expect(document.querySelector('.n-popconfirm__action')).toBeTruthy())
-    const actions = document.querySelectorAll('.n-popconfirm__action button')
-    await (actions[actions.length - 1] as HTMLElement).click()
-
-    await vi.waitFor(() => expect(
-      wrapper?.findAll('.project-card').some((card) => card.text().includes(PROJECT_NAME)),
-    ).toBe(false))
-    await vi.waitFor(() => expect(wrapper?.find('li[data-testid^="project-deletion-"]').exists()).toBe(true))
+    const deleted = await fetch(`/api/v1/projects/${PROJECT_NAME}`, { method: 'DELETE' })
+    expect(deleted.status).toBe(202)
     const deletion = () => wrapper?.get('li[data-testid^="project-deletion-"]')
-    expect(deletion()?.text()).toContain('排队中')
-
     const refresh = () => wrapper?.get('[data-testid="project-deletions"] button')
     await refresh()?.trigger('click')
     await vi.waitFor(() => expect(deletionListResponses).toBe(1))
-    expect(deletion()?.text()).toContain('排队中')
+    await vi.waitFor(() => expect(deletion()?.text()).toContain('排队中'))
     await refresh()?.trigger('click')
     await vi.waitFor(() => expect(deletionListResponses).toBe(2))
     await vi.waitFor(() => expect(deletion()?.text()).toContain('删除中'))

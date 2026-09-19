@@ -29,7 +29,6 @@ import {
   NEmpty,
   NAlert,
   NIcon,
-  NPopconfirm,
   useMessage,
   type FormInst,
   type FormRules,
@@ -51,7 +50,6 @@ const isAdmin = computed(() => auth.user?.isAdmin === true)
 const projects = ref<ProjectResponse[] | null>(null)
 const listError = ref('')
 const projectDeletions = ref<DeletionJobResponse[]>([])
-const deletingProject = ref<string | null>(null)
 const deletionListError = ref('')
 const loadingDeletions = ref(false)
 const retryingProjectDeletion = ref<number | null>(null)
@@ -124,6 +122,7 @@ watch(
 onMounted(() => {
   consumeCreateQuery()
   void load()
+  if (isAdmin.value && route.query.deletion) void loadProjectDeletions()
 })
 
 /** 加载项目列表（按可见性过滤）。 */
@@ -134,20 +133,6 @@ async function load(): Promise<void> {
   } catch (err) {
     projects.value = null
     listError.value = describeSubmitError(err)
-  }
-}
-
-async function deleteProject(project: ProjectResponse): Promise<void> {
-  deletingProject.value = project.name
-  try {
-    const job = await projectsApi.remove(project.name)
-    projects.value = projects.value?.filter((item) => item.id !== project.id) ?? []
-    projectDeletions.value = [job, ...projectDeletions.value.filter((item) => item.id !== job.id)]
-    message.success(t('projects.deletionQueued'))
-  } catch (err) {
-    message.error(describeSubmitError(err))
-  } finally {
-    deletingProject.value = null
   }
 }
 
@@ -447,28 +432,7 @@ function onScmTypeChange(v: ScmTypeDto): void {
             <span class="project-card-name">{{ p.name }}</span>
           </template>
           <template #header-extra>
-            <div class="project-card-extra">
-              <n-tag size="small" :bordered="false" round>{{ p.scm_type }}</n-tag>
-              <n-popconfirm
-                v-if="isAdmin"
-                :positive-text="t('projects.delete')"
-                :negative-text="t('common.cancel')"
-                @positive-click="deleteProject(p)"
-              >
-                <template #trigger>
-                  <n-button
-                    size="tiny"
-                    type="error"
-                    :loading="deletingProject === p.name"
-                    :data-testid="`delete-project-${p.name}`"
-                    @click.stop
-                  >
-                    {{ t('projects.delete') }}
-                  </n-button>
-                </template>
-                {{ t('projects.deleteConfirm', { name: p.name }) }}
-              </n-popconfirm>
-            </div>
+            <n-tag size="small" :bordered="false" round>{{ p.scm_type }}</n-tag>
           </template>
           <p v-if="p.scm_url" class="project-card-meta mono">{{ p.scm_url }}</p>
           <p v-else class="project-card-meta">{{ t('projects.scmNone') }}</p>
@@ -531,7 +495,6 @@ function onScmTypeChange(v: ScmTypeDto): void {
 </template>
 
 <style scoped>
-.project-card-extra,
 .project-deletions header,
 .project-deletions li {
   display: flex;

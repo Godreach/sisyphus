@@ -32,6 +32,7 @@ import {
   NFormItem,
   NInput,
   NModal,
+  NPopconfirm,
   NSelect,
   NSkeleton,
   useMessage,
@@ -62,14 +63,17 @@ import type {
 } from '@/api/types'
 import PipelineCreateDialog from '@/components/PipelineCreateDialog.vue'
 import { useManageableProjects } from '@/composables/useManageableProjects'
+import { useAuthStore } from '@/stores/auth'
 import { returnSourceQuery } from '@/utils/returnSource'
 
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+const auth = useAuthStore()
 
 const projectName = computed(() => String(route.params.name ?? ''))
+const isGlobalAdmin = computed(() => auth.user?.isAdmin === true)
 const creationPermission = useManageableProjects(() => projectName.value)
 const canCreatePipeline = computed(() => creationPermission.status.value === 'ready' && creationPermission.projects.value.some(p => p.name === projectName.value))
 
@@ -92,6 +96,23 @@ const project = ref<ProjectResponse | null>(null)
 const loading = ref(true)
 const loadError = ref('')
 const notFound = ref(false)
+const deletingProject = ref(false)
+const deleteError = ref('')
+
+async function deleteProject(): Promise<void> {
+  if (!isGlobalAdmin.value || !project.value || deletingProject.value) return
+  deletingProject.value = true
+  deleteError.value = ''
+  try {
+    const job = await projectsApi.remove(project.value.name)
+    message.success(t('projects.deletionQueued'))
+    await router.push({ name: 'projects', query: { deletion: String(job.id) } })
+  } catch (err) {
+    deleteError.value = describeSubmitError(err)
+  } finally {
+    deletingProject.value = false
+  }
+}
 
 async function loadProject(): Promise<void> {
   loading.value = true
@@ -886,6 +907,29 @@ function openNewPipeline(): void {
       </template>
     </section>
 
+    <!-- 删除项目仅全局管理员可操作；在详情页集中展示后果与二次确认。 -->
+    <section v-if="isGlobalAdmin" class="sisy-card project-danger-card" data-testid="project-danger-zone">
+      <div class="card-header">
+        <h2 class="card-title">{{ t('projects.dangerZone') }}</h2>
+      </div>
+      <div class="project-danger-content">
+        <p>{{ t('projects.deleteWarning') }}</p>
+        <n-alert v-if="deleteError" type="error" :title="deleteError" role="alert" />
+        <n-popconfirm
+          :positive-text="t('projects.delete')"
+          :negative-text="t('common.cancel')"
+          @positive-click="deleteProject"
+        >
+          <template #trigger>
+            <n-button type="error" :loading="deletingProject" data-testid="delete-project-btn">
+              {{ t('projects.delete') }}
+            </n-button>
+          </template>
+          {{ t('projects.deleteConfirm', { name: project.name }) }}
+        </n-popconfirm>
+      </div>
+    </section>
+
     <!-- 编辑项目弹窗（契约先行 PATCH；项目 admin 档）。 -->
     <n-modal
       v-model:show="editOpen"
@@ -940,6 +984,26 @@ function openNewPipeline(): void {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.project-danger-card {
+  border: 1px solid var(--sisy-color-danger);
+}
+
+.project-danger-card .card-title {
+  color: var(--sisy-color-danger-text);
+}
+
+.project-danger-content {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+  padding: 0 20px 20px;
+}
+
+.project-danger-content p {
+  margin: 0;
+  color: var(--sisy-color-text-secondary);
 }
 
 .pdl-skeleton-row {

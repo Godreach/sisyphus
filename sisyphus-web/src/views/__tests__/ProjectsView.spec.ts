@@ -82,42 +82,14 @@ describe('ProjectsView 项目列表 + 新建', () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain('demo'))
 
     const pushSpy = vi.spyOn(router, 'push')
+    expect(wrapper.find('[data-testid="delete-project-demo"]').exists()).toBe(false)
+    expect(wrapper.find('.project-card button').exists()).toBe(false)
     // 卡片布局：点击项目卡（NCard 整体可点）进详情。
     await wrapper.get('.project-card').trigger('click')
     expect(pushSpy).toHaveBeenCalledWith({ name: 'project-detail', params: { name: 'demo' } })
 
     const [url] = fetchMock.mock.calls[0] as [string]
     expect(url).toBe('/api/v1/projects')
-    wrapper.unmount()
-  })
-
-  it('全局管理员确认删除项目后立即移出项目卡并显示异步清理状态', async () => {
-    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input)
-      const method = init?.method ?? 'GET'
-      if (url === '/api/v1/projects' && method === 'GET') {
-        return jsonResponse(200, [project(1, 'demo', 'git', 'https://x/a.git')])
-      }
-      if (url === '/api/v1/project-deletions' && method === 'GET') {
-        return jsonResponse(200, { items: [] })
-      }
-      if (url === '/api/v1/projects/demo' && method === 'DELETE') {
-        return jsonResponse(202, { id: 71, project_id: 1, project_name: 'demo', scope: 'project', state: 'queued', pipeline_name: null, build_number: null, set_id: null, attempts: 0, last_error: null, created_at: 1, updated_at: 1 })
-      }
-      return jsonResponse(404, { code: 'NOT_FOUND', message: `no mock for ${url}` })
-    })
-    const wrapper = mountView()
-    await vi.waitFor(() => expect(wrapper.text()).toContain('demo'))
-
-    await wrapper.get('[data-testid="delete-project-demo"]').trigger('click')
-    await vi.waitFor(() => expect(document.querySelector('.n-popconfirm__action')).toBeTruthy())
-    const actions = document.querySelectorAll('.n-popconfirm__action button')
-    await (actions[actions.length - 1] as HTMLElement).click()
-
-    await vi.waitFor(() => expect(wrapper.findAll('.project-card')).toHaveLength(0))
-    expect(wrapper.get('[data-testid="project-deletion-71"]').text()).toContain('demo')
-    expect(wrapper.get('[data-testid="project-deletion-71"]').text()).toContain('排队中')
-    expect(fetchMock.mock.calls.some((call) => call[0] === '/api/v1/projects/demo' && call[1]?.method === 'DELETE')).toBe(true)
     wrapper.unmount()
   })
 
@@ -144,6 +116,21 @@ describe('ProjectsView 项目列表 + 新建', () => {
 
     await vi.waitFor(() => expect(wrapper.get('[data-testid="project-deletion-72"]').text()).toContain('排队中'))
     expect(fetchMock.mock.calls.some((call) => call[0] === '/api/v1/project-deletions/72/retry' && call[1]?.method === 'POST')).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('从项目详情删除后进入项目库时自动加载清理状态', async () => {
+    await router.replace('/projects?deletion=71')
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/v1/projects') return jsonResponse(200, [])
+      if (String(input) === '/api/v1/project-deletions') {
+        return jsonResponse(200, { items: [{ id: 71, project_id: 1, project_name: 'demo', scope: 'project', state: 'queued', pipeline_name: null, build_number: null, set_id: null, attempts: 0, last_error: null, created_at: 1, updated_at: 1 }] })
+      }
+      return jsonResponse(404, { code: 'NOT_FOUND', message: 'not found' })
+    })
+    const wrapper = mountView()
+    await vi.waitFor(() => expect(wrapper.get('[data-testid="project-deletion-71"]').text()).toContain('demo'))
+    expect(wrapper.get('[data-testid="project-deletion-71"]').text()).toContain('排队中')
     wrapper.unmount()
   })
 

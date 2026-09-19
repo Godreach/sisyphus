@@ -21,6 +21,7 @@ import { http, HttpResponse } from 'msw'
 import ProjectDetailView from '@/views/ProjectDetailView.vue'
 import { i18n, setLocale } from '@/i18n'
 import { server } from '@/mocks/node'
+import { useAuthStore } from '@/stores/auth'
 
 const BASE = '/api/v1/projects/web-app'
 
@@ -189,6 +190,61 @@ describe('ProjectDetailView 项目详情（票 #108 定稿）', () => {
     expect(meta.text()).toContain('main')
     expect(meta.text()).toContain('仓库 URL')
     expect(meta.text()).toContain('默认分支')
+  })
+
+  it('全局管理员在详情页看到危险提示，确认后删除并返回清理状态页', async () => {
+    useAuthStore().setAuthed({ username: 'admin', isAdmin: true })
+    let deleteCalls = 0
+    server.use(
+      http.delete(BASE, () => {
+        deleteCalls += 1
+        return HttpResponse.json({ id: 71, project_id: 1, project_name: 'web-app', scope: 'project', state: 'queued', pipeline_name: null, build_number: null, set_id: null, attempts: 0, last_error: null, created_at: 1, updated_at: 1 }, { status: 202 })
+      }),
+    )
+
+    wrapper = await mountAt('/projects/web-app')
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="project-danger-zone"]').exists()).toBe(true))
+    expect(wrapper.get('[data-testid="project-danger-zone"]').text()).toContain('危险操作')
+    expect(wrapper.get('[data-testid="project-danger-zone"]').text()).toContain('无法撤销')
+
+    await wrapper.get('[data-testid="delete-project-btn"]').trigger('click')
+    await vi.waitFor(() => expect(document.querySelector('.n-popconfirm__action')).toBeTruthy())
+    expect(document.querySelector('.n-popconfirm')?.textContent).toContain('web-app')
+    const actions = document.querySelectorAll('.n-popconfirm__action button')
+    await (actions[0] as HTMLElement).click()
+    expect(deleteCalls).toBe(0)
+
+    await wrapper.get('[data-testid="delete-project-btn"]').trigger('click')
+    await vi.waitFor(() => expect(document.querySelector('.n-popconfirm__action')).toBeTruthy())
+    const confirmActions = document.querySelectorAll('.n-popconfirm__action button')
+    await (confirmActions[confirmActions.length - 1] as HTMLElement).click()
+    await vi.waitFor(() => expect(deleteCalls).toBe(1))
+    await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('projects'))
+    expect(router.currentRoute.value.query.deletion).toBe('71')
+    await toastWith('项目已冻结')
+  })
+
+  it('非全局管理员在项目详情页看不到删除入口', async () => {
+    useAuthStore().setAuthed({ username: 'alice', isAdmin: false })
+    wrapper = await mountAt('/projects/web-app')
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="project-title"]').exists()).toBe(true))
+    expect(wrapper.find('[data-testid="project-danger-zone"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="delete-project-btn"]').exists()).toBe(false)
+  })
+
+  it('项目删除被拒绝时留在详情页并显示原因', async () => {
+    useAuthStore().setAuthed({ username: 'admin', isAdmin: true })
+    server.use(
+      http.delete(BASE, () => HttpResponse.json({ code: 'CONFLICT', message: '项目仍有排队或运行中的构建' }, { status: 409 })),
+    )
+    wrapper = await mountAt('/projects/web-app')
+    await vi.waitFor(() => expect(wrapper.find('[data-testid="delete-project-btn"]').exists()).toBe(true))
+    await wrapper.get('[data-testid="delete-project-btn"]').trigger('click')
+    await vi.waitFor(() => expect(document.querySelector('.n-popconfirm__action')).toBeTruthy())
+    const actions = document.querySelectorAll('.n-popconfirm__action button')
+    await (actions[actions.length - 1] as HTMLElement).click()
+    await vi.waitFor(() => expect(wrapper.get('[data-testid="project-danger-zone"]').text()).toContain('项目仍有排队或运行中的构建'))
+    expect(router.currentRoute.value.name).toBe('project-detail')
   })
 
   it('项目不可见：404 同形「不存在或无权访问」+ 返回项目列表入口', async () => {
